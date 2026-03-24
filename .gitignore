@@ -1,0 +1,36 @@
+# Binaries
+/vpn-config
+/vless-tun
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go coverage and profiles
+*.out
+*.prof
+
+# Generated local state
+.cache/
+configs/local.json
+configs/generated/
+
+# Generated local agent runtime
+.agents/
+.claude/
+.codex/
+.local/
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Task board runtime
+.task-board/logs
