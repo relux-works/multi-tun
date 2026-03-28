@@ -52,7 +52,7 @@ Build local CLIs and agent guidance that can:
   - `system_proxy` on macOS when unprivileged TUN bring-up is not available
 - For `tun` mode on macOS, support privileged launch strategies:
   - `sudo` / direct process execution
-  - `launchd` system daemon management for persistent real-TUN sessions
+  - shared `vpn-core` daemon management for persistent real-TUN sessions
 
 ### CLI
 
@@ -69,7 +69,8 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun inspect-profiles`: parse local AnyConnect XML profiles and expose server entries plus bypass-relevant flags
 - `openconnect-tun run`: authenticate with `openconnect --authenticate`, optionally using `vpn-auth` only as the external-browser automation helper, then start OpenConnect in either `full` or `split-include` mode
 - `openconnect-tun reconnect`: replace the active OpenConnect session in one command
-- `openconnect-tun helper install|status|uninstall`: manage the one-time privileged helper used for passwordless post-SSO connect/stop flows
+- `vpn-core install|status|uninstall`: manage the shared privileged daemon used for passwordless post-SSO connect/stop flows and privileged `sing-box` TUN lifecycle
+- `openconnect-tun helper install|status|uninstall`: compatibility wrapper around `vpn-core`
 - `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
 - `openconnect-tun stop`: stop the active OpenConnect process cleanly
 

@@ -15,6 +15,7 @@ import (
 
 	"multi-tun/internal/config"
 	"multi-tun/internal/model"
+	"multi-tun/internal/vpncore"
 )
 
 const (
@@ -25,8 +26,19 @@ const (
 )
 
 var (
-	execLookPath = exec.LookPath
-	execCommand  = exec.Command
+	execLookPath            = exec.LookPath
+	execCommand             = exec.Command
+	launchdPIDSession       = launchdPID
+	stopLaunchdSessionFunc  = stopLaunchdSession
+	vpnCoreAvailableSession = func() bool {
+		return vpncore.Available(vpncore.DefaultServiceConfig())
+	}
+	vpnCoreSpawnDetachedSession = func(command []string, logPath string, setPGID bool) (int, error) {
+		return vpncore.SpawnDetached(vpncore.DefaultServiceConfig(), command, "", logPath, setPGID)
+	}
+	vpnCoreSignalSession = func(pid int, signal string, group bool) error {
+		return vpncore.Signal(vpncore.DefaultServiceConfig(), pid, signal, group)
+	}
 )
 
 type StartOptions struct {
@@ -104,9 +116,9 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 
 	var release func() error
 	switch launchMode {
-	case config.LaunchModeLaunchd:
+	case config.LaunchModeHelper:
 		_ = logFile.Close()
-		pid, err := startWithLaunchd(session, executable)
+		pid, err := startWithVPNCore(session, executable)
 		if err != nil {
 			return CurrentSession{}, err
 		}
@@ -176,8 +188,16 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 	}
 
 	switch current.LaunchMode {
+	case config.LaunchModeHelper:
+		if err := stopHelperSession(current, force, timeout); err != nil {
+			return CurrentSession{}, "", err
+		}
+		if err := ClearCurrent(cacheDir); err != nil {
+			return CurrentSession{}, "", err
+		}
+		return current, "stopped", nil
 	case config.LaunchModeLaunchd:
-		if err := stopLaunchdSession(current, timeout); err != nil {
+		if err := stopLaunchdSessionFunc(current, timeout); err != nil {
 			return CurrentSession{}, "", err
 		}
 		if err := ClearCurrent(cacheDir); err != nil {
@@ -247,7 +267,7 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 		return false, current.PID, nil
 	}
 
-	pid, err := launchdPID(current.LaunchLabel)
+	pid, err := launchdPIDSession(current.LaunchLabel)
 	if err != nil {
 		return false, current.PID, err
 	}
@@ -332,8 +352,10 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 
 func stopStartedSession(current CurrentSession) error {
 	switch current.LaunchMode {
+	case config.LaunchModeHelper:
+		return killHelperSession(current)
 	case config.LaunchModeLaunchd:
-		return stopLaunchdSession(current, 5*time.Second)
+		return stopLaunchdSessionFunc(current, 1500*time.Millisecond)
 	default:
 		return signalGroup(current.PID, syscall.SIGKILL)
 	}
@@ -349,7 +371,7 @@ func resolveLaunchMode(renderMode string, launch config.PrivilegedLaunchConfig) 
 		switch mode {
 		case config.LaunchModeAuto:
 			return config.LaunchModeDirect, nil
-		case config.LaunchModeDirect, config.LaunchModeSudo:
+		case config.LaunchModeDirect, config.LaunchModeSudo, config.LaunchModeHelper:
 			return mode, nil
 		case config.LaunchModeLaunchd:
 			return "", fmt.Errorf("render.privileged_launch.mode=launchd is only supported in tun mode")
@@ -360,17 +382,20 @@ func resolveLaunchMode(renderMode string, launch config.PrivilegedLaunchConfig) 
 
 	switch mode {
 	case config.LaunchModeAuto:
+		if vpnCoreAvailableSession() {
+			return config.LaunchModeHelper, nil
+		}
 		if os.Geteuid() == 0 {
 			return config.LaunchModeDirect, nil
 		}
 		return config.LaunchModeSudo, nil
-	case config.LaunchModeDirect, config.LaunchModeSudo:
+	case config.LaunchModeDirect, config.LaunchModeSudo, config.LaunchModeHelper:
 		return mode, nil
 	case config.LaunchModeLaunchd:
 		if runtime.GOOS != "darwin" {
 			return "", fmt.Errorf("render.privileged_launch.mode=launchd is only supported on macOS")
 		}
-		return mode, nil
+		return config.LaunchModeHelper, nil
 	default:
 		return "", fmt.Errorf("unsupported launch mode %q", mode)
 	}

@@ -67,6 +67,8 @@ vless-tun render
 Use this companion CLI when you need to inspect Cisco AnyConnect / ASA state, resolve real ASA profile targets, and stage OpenConnect routing experiments next to `vless-tun`.
 
 ```bash
+vpn-core status
+vpn-core install
 openconnect-tun status
 openconnect-tun helper status
 openconnect-tun helper install
@@ -92,7 +94,9 @@ cisco-dump inspect --session-id 20260326T144914Z
 Operational notes:
 
 - `openconnect-tun` keeps its own runtime state under `~/.cache/openconnect-tun`, with session logs in `~/.cache/openconnect-tun/sessions` and the current session pointer in `~/.cache/openconnect-tun/runtime/current-session.json`. This is intentionally separate from `~/.cache/vless-tun`.
-- `openconnect-tun helper install` performs the one-time privileged setup for autonomous runs. It installs a root LaunchDaemon that exposes a user-owned unix socket, so later `start` / `reconnect` / `stop` prefer the helper automatically and only fall back to `sudo` when the helper is absent.
+- `vpn-core install` performs the one-time privileged setup for autonomous runs. It installs a shared root LaunchDaemon that exposes a user-owned unix socket, so later `openconnect-tun` and `vless-tun` commands can reuse the same trusted backend without repeated `sudo`.
+- Existing installs of the legacy `works.relux.openconnect-tun-helper` daemon are auto-detected for compatibility. A fresh `vpn-core install` replaces that legacy helper with the shared core service.
+- `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
 - `--profile` resolves against local AnyConnect XML `HostEntry` values and automatically deduplicates the same server repeated across `/opt/cisco/...` and `~/Downloads/...`.
 - the canonical lifecycle commands are now `start`, `reconnect`, `status`, and `stop`; `run`, `connect`, and `disconnect` remain as compatibility aliases.
 - `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. Current Corp bootstrap convention is fully keychain-backed: `auth.username_keychain_account=corp-vpn/username` and `auth.password_keychain_account=corp-vpn/password`. Plain `auth.username` remains as a compatibility fallback. `totp_secret_keychain_account` stays optional and is intentionally not wired by default.
@@ -101,7 +105,7 @@ Operational notes:
 - `cisco-dump` keeps its own runtime state under `~/.cache/cisco-dump`, with session logs in `~/.cache/cisco-dump/sessions`, the current session pointer in `~/.cache/cisco-dump/runtime/current-session.json`, mirrored Cisco logs and cache artifacts under each session directory, tracked Cisco per-pid `lsof` snapshots, all-loopback TCP snapshots from `lsof`/`netstat`, and optional localhost loopback pcaps via `tcpdump`.
 - when a `cisco-dump` session stops with a loopback pcap present, it now also derives `ocsc-timeline.txt` and `ocsc-summary.txt` from AnyConnect OCSC loopback traffic. `cisco-dump inspect --session-id ...` can re-run that decoder on an older captured session.
 - live `start` now emits compact `auth_stage:` updates in the terminal during authentication instead of forcing you to tail the session log for every auth transition. The full detailed auth log still stays in the session log file.
-- live `start` now resolves the privileged backend automatically: helper first when `openconnect-tun helper install` has been completed, otherwise the old `sudo -v` + `sudo -n` path so the privileged password prompt still does not compete with the cookie being piped into `--cookie-on-stdin`.
+- live `start` now resolves the privileged backend automatically: shared `vpn-core` first when it is installed, otherwise the old `sudo -v` + `sudo -n` path so the privileged password prompt still does not compete with the cookie being piped into `--cookie-on-stdin`.
 - `--mode full` uses the stock `vpnc-script`, so OpenConnect will own default route and global DNS. Treat it as a smoke-test path, not a coexistence-safe mode.
 - `--mode split-include` uses `vpn-slice`. On macOS that means scoped `/etc/resolver/<domain>` files for VPN DNS instead of replacing the global resolver stack, which is the direction we want for Corp coexistence next to `vless-tun`.
 
@@ -167,10 +171,11 @@ In `render.mode=system_proxy`, `start` starts a local `mixed` inbound and lets `
 
 In `render.mode=tun`, `start` now supports privileged macOS launch backends through `render.privileged_launch`:
 
-- `auto`: resolve to `sudo` for TUN as a regular user and `direct` when already root
+- `auto`: resolve to shared `vpn-core` when it is installed, otherwise `sudo` for TUN as a regular user and `direct` when already root
 - `sudo`: run `sudo sing-box run -c ...` after caching credentials with `sudo -v`
 - `direct`: run `sing-box` directly; intended for already-root environments
-- `launchd`: install/update a system LaunchDaemon and manage the TUN session through `launchctl`
+- `helper`: spawn and stop root `sing-box` through the shared `vpn-core` daemon
+- `launchd`: compatibility alias for `helper`; the long-lived LaunchDaemon now belongs to `vpn-core`, not to each `sing-box` session
 
 ### `vless-tun reconnect`
 
@@ -199,7 +204,7 @@ This is a heuristic runtime status, not a control plane.
 
 ### `vless-tun diagnose`
 
-Prints a focused runtime diagnostic view for the current launch backend. When `render.privileged_launch.mode=launchd`, it checks the configured LaunchDaemon label and reports the current `launchd` state and PID without requiring you to remember the raw `launchctl print ...` command.
+Prints a focused runtime diagnostic view for the current launch backend. When `render.privileged_launch.mode=helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket and daemon PID.
 
 ### `vless-tun stop`
 
@@ -240,24 +245,22 @@ Important fields:
 - `render.proxy_listen_port`: local listen port for `system_proxy` mode
 - `render.interface_name`: TUN interface name for `tun` mode
 - `render.tun_addresses`: TUN addresses for `tun` mode
-- `render.privileged_launch.mode`: `auto`, `sudo`, `direct`, or `launchd`
-- `render.privileged_launch.label`: LaunchDaemon label used when `mode=launchd`
-- `render.privileged_launch.plist_path`: plist destination used when `mode=launchd`
+- `render.privileged_launch.mode`: `auto`, `sudo`, `direct`, `helper`, or `launchd`
+- `render.privileged_launch.label`: legacy LaunchDaemon label field kept for compatibility; the shared daemon now uses `works.relux.vpn-core`
+- `render.privileged_launch.plist_path`: legacy plist field kept for compatibility; the shared daemon now uses `/Library/LaunchDaemons/works.relux.vpn-core.plist`
 - `render.bypass_suffixes`: domains that should go `direct`; set `[]` for full-tunnel bring-up
 - `render.proxy_dns`: upstream DNS endpoint for proxied traffic
 
 ### Full TUN on macOS
 
-Example config fragment for a real TUN session managed by `launchd`:
+Example config fragment for a real TUN session managed by the shared `vpn-core` daemon:
 
 ```json
 {
   "render": {
     "mode": "tun",
     "privileged_launch": {
-      "mode": "launchd",
-      "label": "works.relux.vless-tun",
-      "plist_path": "/Library/LaunchDaemons/works.relux.vless-tun.plist"
+      "mode": "helper"
     }
   }
 }
@@ -266,6 +269,7 @@ Example config fragment for a real TUN session managed by `launchd`:
 Then run:
 
 ```bash
+vpn-core install
 vless-tun reconnect --refresh
 vless-tun status
 ```
@@ -286,7 +290,7 @@ go build -o cisco-dump ./cmd/cisco-dump
 - `reconnect` is the "apply latest config" path: it rereads local config, refreshes the subscription by default, rerenders, and replaces the current session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
-- On macOS the default render mode is still `system_proxy` for low-friction bring-up, but `tun` now works through `render.privileged_launch`.
+- On macOS the default render mode is still `system_proxy` for low-friction bring-up, but `tun` now works through `render.privileged_launch` with the shared `vpn-core` backend.
 - Generated config now includes `route.default_domain_resolver`, which `sing-box 1.13.x` expects as part of the DNS resolver migration path.
 - Every `start` gets its own timestamped log file so later debugging has a stable artifact even if the next session behaves differently.
 - The bypass rule is intentionally domain-suffix based because the original user requirement was `*.ru`. If later you want IP or community rulesets, extend the renderer rather than hardcoding provider-specific blobs.

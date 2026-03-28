@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"multi-tun/internal/openconnect"
@@ -35,7 +36,7 @@ func (a *App) runHelperInstall(args []string) int {
 		return 2
 	}
 
-	binaryPath, err := resolveExecutablePath()
+	binaryPath, err := resolveVPNCoreExecutablePath()
 	if err != nil {
 		fmt.Fprintf(a.stderr, "helper install failed: %v\n", err)
 		return 1
@@ -51,11 +52,14 @@ func (a *App) runHelperInstall(args []string) int {
 		return 1
 	}
 
-	fmt.Fprintln(a.stdout, "installed privileged helper")
+	fmt.Fprintln(a.stdout, "installed shared vpn core")
 	fmt.Fprintf(a.stdout, "socket: %s\n", status.SocketPath)
 	fmt.Fprintf(a.stdout, "label: %s\n", status.Label)
 	fmt.Fprintf(a.stdout, "plist: %s\n", status.PlistPath)
-	fmt.Fprintln(a.stdout, "future `openconnect-tun start` runs will prefer the helper automatically before falling back to sudo")
+	if status.Compatibility != "" {
+		fmt.Fprintf(a.stdout, "compatibility: %s\n", status.Compatibility)
+	}
+	fmt.Fprintln(a.stdout, "future `openconnect-tun start` and `vless-tun run` runs will prefer the shared core automatically before falling back to sudo")
 	return 0
 }
 
@@ -71,7 +75,7 @@ func (a *App) runHelperUninstall(args []string) int {
 	}
 
 	cfg := openconnect.DefaultPrivilegedHelperConfig()
-	fmt.Fprintln(a.stdout, "uninstalled privileged helper")
+	fmt.Fprintln(a.stdout, "uninstalled shared vpn core")
 	fmt.Fprintf(a.stdout, "socket: %s\n", cfg.SocketPath)
 	fmt.Fprintf(a.stdout, "label: %s\n", cfg.Label)
 	return 0
@@ -93,6 +97,9 @@ func (a *App) runHelperStatus(args []string) int {
 	fmt.Fprintf(a.stdout, "label: %s\n", status.Label)
 	fmt.Fprintf(a.stdout, "plist: %s\n", status.PlistPath)
 	fmt.Fprintf(a.stdout, "socket: %s\n", status.SocketPath)
+	if status.Compatibility != "" {
+		fmt.Fprintf(a.stdout, "compatibility: %s\n", status.Compatibility)
+	}
 	if status.Reachable {
 		fmt.Fprintln(a.stdout, "state: reachable")
 		fmt.Fprintf(a.stdout, "daemon_pid: %d\n", status.DaemonPID)
@@ -130,4 +137,16 @@ func resolveExecutablePath() (string, error) {
 		return "", fmt.Errorf("empty executable path")
 	}
 	return path, nil
+}
+
+func resolveVPNCoreExecutablePath() (string, error) {
+	if path, err := exec.LookPath("vpn-core"); err == nil {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		if path != "" {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("vpn-core binary not found in PATH; run ./scripts/setup.sh first")
 }

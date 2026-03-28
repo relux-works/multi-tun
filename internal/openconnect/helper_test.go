@@ -22,7 +22,7 @@ func TestRenderPrivilegedHelperPlist(t *testing.T) {
 	for _, want := range []string{
 		"<string>works.relux.test-helper</string>",
 		"<string>/tmp/openconnect-tun</string>",
-		"<string>_helper-daemon</string>",
+		"<string>_daemon</string>",
 		"<string>/var/run/works.relux.test-helper.sock</string>",
 		"<string>501</string>",
 		"<string>20</string>",
