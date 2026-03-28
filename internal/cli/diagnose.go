@@ -4,8 +4,8 @@ import (
 	"flag"
 	"fmt"
 
-	"vpn-config/internal/config"
-	"vpn-config/internal/session"
+	"multi-tun/internal/config"
+	"multi-tun/internal/session"
 )
 
 func (a *App) runDiagnose(args []string) int {

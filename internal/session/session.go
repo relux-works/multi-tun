@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"vpn-config/internal/config"
-	"vpn-config/internal/model"
+	"multi-tun/internal/config"
+	"multi-tun/internal/model"
 )
 
 const (

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"vpn-config/internal/config"
+	"multi-tun/internal/config"
 )
 
 func TestSaveAndLoadCurrent(t *testing.T) {

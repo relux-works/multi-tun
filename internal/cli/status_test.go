@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	"vpn-config/internal/config"
+	"multi-tun/internal/config"
 )
 
 func TestDeriveConnectionStatus(t *testing.T) {

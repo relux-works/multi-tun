@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vpn-config/internal/config"
-	"vpn-config/internal/subscription"
+	"multi-tun/internal/config"
+	"multi-tun/internal/subscription"
 )
 
 func TestRender(t *testing.T) {

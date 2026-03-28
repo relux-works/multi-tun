@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"vpn-config/internal/cli"
+	"multi-tun/internal/cli"
 )
 
 func main() {

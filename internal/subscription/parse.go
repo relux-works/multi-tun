@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"vpn-config/internal/model"
+	"multi-tun/internal/model"
 )
 
 func NormalizePayload(body []byte) (string, string, error) {

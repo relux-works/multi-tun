@@ -1,17 +1,20 @@
-# vpn-config Specification
+# multi-tun Specification
 
 ## Problem
 
 `v2RayTun` accepts the DanceVPN subscription and connects successfully, but the local `Routing` feature was not enough to produce a real `.ru` bypass on this Mac. The replacement path needs to keep the subscription convenience while moving tunnel behavior into a controllable stack.
 
+At the same time, the repo now also needs a companion `openconnect-tun` CLI for Cisco AnyConnect / ASA profile inspection so corporate split-routing and bypass planning can live next to the VLESS flow instead of in scattered shell scripts and old experiments.
+
 ## Primary Goal
 
-Build a local CLI and agent skill that can:
+Build local CLIs and agent guidance that can:
 
 1. manage a live DenseVPN subscription URL
 2. refresh and parse `vless://` profiles from that URL
 3. render a `sing-box` client config either as a simple full tunnel, a macOS system-proxy session, or a deterministic `.ru` bypass
-4. fit the usual skill-style repo layout with board, setup script, docs, and agent guidance
+4. inspect Cisco AnyConnect / ASA profile metadata and CLI-visible profile lists for future OpenConnect automation
+5. fit the usual skill-style repo layout with board, setup script, docs, and agent guidance
 
 ## Users
 
@@ -61,6 +64,14 @@ Build a local CLI and agent skill that can:
 - `status`: show local runtime state, launch backend, cached selection, and configured bypasses
 - `stop`: stop the recorded `sing-box` session
 - `render`: emit sing-box config
+- `openconnect-tun status`: inspect AnyConnect CLI state and active connection metadata
+- `openconnect-tun profiles`: list ASA profiles surfaced by `vpn hosts`
+- `openconnect-tun inspect-profiles`: parse local AnyConnect XML profiles and expose server entries plus bypass-relevant flags
+- `openconnect-tun run`: authenticate with `openconnect --authenticate`, optionally using `vpn-auth` only as the external-browser automation helper, then start OpenConnect in either `full` or `split-include` mode
+- `openconnect-tun reconnect`: replace the active OpenConnect session in one command
+- `openconnect-tun helper install|status|uninstall`: manage the one-time privileged helper used for passwordless post-SSO connect/stop flows
+- `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
+- `openconnect-tun stop`: stop the active OpenConnect process cleanly
 
 ## Non-Goals For This Iteration
 
@@ -74,6 +85,7 @@ Build a local CLI and agent skill that can:
 - Keep tests offline.
 - Prefer standard library over extra dependencies.
 - Keep generated config self-contained enough for fast inspection.
+- Do not let OpenConnect full-tunnel experiments silently clobber the resolver state needed by an already active `vless-tun`; scoped corporate DNS is required for the steady-state design.
 
 ## Deliverables
 
@@ -81,5 +93,5 @@ Build a local CLI and agent skill that can:
 - tests and fixtures
 - setup script
 - task board
-- repo-local agent guidance
+- repo-local agent guidance layered on top of `agents-infra setup local`
 - skill docs for future agent use

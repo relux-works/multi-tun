@@ -2,11 +2,13 @@
 
 ## Project Structure & Module Organization
 
-- `cmd/vpn-config/`: CLI entry point.
+- `cmd/vless-tun/`: VLESS CLI entry point.
+- `cmd/openconnect-tun/`: OpenConnect inspection CLI entry point.
 - `internal/config/`: local project config loading and initialization.
 - `internal/model/`: shared subscription/profile models.
 - `internal/subscription/`: subscription fetch, decoding, cache snapshot handling, VLESS parsing.
 - `internal/singbox/`: sing-box config rendering for DenseVPN profiles.
+- `internal/openconnect/`: AnyConnect CLI and XML inspection helpers.
 - `agents/skills/vpn-config/`: installed skill payload for agent runtimes.
 - `scripts/setup.sh`: builds the binary and installs the local skill.
 - `configs/`: example local config and generated sing-box output.
@@ -17,8 +19,9 @@
 
 Run from repo root:
 
-- `./scripts/setup.sh`: build `vless-tun`, symlink it into `~/.local/bin`, install the skill payload.
-- `go build -o vless-tun ./cmd/vpn-config`: local build without installation.
+- `./scripts/setup.sh`: build `vless-tun` and `openconnect-tun`, symlink them into `~/.local/bin`, install the skill payload.
+- `go build -o vless-tun ./cmd/vless-tun`: local build without installation.
+- `go build -o openconnect-tun ./cmd/openconnect-tun`: local build without installation.
 - `go test ./...`: run unit tests.
 - `go fmt ./...`: format all Go packages.
 - `vless-tun init`: create `configs/local.json` from defaults.
@@ -27,12 +30,18 @@ Run from repo root:
 - `vless-tun status`: inspect local runtime state, cached profiles, and configured bypasses.
 - `vless-tun stop`: stop the current sing-box session.
 - `vless-tun render`: generate a sing-box config from the cached subscription snapshot.
+- `openconnect-tun status`: inspect Cisco AnyConnect CLI state and active ASA connection info.
+- `openconnect-tun profiles`: list profiles returned by `vpn hosts`.
+- `openconnect-tun inspect-profiles`: inspect local AnyConnect XML profiles for bypass-relevant flags and server entries.
 
 ## Board Workflow
 
 - This repo uses `task-board` with `task-board.config.json`.
+- Board-first discipline is mandatory here: create or select the relevant board element before implementation starts.
+- Use the `project-management` skill whenever the task involves planning, decomposition, status, dependencies, or board updates.
 - Do not edit `.task-board/` manually. All board writes go through `task-board m ...`.
-- Keep the board aligned with shipped scope. If a user-facing command or workflow changes, update the board notes and related docs.
+- Keep the board aligned with shipped scope while you work: assignment, status, notes, checklist, and linked artifacts should reflect reality.
+- If a user-facing command, setup flow, local runtime wiring, or agent workflow changes, update the board notes and related docs in the same slice.
 
 ## Coding Style & Naming Conventions
 
@@ -52,3 +61,4 @@ Run from repo root:
 - Update `README.md` when command UX or setup changes.
 - Update `SPEC.md` when scope changes.
 - Update `agents/skills/vpn-config/SKILL.md` and references when the recommended agent workflow changes.
+- Keep repo-local agent runtime wiring current. `agents-infra setup local <repo>` is the baseline, and project-specific instructions/skills must still be layered on top for spawned agents.

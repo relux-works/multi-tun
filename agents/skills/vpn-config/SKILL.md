@@ -29,6 +29,8 @@ triggers:
 
 Use the local `vless-tun` CLI when the task is about DenseVPN / DanceVPN subscriptions or generating sing-box client configs.
 
+When the repo board is involved, pair this skill with `project-management`: `multi-tun` is a board-driven repo and `task-board` must stay current before and during implementation.
+
 ## Core Capabilities
 
 - initialize local config and keep the live subscription URL in `~/.config/vless-tun/config.json`
@@ -62,7 +64,8 @@ vless-tun render
 5. Use `reconnect` after changing bypasses, profile selection, or other render-time config so the live session picks up the new state.
 6. On macOS, prefer `render.mode=system_proxy` for initial bring-up; use `render.mode=tun` with `render.privileged_launch` when you need a real TUN session.
 7. Use `status`, `diagnose`, and the per-session log file to debug behavior.
-8. If command or config layout changes, update `README.md`, `SPEC.md`, and the task board.
+8. In this repo, select or create the relevant `task-board` item before implementation and keep status/notes aligned with reality as the work progresses.
+9. If command, setup, or config layout changes, update `README.md`, `SPEC.md`, `AGENTS.md`, and the task board.
 
 ## Command Summary
 
@@ -80,6 +83,7 @@ vless-tun render
 
 - Keep the live subscription URL in `~/.config/vless-tun/config.json`, not in committed examples.
 - Do not hand-edit `.task-board/`; use `task-board`.
+- Use the `project-management` skill for board work; don't invent parallel tracking outside `task-board`.
 - Prefer extending the renderer and tests over adding one-off shell snippets.
 
 ## References

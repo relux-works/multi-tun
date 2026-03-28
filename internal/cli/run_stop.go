@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"vpn-config/internal/config"
-	"vpn-config/internal/model"
-	"vpn-config/internal/session"
-	"vpn-config/internal/singbox"
-	"vpn-config/internal/subscription"
+	"multi-tun/internal/config"
+	"multi-tun/internal/model"
+	"multi-tun/internal/session"
+	"multi-tun/internal/singbox"
+	"multi-tun/internal/subscription"
 )
 
 type startOptions struct {
@@ -21,33 +21,41 @@ type startOptions struct {
 	refresh         bool
 }
 
+func (a *App) runStart(args []string) int {
+	return a.runStartCommand("start", args)
+}
+
 func (a *App) runRun(args []string) int {
-	options, exitCode, err := a.parseStartOptions("run", args, false)
+	return a.runStartCommand("run", args)
+}
+
+func (a *App) runStartCommand(commandName string, args []string) int {
+	options, exitCode, err := a.parseStartOptions(commandName, args, false)
 	if err != nil {
 		return exitCode
 	}
 
 	cfg, err := loadConfig(options.configPath)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "run failed: %v\n", err)
+		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
 	}
 
 	if current, state, alive, err := currentSessionState(cfg.CacheDir); err == nil && current != nil && alive {
-		fmt.Fprintf(a.stderr, "run failed: sing-box session %s is already %s (pid=%d)\n", current.ID, state, current.PID)
+		fmt.Fprintf(a.stderr, "%s failed: sing-box session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
 		return 1
 	}
 
 	prepared, err := a.prepareStart(cfg, options)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "run failed: %v\n", err)
+		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
 	}
 
 	if current, state, alive, err := currentSessionState(cfg.CacheDir); err == nil && current != nil && !alive {
 		_ = session.ClearCurrent(cfg.CacheDir)
 	} else if err == nil && current != nil && alive {
-		fmt.Fprintf(a.stderr, "run failed: sing-box session %s is already %s (pid=%d)\n", current.ID, state, current.PID)
+		fmt.Fprintf(a.stderr, "%s failed: sing-box session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
 		return 1
 	}
 
@@ -57,7 +65,7 @@ func (a *App) runRun(args []string) int {
 		PrivilegedLaunch: cfg.Render.PrivilegedLaunchOrDefault(),
 	})
 	if err != nil {
-		fmt.Fprintf(a.stderr, "run failed: %v\n", err)
+		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
 	}
 
