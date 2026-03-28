@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -159,9 +160,17 @@ func TestScriptDiagnosticsWrapperScriptIncludesSupplementalDNSShim(t *testing.T)
 		"vpnc_wrapper_dns_shim: remove",
 		"vpnc_wrapper_dns_shim: restored search.tailscale",
 		"vpnc_wrapper_dns_shim: sanitized search.tailscale",
+		"capture_default_route",
+		"pin_vpn_gateway_route",
+		"remove_scoped_default_route",
+		"filter_probe_host_addresses",
+		"vpnc_wrapper_probe_route_sync_begin:",
+		"vpnc_wrapper_probe_route_sync_end:",
+		"vpnc_wrapper_probe_route_sync:",
 		"vpnc_wrapper_probe_begin:",
 		"vpnc_wrapper_probe_dscacheutil_begin",
 		"vpnc_wrapper_probe_route_begin",
+		"resolve_probe_host_addresses",
 		"gitlab.services.corp.example",
 		"/etc/resolver/$domain",
 		"/etc/resolver/search.tailscale",
@@ -189,16 +198,19 @@ func TestScriptDiagnosticsWrapperScriptUsesScutilStateForSplitInclude(t *testing
 
 	for _, needle := range []string{
 		`[ "$use_scutil_state" = "1" ] && return 0`,
+		"vpnc_wrapper_vpngateway_route:",
+		"vpnc_wrapper_default_route_remove:",
 		"vpnc_wrapper_scutil_state: apply",
 		"vpnc_wrapper_scutil_state: remove",
 		"vpnc_wrapper_dns_shim: clear split-include resolvers",
+		"sync_probe_host_routes apply",
 		"State:/Network/Service/$scutil_service_id/DNS",
 		"State:/Network/Service/$scutil_service_id/IPv4",
 		"SupplementalMatchDomains",
 		"d.add SearchDomains *",
 		"d.add ServerAddresses *",
 		"vpnc_wrapper_route_override_host:",
-		"-ifscope \"$TUNDEV\"",
+		`"$cidr" -interface "$TUNDEV"`,
 	} {
 		if !strings.Contains(script, needle) {
 			t.Fatalf("wrapper script missing %q:\n%s", needle, script)
@@ -1574,6 +1586,130 @@ func TestBuildNativeCSDConfigUsesResolvedIPAndFingerprint(t *testing.T) {
 	}
 }
 
+func TestResolveNativeCSDHostURLFallsBackToSystemLookup(t *testing.T) {
+	prevLookupHost := lookupHostOpenConnect
+	prevSystemLookupHost := systemLookupHostOpenConnect
+	lookupHostOpenConnect = func(host string) ([]string, error) {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host}
+	}
+	systemLookupHostOpenConnect = func(host string) []string {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("system lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return []string{"10.24.79.46"}
+	}
+	defer func() {
+		lookupHostOpenConnect = prevLookupHost
+		systemLookupHostOpenConnect = prevSystemLookupHost
+	}()
+
+	got, err := resolveNativeCSDHostURL("vpn-gw2.internal.corp.example")
+	if err != nil {
+		t.Fatalf("resolveNativeCSDHostURL() error = %v", err)
+	}
+	if got != "https://10.24.79.46" {
+		t.Fatalf("resolveNativeCSDHostURL() = %q, want %q", got, "https://10.24.79.46")
+	}
+}
+
+func TestNewSAMLHTTPClientDialsSystemResolvedAddress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Host; got != "vpn-gw2.internal.corp.example" && !strings.HasPrefix(got, "vpn-gw2.internal.corp.example:") {
+			t.Fatalf("Host = %q", got)
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer server.Close()
+
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(server.URL) error = %v", err)
+	}
+	serverHost, serverPort, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("SplitHostPort(server host) error = %v", err)
+	}
+
+	prevLookupHost := lookupHostOpenConnect
+	prevSystemLookupHost := systemLookupHostOpenConnect
+	lookupHostOpenConnect = func(host string) ([]string, error) {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host}
+	}
+	systemLookupHostOpenConnect = func(host string) []string {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("system lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return []string{serverHost}
+	}
+	defer func() {
+		lookupHostOpenConnect = prevLookupHost
+		systemLookupHostOpenConnect = prevSystemLookupHost
+	}()
+
+	client := newSAMLHTTPClient(nil, nil)
+	resp, err := client.Get("http://vpn-gw2.internal.corp.example:" + serverPort + "/")
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(body) error = %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want ok", string(body))
+	}
+}
+
+func TestResolveOpenConnectResolveUsesHostIPFormat(t *testing.T) {
+	prevLookupHost := lookupHostOpenConnect
+	prevSystemLookupHost := systemLookupHostOpenConnect
+	lookupHostOpenConnect = func(host string) ([]string, error) {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host}
+	}
+	systemLookupHostOpenConnect = func(host string) []string {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("system lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return []string{"10.24.79.46"}
+	}
+	t.Cleanup(func() {
+		lookupHostOpenConnect = prevLookupHost
+		systemLookupHostOpenConnect = prevSystemLookupHost
+	})
+
+	got := resolveOpenConnectResolve("vpn-gw2.internal.corp.example/outside")
+	if got != "vpn-gw2.internal.corp.example:10.24.79.46" {
+		t.Fatalf("resolveOpenConnectResolve() = %q, want %q", got, "vpn-gw2.internal.corp.example:10.24.79.46")
+	}
+}
+
+func TestFindOpenConnectInterfaceFromLog(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openconnect.log")
+	if err := os.WriteFile(logPath, []byte(strings.Join([]string{
+		"noise",
+		"  InterfaceName : utun9",
+		"TUNDEV=utun11",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(log) error = %v", err)
+	}
+
+	got := findOpenConnectInterfaceFromLog(logPath)
+	if got != "utun11" {
+		t.Fatalf("findOpenConnectInterfaceFromLog() = %q, want %q", got, "utun11")
+	}
+}
+
 func TestEnsureSudoCredentialsFallsBackToInteractivePrompt(t *testing.T) {
 	root := t.TempDir()
 	logPath := filepath.Join(root, "sudo.log")
@@ -1654,6 +1790,7 @@ func TestConnectFailsBeforeSessionArtifactsWhenSudoUnavailableNonInteractive(t *
 	_, err := Connect(ConnectOptions{
 		Server:         "vpn-gw2.corp.example/outside",
 		Mode:           ConnectModeSplitInclude,
+		PrivilegedMode: PrivilegedModeSudo,
 		IncludeRoutes:  []string{"10.0.0.0/8"},
 		VPNDomains:     []string{"corp.example"},
 		VPNNameservers: []string{"10.23.16.4", "10.23.0.23"},
