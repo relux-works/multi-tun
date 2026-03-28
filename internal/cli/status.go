@@ -8,10 +8,10 @@ import (
 	"os"
 	"strings"
 
-	"vpn-config/internal/config"
-	"vpn-config/internal/model"
-	"vpn-config/internal/session"
-	"vpn-config/internal/subscription"
+	"multi-tun/internal/config"
+	"multi-tun/internal/model"
+	"multi-tun/internal/session"
+	"multi-tun/internal/subscription"
 )
 
 func (a *App) runStatus(args []string) int {

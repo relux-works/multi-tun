@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"vpn-config/internal/config"
-	"vpn-config/internal/singbox"
-	"vpn-config/internal/subscription"
+	"multi-tun/internal/config"
+	"multi-tun/internal/singbox"
+	"multi-tun/internal/subscription"
 )
 
 type App struct {
@@ -43,6 +43,8 @@ func (a *App) Run(args []string) int {
 		return a.runRefresh(args[1:])
 	case "list":
 		return a.runList(args[1:])
+	case "start":
+		return a.runStart(args[1:])
 	case "run":
 		return a.runRun(args[1:])
 	case "reconnect":
@@ -232,10 +234,13 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  vless-tun init [--config path] [--subscription-url URL] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path]")
 	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun run [--config path] [--profile selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--profile selector] [--output path] [--refresh]")
 	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--profile selector] [--output path] [--refresh] [--timeout duration] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--refresh]")
 	fmt.Fprintln(a.stdout, "  vless-tun diagnose [--config path]")
 	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [--timeout duration] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--profile selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout)
+	fmt.Fprintln(a.stdout, "Aliases:")
+	fmt.Fprintln(a.stdout, "  run -> start")
 }

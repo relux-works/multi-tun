@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"vpn-config/internal/config"
-	"vpn-config/internal/model"
+	"multi-tun/internal/config"
+	"multi-tun/internal/model"
 )
 
 func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {

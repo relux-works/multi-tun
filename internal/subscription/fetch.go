@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"vpn-config/internal/model"
+	"multi-tun/internal/model"
 )
 
 const (
