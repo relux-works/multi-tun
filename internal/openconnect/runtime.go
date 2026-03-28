@@ -623,9 +623,7 @@ func supplementalResolverSpecForConnect(mode string, server string, options Conn
 			ProbeHosts: []string{
 				"gitlab.services.corp.example",
 			},
-			RouteOverrides:       uniqueStrings(routeOverrides),
-			ManageSearchResolver: true,
-			UseScutilState:       true,
+			RouteOverrides: uniqueStrings(routeOverrides),
 		}
 	default:
 		return nil
