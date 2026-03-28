@@ -1,6 +1,9 @@
 # Binaries
 /vpn-config
 /vless-tun
+/openconnect-tun
+/cisco-dump
+/vpn-core
 *.exe
 *.exe~
 *.dll
