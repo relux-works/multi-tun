@@ -185,30 +185,24 @@ func TestScriptDiagnosticsWrapperScriptIncludesSupplementalDNSShim(t *testing.T)
 	}
 }
 
-func TestScriptDiagnosticsWrapperScriptUsesScutilStateForSplitInclude(t *testing.T) {
+func TestScriptDiagnosticsWrapperScriptKeepsResolverShimForSplitInclude(t *testing.T) {
 	script := scriptDiagnosticsWrapperScript("/tmp/openconnect.log", "/Users/alexis/.local/bin/vpn-slice --domains-vpn-dns corp.example 10.0.0.0/8", &supplementalResolverSpec{
-		Label:          "split-include",
-		SearchDomain:   "corp.example",
-		ServiceID:      "01234567-89AB-CDEF-0123-456789ABCDEF",
-		UseScutilState: true,
-		Nameservers:    []string{"10.23.16.4", "10.23.0.23"},
-		Domains:        []string{"corp.example"},
-		ProbeHosts:     []string{"gitlab.services.corp.example"},
+		Label:        "split-include",
+		SearchDomain: "corp.example",
+		Nameservers:  []string{"10.23.16.4", "10.23.0.23"},
+		Domains:      []string{"corp.example"},
+		ProbeHosts:   []string{"gitlab.services.corp.example"},
 	}, "/tmp/pycompat", []string{"10.23.16.4/32", "10.0.0.0/8"})
 
 	for _, needle := range []string{
-		`[ "$use_scutil_state" = "1" ] && return 0`,
+		"use_scutil_state='0'",
+		"manage_search_resolver='0'",
 		"vpnc_wrapper_vpngateway_route:",
 		"vpnc_wrapper_default_route_remove:",
-		"vpnc_wrapper_scutil_state: apply",
-		"vpnc_wrapper_scutil_state: remove",
-		"vpnc_wrapper_dns_shim: clear split-include resolvers",
+		"vpnc_wrapper_dns_shim: apply",
+		"vpnc_wrapper_dns_shim: remove",
 		"sync_probe_host_routes apply",
-		"State:/Network/Service/$scutil_service_id/DNS",
-		"State:/Network/Service/$scutil_service_id/IPv4",
-		"SupplementalMatchDomains",
-		"d.add SearchDomains *",
-		"d.add ServerAddresses *",
+		"/etc/resolver/$domain",
 		"vpnc_wrapper_route_override_host:",
 		`"$cidr" -interface "$TUNDEV"`,
 	} {
@@ -273,11 +267,11 @@ func TestSupplementalResolverSpecForConnectOnlyAppliesInFullMode(t *testing.T) {
 	if split.SearchDomain != "region.corp.example" {
 		t.Fatalf("split.SearchDomain = %q, want region.corp.example", split.SearchDomain)
 	}
-	if !split.UseScutilState {
-		t.Fatal("split.UseScutilState = false, want true")
+	if split.UseScutilState {
+		t.Fatal("split.UseScutilState = true, want false")
 	}
-	if !split.ManageSearchResolver {
-		t.Fatal("split.ManageSearchResolver = false, want true")
+	if split.ManageSearchResolver {
+		t.Fatal("split.ManageSearchResolver = true, want false")
 	}
 	if !containsString(split.RouteOverrides, "10.0.0.0/8") {
 		t.Fatalf("split.RouteOverrides = %#v, want 10.0.0.0/8", split.RouteOverrides)
