@@ -83,7 +83,11 @@ func TestLastRelevantLogLine(t *testing.T) {
 }
 
 func TestResolveLaunchMode(t *testing.T) {
-	t.Parallel()
+	prevVPNCoreAvailable := vpnCoreAvailableSession
+	vpnCoreAvailableSession = func() bool { return false }
+	t.Cleanup(func() {
+		vpnCoreAvailableSession = prevVPNCoreAvailable
+	})
 
 	tests := []struct {
 		name       string
@@ -92,7 +96,7 @@ func TestResolveLaunchMode(t *testing.T) {
 		want       string
 	}{
 		{name: "system proxy defaults direct", renderMode: config.RenderModeSystemProxy, launchMode: config.LaunchModeAuto, want: config.LaunchModeDirect},
-		{name: "tun explicit launchd", renderMode: config.RenderModeTun, launchMode: config.LaunchModeLaunchd, want: config.LaunchModeLaunchd},
+		{name: "tun explicit launchd maps to helper", renderMode: config.RenderModeTun, launchMode: config.LaunchModeLaunchd, want: config.LaunchModeHelper},
 		{name: "tun explicit sudo", renderMode: config.RenderModeTun, launchMode: config.LaunchModeSudo, want: config.LaunchModeSudo},
 	}
 
@@ -109,5 +113,78 @@ func TestResolveLaunchMode(t *testing.T) {
 				t.Fatalf("resolveLaunchMode() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResolveLaunchModeAutoPrefersVPNCore(t *testing.T) {
+	prevVPNCoreAvailable := vpnCoreAvailableSession
+	vpnCoreAvailableSession = func() bool { return true }
+	t.Cleanup(func() {
+		vpnCoreAvailableSession = prevVPNCoreAvailable
+	})
+
+	got, err := resolveLaunchMode(config.RenderModeTun, config.PrivilegedLaunchConfig{Mode: config.LaunchModeAuto})
+	if err != nil {
+		t.Fatalf("resolveLaunchMode() returned error: %v", err)
+	}
+	if got != config.LaunchModeHelper {
+		t.Fatalf("resolveLaunchMode() = %q, want %q", got, config.LaunchModeHelper)
+	}
+}
+
+func TestStopLegacyLaunchdSessionUsesLaunchdPath(t *testing.T) {
+	cacheDir := t.TempDir()
+	current := CurrentSession{
+		ID:          "20260328T101711Z",
+		PID:         31004,
+		LaunchMode:  config.LaunchModeLaunchd,
+		LaunchLabel: "works.relux.vless-tun",
+	}
+	if err := SaveCurrent(cacheDir, current); err != nil {
+		t.Fatalf("SaveCurrent() error = %v", err)
+	}
+
+	prevLaunchdPID := launchdPIDSession
+	prevStopLaunchd := stopLaunchdSessionFunc
+	launchdPIDSession = func(label string) (int, error) {
+		if label != current.LaunchLabel {
+			t.Fatalf("launchdPIDSession label = %q, want %q", label, current.LaunchLabel)
+		}
+		return current.PID, nil
+	}
+	stopCalled := false
+	stopLaunchdSessionFunc = func(got CurrentSession, timeout time.Duration) error {
+		stopCalled = true
+		if got.LaunchLabel != current.LaunchLabel {
+			t.Fatalf("stopLaunchdSessionFunc label = %q, want %q", got.LaunchLabel, current.LaunchLabel)
+		}
+		if got.PID != current.PID {
+			t.Fatalf("stopLaunchdSessionFunc pid = %d, want %d", got.PID, current.PID)
+		}
+		if timeout != 2*time.Second {
+			t.Fatalf("stopLaunchdSessionFunc timeout = %s, want %s", timeout, 2*time.Second)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		launchdPIDSession = prevLaunchdPID
+		stopLaunchdSessionFunc = prevStopLaunchd
+	})
+
+	got, state, err := Stop(cacheDir, false, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !stopCalled {
+		t.Fatal("Stop() did not use legacy launchd stop path")
+	}
+	if state != "stopped" {
+		t.Fatalf("Stop() state = %q, want %q", state, "stopped")
+	}
+	if got.LaunchMode != config.LaunchModeLaunchd {
+		t.Fatalf("Stop() launch_mode = %q, want %q", got.LaunchMode, config.LaunchModeLaunchd)
+	}
+	if _, err := os.Stat(CurrentPath(cacheDir)); !os.IsNotExist(err) {
+		t.Fatalf("current session file still exists: %v", err)
 	}
 }

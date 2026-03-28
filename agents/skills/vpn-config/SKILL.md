@@ -3,7 +3,7 @@ name: vpn-config
 description: >
   Manage DenseVPN / DanceVPN VLESS subscriptions, render sing-box configs, and control local
   macOS VPN sessions through `vless-tun`. Supports refresh/list/render flows, real TUN or
-  system-proxy mode, privileged `launchd` bring-up, suffix bypasses, and runtime diagnostics.
+  system-proxy mode, shared `vpn-core` bring-up, suffix bypasses, and runtime diagnostics.
 triggers:
   - vpn-config
   - dancevpn
@@ -13,6 +13,7 @@ triggers:
   - vless-tun
   - tun mode
   - launchd vpn
+  - vpn-core
   - vless subscription
   - refresh vpn profile
   - generate sing-box config
@@ -36,7 +37,7 @@ When the repo board is involved, pair this skill with `project-management`: `mul
 - initialize local config and keep the live subscription URL in `~/.config/vless-tun/config.json`
 - refresh, parse, and inspect cached `vless://` profiles from DenseVPN / DanceVPN subscriptions
 - render `sing-box` configs for `system_proxy` or real `tun` mode
-- manage privileged macOS TUN bring-up with `render.privileged_launch`, including `launchd`
+- manage privileged macOS TUN bring-up with `render.privileged_launch`, preferring the shared `vpn-core` helper backend
 - control session lifecycle with `run`, `reconnect`, `status`, `diagnose`, and `stop`
 - apply suffix-based direct bypasses such as `.ru` / `.рф`
 - inspect session logs, rendered config paths, launch backend state, and active interface details

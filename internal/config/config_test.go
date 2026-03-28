@@ -23,7 +23,7 @@ func TestValidateRejectsUnknownPrivilegedLaunchMode(t *testing.T) {
 
 	cfg := Default()
 	cfg.Render.Mode = RenderModeTun
-	cfg.Render.PrivilegedLaunch = &PrivilegedLaunchConfig{Mode: "helper"}
+	cfg.Render.PrivilegedLaunch = &PrivilegedLaunchConfig{Mode: "bogus"}
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() returned nil error")
@@ -36,6 +36,18 @@ func TestValidateAcceptsLaunchdPrivilegedLaunchMode(t *testing.T) {
 	cfg := Default()
 	cfg.Render.Mode = RenderModeTun
 	cfg.Render.PrivilegedLaunch = &PrivilegedLaunchConfig{Mode: LaunchModeLaunchd}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() returned error: %v", err)
+	}
+}
+
+func TestValidateAcceptsHelperPrivilegedLaunchMode(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Render.Mode = RenderModeTun
+	cfg.Render.PrivilegedLaunch = &PrivilegedLaunchConfig{Mode: LaunchModeHelper}
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() returned error: %v", err)

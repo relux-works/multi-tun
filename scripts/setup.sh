@@ -10,6 +10,7 @@ SKILL_CONTENT_DIR="$PROJECT_ROOT/agents/skills/$SKILL_NAME"
 VLESS_CLI_NAME="vless-tun"
 OPENCONNECT_CLI_NAME="openconnect-tun"
 CISCO_DUMP_CLI_NAME="cisco-dump"
+VPN_CORE_CLI_NAME="vpn-core"
 
 AGENTS_DIR="$HOME/.agents/skills"
 CLAUDE_DIR="$HOME/.claude/skills"
@@ -72,15 +73,19 @@ echo "Building $OPENCONNECT_CLI_NAME binary..."
 go build -o "$OPENCONNECT_CLI_NAME" ./cmd/openconnect-tun/
 echo "Building $CISCO_DUMP_CLI_NAME binary..."
 go build -o "$CISCO_DUMP_CLI_NAME" ./cmd/cisco-dump/
+echo "Building $VPN_CORE_CLI_NAME binary..."
+go build -o "$VPN_CORE_CLI_NAME" ./cmd/vpn-core/
 
 mkdir -p "$BIN_DIR"
 ln -sf "$PROJECT_ROOT/$VLESS_CLI_NAME" "$BIN_DIR/$VLESS_CLI_NAME"
 ln -sf "$PROJECT_ROOT/$OPENCONNECT_CLI_NAME" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
 ln -sf "$PROJECT_ROOT/$CISCO_DUMP_CLI_NAME" "$BIN_DIR/$CISCO_DUMP_CLI_NAME"
+ln -sf "$PROJECT_ROOT/$VPN_CORE_CLI_NAME" "$BIN_DIR/$VPN_CORE_CLI_NAME"
 rm -f "$BIN_DIR/vpn-config"
 echo "  Binary -> $BIN_DIR/$VLESS_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$OPENCONNECT_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$CISCO_DUMP_CLI_NAME"
+echo "  Binary -> $BIN_DIR/$VPN_CORE_CLI_NAME"
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo "  WARNING: $BIN_DIR is not in your PATH"
@@ -150,5 +155,6 @@ echo "Next steps:"
 echo "  edit $GLOBAL_CONFIG_PATH"
 echo "  $VLESS_CLI_NAME refresh"
 echo "  $VLESS_CLI_NAME render"
+echo "  $VPN_CORE_CLI_NAME install"
 echo "  $OPENCONNECT_CLI_NAME inspect-profiles"
 echo "  $CISCO_DUMP_CLI_NAME start"

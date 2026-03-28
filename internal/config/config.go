@@ -18,6 +18,7 @@ const (
 	LaunchModeAuto    = "auto"
 	LaunchModeSudo    = "sudo"
 	LaunchModeDirect  = "direct"
+	LaunchModeHelper  = "helper"
 	LaunchModeLaunchd = "launchd"
 
 	defaultLaunchdLabel     = "works.relux.vless-tun"
@@ -232,9 +233,9 @@ func (c ProjectConfig) Validate() error {
 	}
 
 	switch c.Render.PrivilegedLaunchOrDefault().Mode {
-	case LaunchModeAuto, LaunchModeSudo, LaunchModeDirect, LaunchModeLaunchd:
+	case LaunchModeAuto, LaunchModeSudo, LaunchModeDirect, LaunchModeHelper, LaunchModeLaunchd:
 	default:
-		return errors.New("render.privileged_launch.mode must be one of: auto, sudo, direct, launchd")
+		return errors.New("render.privileged_launch.mode must be one of: auto, sudo, direct, helper, launchd")
 	}
 	return nil
 }
