@@ -1,6 +1,7 @@
 package openconnect
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -48,16 +49,30 @@ var (
 	execLookPathOpenConnect        = exec.LookPath
 	execCommandOpenConnect         = exec.Command
 	lookupHostOpenConnect          = net.LookupHost
+	systemLookupHostOpenConnect    = lookupHostViaSystemSourcesOpenConnect
 	userHomeDirOpenConnect         = os.UserHomeDir
 	stdinSupportsPromptOpenConnect = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd()))
 	}
 	serverCertSHA1OpenConnect = fetchServerCertSHA1
 	newSAMLHTTPClient         = func(jar http.CookieJar, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		transport.DialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+			resolvedAddress, err := resolveOpenConnectDialAddress(address)
+			if err != nil {
+				return dialer.DialContext(ctx, network, address)
+			}
+			return dialer.DialContext(ctx, network, resolvedAddress)
+		}
 		return &http.Client{
 			Timeout:       authTimeout,
 			Jar:           jar,
 			CheckRedirect: checkRedirect,
+			Transport:     transport,
 		}
 	}
 )
@@ -351,9 +366,12 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	if pid > 0 {
 		current.PID = pid
 	}
-	if current.Interface == "" {
-		current.Interface = findOpenConnectInterface(current.PID)
-	}
+	current.Interface = firstNonEmpty(
+		findOpenConnectInterfaceFromLog(current.LogPath),
+		findTrackedOpenConnectInterface(current.PID),
+		findOpenConnectInterface(current.PID),
+		current.Interface,
+	)
 
 	if err := SaveMetadata(current); err != nil {
 		_ = interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
@@ -391,7 +409,7 @@ func CurrentRuntime() (*RuntimeStatus, error) {
 	}
 	return &RuntimeStatus{
 		PID:       pid,
-		Interface: findOpenConnectInterface(pid),
+		Interface: firstNonEmpty(findTrackedOpenConnectInterface(pid), findOpenConnectInterface(pid)),
 		Uptime:    getProcessUptime(pid),
 	}, nil
 }
@@ -688,6 +706,8 @@ set +e
 
 helper_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 search_backup="$helper_dir/search.tailscale.backup"
+default_gateway_file="$helper_dir/default-gateway"
+default_interface_file="$helper_dir/default-interface"
 log_file=%s
 base_command=%s
 shim_label=%s
@@ -750,6 +770,76 @@ sanitize_search_resolver() {
   fi
 }
 
+capture_default_route() {
+  gateway=$(/sbin/route -n get default 2>/dev/null | awk '/^[[:space:]]*gateway:/{print $2; exit}')
+  iface=$(/sbin/route -n get default 2>/dev/null | awk '/^[[:space:]]*interface:/{print $2; exit}')
+  if [ -n "$gateway" ]; then
+    printf '%%s\n' "$gateway" > "$default_gateway_file"
+  fi
+  if [ -n "$iface" ]; then
+    printf '%%s\n' "$iface" > "$default_interface_file"
+  fi
+  if [ -n "$gateway" ] || [ -n "$iface" ]; then
+    printf 'vpnc_wrapper_default_route: gateway=%%s interface=%%s\n' "$gateway" "$iface" >> "$log_file" 2>&1
+  else
+    printf 'vpnc_wrapper_default_route_failed\n' >> "$log_file" 2>&1
+  fi
+}
+
+load_default_gateway() {
+  if [ -f "$default_gateway_file" ]; then
+    cat "$default_gateway_file"
+    return 0
+  fi
+  /sbin/route -n get default 2>/dev/null | awk '/^[[:space:]]*gateway:/{print $2; exit}'
+}
+
+load_default_interface() {
+  if [ -f "$default_interface_file" ]; then
+    cat "$default_interface_file"
+    return 0
+  fi
+  /sbin/route -n get default 2>/dev/null | awk '/^[[:space:]]*interface:/{print $2; exit}'
+}
+
+pin_vpn_gateway_route() {
+  [ -n "${VPNGATEWAY:-}" ] || return 0
+  gateway=$(load_default_gateway)
+  iface=$(load_default_interface)
+  if [ -z "$gateway" ]; then
+    printf 'vpnc_wrapper_vpngateway_route_failed: %%s no-default-gateway\n' "$VPNGATEWAY" >> "$log_file" 2>&1
+    return 0
+  fi
+  /sbin/route -n delete -host "$VPNGATEWAY" >/dev/null 2>&1 || true
+  if /sbin/route -n add -host "$VPNGATEWAY" "$gateway" >/dev/null 2>&1; then
+    printf 'vpnc_wrapper_vpngateway_route: %%s -> %%s (%%s)\n' "$VPNGATEWAY" "$gateway" "$iface" >> "$log_file" 2>&1
+  elif /sbin/route -n change -host "$VPNGATEWAY" "$gateway" >/dev/null 2>&1; then
+    printf 'vpnc_wrapper_vpngateway_route: %%s -> %%s (%%s)\n' "$VPNGATEWAY" "$gateway" "$iface" >> "$log_file" 2>&1
+  else
+    printf 'vpnc_wrapper_vpngateway_route_failed: %%s -> %%s (%%s)\n' "$VPNGATEWAY" "$gateway" "$iface" >> "$log_file" 2>&1
+  fi
+}
+
+remove_scoped_default_route() {
+  [ -n "${TUNDEV:-}" ] || return 0
+  if /sbin/route -n get -ifscope "$TUNDEV" default >/dev/null 2>&1; then
+    if /sbin/route -n delete -ifscope "$TUNDEV" default >/dev/null 2>&1; then
+      printf 'vpnc_wrapper_default_route_remove: %%s\n' "$TUNDEV" >> "$log_file" 2>&1
+    elif /sbin/route -n delete default -ifscope "$TUNDEV" >/dev/null 2>&1; then
+      printf 'vpnc_wrapper_default_route_remove: %%s\n' "$TUNDEV" >> "$log_file" 2>&1
+    else
+      printf 'vpnc_wrapper_default_route_remove_failed: %%s\n' "$TUNDEV" >> "$log_file" 2>&1
+    fi
+  fi
+}
+
+remove_vpn_gateway_route() {
+  [ -n "${VPNGATEWAY:-}" ] || return 0
+  if /sbin/route -n delete -host "$VPNGATEWAY" >/dev/null 2>&1; then
+    printf 'vpnc_wrapper_vpngateway_route_remove: %%s\n' "$VPNGATEWAY" >> "$log_file" 2>&1
+  fi
+}
+
 enforce_route_overrides() {
   [ -n "$route_overrides" ] || return 0
   [ -n "${TUNDEV:-}" ] || return 0
@@ -757,9 +847,9 @@ enforce_route_overrides() {
   printf '%%s\n' "$route_overrides" | while IFS= read -r cidr; do
     [ -n "$cidr" ] || continue
     /sbin/route -n delete -net "$cidr" >/dev/null 2>&1 || true
-    if /sbin/route -n add -net -ifscope "$TUNDEV" "$cidr" -interface "$TUNDEV" >/dev/null 2>&1; then
+    if /sbin/route -n add -net "$cidr" -interface "$TUNDEV" >/dev/null 2>&1; then
       printf 'vpnc_wrapper_route_override: %%s -> %%s\n' "$cidr" "$TUNDEV" >> "$log_file" 2>&1
-    elif /sbin/route -n change -net -ifscope "$TUNDEV" "$cidr" -interface "$TUNDEV" >/dev/null 2>&1; then
+    elif /sbin/route -n change -net "$cidr" -interface "$TUNDEV" >/dev/null 2>&1; then
       printf 'vpnc_wrapper_route_override: %%s -> %%s\n' "$cidr" "$TUNDEV" >> "$log_file" 2>&1
     else
       printf 'vpnc_wrapper_route_override_failed: %%s -> %%s\n' "$cidr" "$TUNDEV" >> "$log_file" 2>&1
@@ -768,15 +858,77 @@ enforce_route_overrides() {
       */32)
         host=${cidr%%/*}
         /sbin/route -n delete -host "$host" >/dev/null 2>&1 || true
-        if /sbin/route -n add -host -ifscope "$TUNDEV" "$host" -interface "$TUNDEV" >/dev/null 2>&1; then
+        if /sbin/route -n add -host "$host" -interface "$TUNDEV" >/dev/null 2>&1; then
           printf 'vpnc_wrapper_route_override_host: %%s -> %%s\n' "$host" "$TUNDEV" >> "$log_file" 2>&1
-        elif /sbin/route -n change -host -ifscope "$TUNDEV" "$host" -interface "$TUNDEV" >/dev/null 2>&1; then
+        elif /sbin/route -n change -host "$host" -interface "$TUNDEV" >/dev/null 2>&1; then
           printf 'vpnc_wrapper_route_override_host: %%s -> %%s\n' "$host" "$TUNDEV" >> "$log_file" 2>&1
         else
           printf 'vpnc_wrapper_route_override_host_failed: %%s -> %%s\n' "$host" "$TUNDEV" >> "$log_file" 2>&1
         fi
         ;;
     esac
+  done
+}
+
+filter_probe_host_addresses() {
+  awk '
+    {
+      value=$1
+      if (value ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+        print value
+        next
+      }
+      if (value ~ /:/ && value ~ /^[0-9A-Fa-f:]+$/) {
+        print value
+      }
+    }
+  ' | awk '!seen[$0]++'
+}
+
+resolve_probe_host_addresses() {
+  host=$1
+  addresses=$(/usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' 4 dscacheutil -q host -a name "$host" 2>/dev/null | awk '/^ip_address:/ {print $2}' | filter_probe_host_addresses)
+  if [ -z "$addresses" ] && command -v dig >/dev/null 2>&1 && [ -n "$shim_nameservers" ]; then
+    addresses=$(printf '%%s\n' "$shim_nameservers" | while IFS= read -r ns; do
+      [ -n "$ns" ] || continue
+      dig +time=2 +tries=1 +short @"$ns" "$host" 2>/dev/null || true
+    done | filter_probe_host_addresses)
+  fi
+  printf '%%s\n' "$addresses"
+}
+
+sync_probe_host_routes() {
+  action=$1
+  [ -n "$probe_hosts" ] || return 0
+  [ -n "${TUNDEV:-}" ] || return 0
+  printf '%%s\n' "$probe_hosts" | while IFS= read -r host; do
+    [ -n "$host" ] || continue
+    printf 'vpnc_wrapper_probe_route_sync_begin: %%s %%s %%s\n' "$action" "$host" "$TUNDEV" >> "$log_file" 2>&1
+    addresses=$(resolve_probe_host_addresses "$host")
+    if [ -z "$addresses" ]; then
+      printf 'vpnc_wrapper_probe_route_sync_resolve_failed: %%s %%s\n' "$action" "$host" >> "$log_file" 2>&1
+      printf 'vpnc_wrapper_probe_route_sync_end: %%s %%s %%s\n' "$action" "$host" "$TUNDEV" >> "$log_file" 2>&1
+      continue
+    fi
+    printf '%%s\n' "$addresses" | while IFS= read -r addr; do
+      [ -n "$addr" ] || continue
+      /sbin/route -n delete -host "$addr" >/dev/null 2>&1 || true
+      case "$action" in
+        apply)
+          if /sbin/route -n add -host "$addr" -interface "$TUNDEV" >/dev/null 2>&1; then
+            printf 'vpnc_wrapper_probe_route_sync: %%s %%s %%s -> %%s\n' "$action" "$host" "$addr" "$TUNDEV" >> "$log_file" 2>&1
+          elif /sbin/route -n change -host "$addr" -interface "$TUNDEV" >/dev/null 2>&1; then
+            printf 'vpnc_wrapper_probe_route_sync: %%s %%s %%s -> %%s\n' "$action" "$host" "$addr" "$TUNDEV" >> "$log_file" 2>&1
+          else
+            printf 'vpnc_wrapper_probe_route_sync_failed: %%s %%s %%s -> %%s\n' "$action" "$host" "$addr" "$TUNDEV" >> "$log_file" 2>&1
+          fi
+          ;;
+        remove)
+          printf 'vpnc_wrapper_probe_route_sync: %%s %%s %%s\n' "$action" "$host" "$addr" >> "$log_file" 2>&1
+          ;;
+      esac
+    done
+    printf 'vpnc_wrapper_probe_route_sync_end: %%s %%s %%s\n' "$action" "$host" "$TUNDEV" >> "$log_file" 2>&1
   done
 }
 
@@ -957,6 +1109,7 @@ log_probe_snapshot() {
 log_snapshot before
 case "${reason:-}" in
   pre-init)
+    capture_default_route
     [ "$diag_probes_enabled" = "1" ] && log_probe_snapshot
     ;;
 esac
@@ -971,17 +1124,27 @@ fi
 /bin/sh -c "$base_command"
 rc=$?
 case "${reason:-}" in
+  pre-init)
+    if [ "$rc" -eq 0 ]; then
+      pin_vpn_gateway_route
+    fi
+    ;;
   disconnect)
+    remove_vpn_gateway_route
+    sync_probe_host_routes remove
     remove_scutil_state
     clear_split_include_resolvers
     remove_dns_shim
     ;;
   connect|reconnect|attempt-reconnect)
     if [ "$rc" -eq 0 ]; then
+      pin_vpn_gateway_route
+      remove_scoped_default_route
       enforce_route_overrides
       apply_scutil_state
       clear_split_include_resolvers
       apply_dns_shim
+      sync_probe_host_routes apply
     fi
     ;;
 esac
@@ -1338,7 +1501,7 @@ func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar htt
 	req.Header.Set("X-Aggregate-Auth", "1")
 	req.Header.Set("X-Transcend-Version", "1")
 
-	resp, err := (&http.Client{Timeout: authTimeout, Jar: jar}).Do(req)
+	resp, err := newSAMLHTTPClient(jar, nil).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("SAML init request failed: %w", err)
 	}
@@ -1558,7 +1721,7 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 	req.Header.Set("X-Aggregate-Auth", "1")
 	req.Header.Set("X-Transcend-Version", "1")
 
-	resp, err := (&http.Client{Timeout: authTimeout, Jar: state.CookieJar}).Do(req)
+	resp, err := newSAMLHTTPClient(state.CookieJar, nil).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("SAML auth-reply failed: %w", err)
 	}
@@ -1599,6 +1762,7 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 		Cookie:     sessionToken,
 		Host:       state.BaseHost,
 		ConnectURL: fmt.Sprintf("https://%s", server),
+		Resolve:    resolveOpenConnectResolve(server),
 	}
 	logAuthResult(logWriter, "aggregate_auth", result)
 	return result, nil
@@ -2802,6 +2966,52 @@ func findOpenConnectInterface(pid int) string {
 	return ""
 }
 
+func findTrackedOpenConnectInterface(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	current, err := LoadCurrent(ResolveCacheDir(""))
+	if err != nil || current.PID != pid {
+		return ""
+	}
+	return firstNonEmpty(findOpenConnectInterfaceFromLog(current.LogPath), current.Interface)
+}
+
+func findOpenConnectInterfaceFromLog(logPath string) string {
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" {
+		return ""
+	}
+	file, err := os.Open(logPath)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var lastIface string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.Contains(line, "InterfaceName :"):
+			iface := strings.TrimSpace(strings.TrimPrefix(line, "InterfaceName :"))
+			if strings.HasPrefix(iface, "utun") {
+				lastIface = iface
+			}
+		case strings.HasPrefix(line, "TUNDEV="):
+			iface := strings.TrimSpace(strings.TrimPrefix(line, "TUNDEV="))
+			if strings.HasPrefix(iface, "utun") {
+				lastIface = iface
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ""
+	}
+	return lastIface
+}
+
 func isVPNInterface(iface string) bool {
 	out, err := execCommandOpenConnect("ifconfig", iface).Output()
 	if err != nil {
@@ -3630,7 +3840,7 @@ func resolveOpenConnectAuthTarget(server string) (targetURL string, usergroup st
 }
 
 func resolveNativeCSDHostURL(fqdn string) (string, error) {
-	hosts, err := lookupHostOpenConnect(fqdn)
+	hosts, err := lookupOpenConnectHosts(fqdn)
 	if err != nil {
 		return "", fmt.Errorf("resolve native libcsd host %s: %w", fqdn, err)
 	}
@@ -3642,6 +3852,121 @@ func resolveNativeCSDHostURL(fqdn string) (string, error) {
 		selected = "[" + selected + "]"
 	}
 	return "https://" + selected, nil
+}
+
+func resolveOpenConnectDialAddress(address string) (string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", err
+	}
+	if ip := net.ParseIP(strings.Trim(strings.TrimSpace(host), "[]")); ip != nil {
+		return address, nil
+	}
+	hosts, err := lookupOpenConnectHosts(host)
+	if err != nil {
+		return "", err
+	}
+	selected := selectPreferredHost(hosts)
+	if selected == "" {
+		return "", fmt.Errorf("resolve host %s: no usable addresses", host)
+	}
+	return net.JoinHostPort(selected, port), nil
+}
+
+func lookupOpenConnectHosts(host string) ([]string, error) {
+	hosts, err := lookupHostOpenConnect(host)
+	if len(hosts) > 0 {
+		return hosts, nil
+	}
+	if fallback := systemLookupHostOpenConnect(host); len(fallback) > 0 {
+		return fallback, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func lookupHostViaDSCacheutilOpenConnect(host string) []string {
+	output := commandOutput("dscacheutil", "-q", "host", "-a", "name", strings.TrimSpace(host))
+	if output == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var hosts []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ip_address:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "ip_address:"))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		hosts = append(hosts, value)
+	}
+	return hosts
+}
+
+func lookupHostViaSystemSourcesOpenConnect(host string) []string {
+	if hosts := lookupHostViaDSCacheutilOpenConnect(host); len(hosts) > 0 {
+		return hosts
+	}
+	return lookupHostAliasesCacheOpenConnect(host)
+}
+
+func lookupHostAliasesCacheOpenConnect(host string) []string {
+	cachePath := filepath.Join(ResolveCacheDir(""), "host-aliases.json")
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		return nil
+	}
+	aliases := map[string][]string{}
+	if err := json.Unmarshal(raw, &aliases); err != nil {
+		return nil
+	}
+	values := aliases[strings.ToLower(strings.TrimSpace(host))]
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var hosts []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		hosts = append(hosts, value)
+	}
+	return hosts
+}
+
+func resolveOpenConnectResolve(server string) string {
+	parsed, err := parseHTTPSURL(server)
+	if err != nil {
+		return ""
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return ""
+	}
+	hosts, err := lookupOpenConnectHosts(host)
+	if err != nil {
+		return ""
+	}
+	selected := selectPreferredHost(hosts)
+	if selected == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%s", host, selected)
 }
 
 func selectPreferredHost(hosts []string) string {

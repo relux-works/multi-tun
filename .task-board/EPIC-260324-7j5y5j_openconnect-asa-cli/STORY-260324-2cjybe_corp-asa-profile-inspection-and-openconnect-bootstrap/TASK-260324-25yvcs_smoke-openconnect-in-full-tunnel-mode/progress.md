@@ -8,7 +8,7 @@ codex
 2026-03-24T19:42:30Z
 
 ## Last Update
-2026-03-25T14:42:32Z
+2026-03-28T12:10:54Z
 
 ## Blocked By
 - (none)
@@ -31,6 +31,7 @@ Added scripts/openconnect-gitlab-smoke.sh as a non-autorun smoke helper for the 
 Updated the smoke helper to warm sudo once at startup and keep the sudo timestamp alive during the whole run, so vless-tun stop/run and forced openconnect cleanup do not re-prompt mid-script. Also fixed EXIT cleanup so the sudo keepalive and background run process are both torn down reliably.
 Follow-up architecture note: repeated sudo prompts are a limitation of the current direct CLI->root model for vless-tun/openconnect-tun. Proper fix is a privileged launchd helper or NetworkExtension-style service so start/stop/status do not rely on per-command sudo; a narrow sudoers NOPASSWD rule is only a short-term workaround.
 Latest live Corp result on 2026-03-25: aggregate-auth now preserves reply urlpath, shares cookie jar, shims xmlstarlet/curl for stock csd-post.sh, and can loop hostscan->wait->re-init multiple times. The ASA still returns a fresh host-scan ticket/token after each TOKEN_SUCCESS and finally fails SAML auth-reply with error id=13 (Cisco Secure Desktop not installed on the client). This isolates the remaining blocker to Corp-specific CSD payload semantics rather than SAML/browser plumbing alone.
+2026-03-28: live overlay smoke over active vless-tun now reaches helper-backed openconnect connect and obtains the Corp session cookie. Non-Corp reachability stayed up enough for curl https://www.avito.ru/ to return HTTP/2 403 from QRATOR, but GitLab SSH still stalled during banner exchange and the user manually interrupted openconnect after the machine hung. No successful GitLab clone directory was created.
 
 ## Precondition Resources
 (none)
