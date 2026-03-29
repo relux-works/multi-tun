@@ -229,7 +229,7 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		return preparedStart{}, err
 	}
 
-	data, err := singbox.Render(cfg, profile)
+	data, err := singbox.RenderWithOptions(cfg, profile, resolveRenderOptions(cfg.Render.ModeOrDefault()))
 	if err != nil {
 		return preparedStart{}, err
 	}

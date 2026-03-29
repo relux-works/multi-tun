@@ -5,12 +5,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"multi-tun/internal/config"
 	"multi-tun/internal/model"
 )
 
+type OverlayDNS struct {
+	Domains     []string
+	Nameservers []string
+}
+
+type RenderOptions struct {
+	OverlayDNS *OverlayDNS
+}
+
 func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {
+	return RenderWithOptions(cfg, profile, RenderOptions{})
+}
+
+func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options RenderOptions) ([]byte, error) {
 	transport, err := buildTransport(profile)
 	if err != nil {
 		return nil, err
@@ -18,6 +32,8 @@ func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {
 	mode := cfg.Render.ModeOrDefault()
 	bypassSuffixes := cfg.Render.NormalizedBypassSuffixes()
 	bypassExcludes := cfg.Render.NormalizedBypassExcludes()
+	overlayDNS := normalizeOverlayDNS(options.OverlayDNS)
+	useOverlayDNS := mode == config.RenderModeTun && overlayDNS != nil
 
 	proxyOutbound := map[string]any{
 		"type":        "vless",
@@ -38,14 +54,13 @@ func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {
 
 	useBypassRules := len(bypassSuffixes) > 0
 	useBypassExcludes := len(bypassExcludes) > 0
-	useDirectDNSBypass := useBypassRules && mode == config.RenderModeTun
+	useDirectDNSBypass := useBypassRules && mode == config.RenderModeTun && !useOverlayDNS
+	directDomainResolver := "dns-direct"
+	if useOverlayDNS {
+		directDomainResolver = "dns-proxy"
+	}
 
 	dnsServers := []any{
-		map[string]any{
-			"type":   "local",
-			"tag":    "dns-direct",
-			"detour": "direct",
-		},
 		map[string]any{
 			"type":        "tls",
 			"tag":         "dns-proxy",
@@ -58,11 +73,38 @@ func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {
 			},
 		},
 	}
+	if !useOverlayDNS {
+		dnsServers = append([]any{
+			map[string]any{
+				"type":   "local",
+				"tag":    "dns-direct",
+				"detour": "direct",
+			},
+		}, dnsServers...)
+	}
+	if useOverlayDNS {
+		dnsServers = append(dnsServers, map[string]any{
+			"type":        "udp",
+			"tag":         "dns-overlay",
+			"server":      overlayDNS.Nameservers[0],
+			"server_port": 53,
+			"detour":      "direct",
+		})
+	}
 	dnsRules := []any{
 		map[string]any{
 			"action": "route",
 			"server": "dns-proxy",
 		},
+	}
+	if useOverlayDNS {
+		dnsRules = append([]any{
+			map[string]any{
+				"domain_suffix": overlayDNS.Domains,
+				"action":        "route",
+				"server":        "dns-overlay",
+			},
+		}, dnsRules...)
 	}
 	routeRuleSet := []any{}
 	routeRules := baseRouteRules(mode)
@@ -144,7 +186,7 @@ func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {
 			map[string]any{
 				"type":            "direct",
 				"tag":             "direct",
-				"domain_resolver": "dns-direct",
+				"domain_resolver": directDomainResolver,
 			},
 			map[string]any{
 				"type": "block",
@@ -168,6 +210,49 @@ func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+func normalizeOverlayDNS(overlay *OverlayDNS) *OverlayDNS {
+	if overlay == nil {
+		return nil
+	}
+
+	domains := make([]string, 0, len(overlay.Domains))
+	seenDomains := map[string]struct{}{}
+	for _, domain := range overlay.Domains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		if _, ok := seenDomains[domain]; ok {
+			continue
+		}
+		seenDomains[domain] = struct{}{}
+		domains = append(domains, domain)
+	}
+
+	nameservers := make([]string, 0, len(overlay.Nameservers))
+	seenNameservers := map[string]struct{}{}
+	for _, nameserver := range overlay.Nameservers {
+		nameserver = strings.TrimSpace(nameserver)
+		if nameserver == "" {
+			continue
+		}
+		if _, ok := seenNameservers[nameserver]; ok {
+			continue
+		}
+		seenNameservers[nameserver] = struct{}{}
+		nameservers = append(nameservers, nameserver)
+	}
+
+	if len(domains) == 0 || len(nameservers) == 0 {
+		return nil
+	}
+
+	return &OverlayDNS{
+		Domains:     domains,
+		Nameservers: nameservers,
+	}
 }
 
 func baseRouteRules(mode string) []any {

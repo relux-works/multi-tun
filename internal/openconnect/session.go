@@ -41,6 +41,11 @@ type CurrentSession struct {
 	HelperSocketPath string    `json:"helper_socket_path,omitempty"`
 }
 
+type OverlayDNS struct {
+	Domains     []string
+	Nameservers []string
+}
+
 type stopSnapshot struct {
 	VPNBinary  string
 	CiscoState State
@@ -92,6 +97,38 @@ func LoadCurrent(cacheDir string) (CurrentSession, error) {
 		return CurrentSession{}, err
 	}
 	return current, nil
+}
+
+func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
+	current, err := LoadCurrent(ResolveCacheDir(cacheDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	alive, _, err := SessionAlive(current)
+	if err != nil {
+		return nil, err
+	}
+	if !alive {
+		return nil, nil
+	}
+
+	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
+		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
+		VPNDomains:     append([]string(nil), current.VPNDomains...),
+		VPNNameservers: append([]string(nil), current.VPNNameservers...),
+	})
+	if spec == nil || len(spec.Domains) == 0 || len(spec.Nameservers) == 0 {
+		return nil, nil
+	}
+
+	return &OverlayDNS{
+		Domains:     append([]string(nil), spec.Domains...),
+		Nameservers: append([]string(nil), spec.Nameservers...),
+	}, nil
 }
 
 func SaveCurrent(cacheDir string, current CurrentSession) error {
