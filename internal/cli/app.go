@@ -179,7 +179,7 @@ func (a *App) runRender(args []string) int {
 		return 1
 	}
 
-	data, err := singbox.Render(cfg, profile)
+	data, err := singbox.RenderWithOptions(cfg, profile, resolveRenderOptions(cfg.Render.ModeOrDefault()))
 	if err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1
