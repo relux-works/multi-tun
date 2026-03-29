@@ -337,9 +337,6 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	if err := SaveMetadata(current); err != nil {
 		return ConnectResult{}, err
 	}
-	if err := SaveCurrent(cacheDir, current); err != nil {
-		return ConnectResult{}, err
-	}
 
 	auth, err := authenticate(server, options, ocPath, logFile, options.ProgressWriter)
 	if err != nil {
