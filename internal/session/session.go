@@ -44,25 +44,31 @@ var (
 type StartOptions struct {
 	Mode             string
 	BypassSuffixes   []string
+	TunAddresses     []string
+	OverlayDNSActive bool
 	PrivilegedLaunch config.PrivilegedLaunchConfig
 }
 
 type CurrentSession struct {
-	ID              string    `json:"id"`
-	PID             int       `json:"pid"`
-	StartedAt       time.Time `json:"started_at"`
-	ConfigPath      string    `json:"config_path"`
-	LogPath         string    `json:"log_path"`
-	MetadataPath    string    `json:"metadata_path"`
-	ProfileID       string    `json:"profile_id"`
-	ProfileName     string    `json:"profile_name"`
-	ProfileEndpoint string    `json:"profile_endpoint"`
-	Mode            string    `json:"mode"`
-	BypassSuffixes  []string  `json:"bypass_suffixes"`
-	Command         []string  `json:"command"`
-	LaunchMode      string    `json:"launch_mode,omitempty"`
-	LaunchLabel     string    `json:"launch_label,omitempty"`
-	LaunchPlistPath string    `json:"launch_plist_path,omitempty"`
+	ID                       string    `json:"id"`
+	PID                      int       `json:"pid"`
+	StartedAt                time.Time `json:"started_at"`
+	ConfigPath               string    `json:"config_path"`
+	LogPath                  string    `json:"log_path"`
+	MetadataPath             string    `json:"metadata_path"`
+	ProfileID                string    `json:"profile_id"`
+	ProfileName              string    `json:"profile_name"`
+	ProfileEndpoint          string    `json:"profile_endpoint"`
+	Mode                     string    `json:"mode"`
+	BypassSuffixes           []string  `json:"bypass_suffixes"`
+	Command                  []string  `json:"command"`
+	LaunchMode               string    `json:"launch_mode,omitempty"`
+	LaunchLabel              string    `json:"launch_label,omitempty"`
+	LaunchPlistPath          string    `json:"launch_plist_path,omitempty"`
+	DNSHandoffService        string    `json:"dns_handoff_service,omitempty"`
+	DNSHandoffServer         string    `json:"dns_handoff_server,omitempty"`
+	DNSHandoffRestoreServers []string  `json:"dns_handoff_restore_servers,omitempty"`
+	DNSHandoffRestoreAuto    bool      `json:"dns_handoff_restore_auto,omitempty"`
 }
 
 func Start(cacheDir, configPath string, profile model.Profile, options StartOptions) (CurrentSession, error) {
@@ -154,6 +160,17 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		session.PID = pid
 	}
 
+	if err := applySystemDNSHandoff(&session, options); err != nil {
+		_ = stopStartedSession(session)
+		_ = ClearCurrent(cacheDir)
+		return CurrentSession{}, fmt.Errorf("configure system DNS: %w", err)
+	}
+
+	if err := saveJSON(metadataPath, session); err != nil {
+		_ = stopStartedSession(session)
+		return CurrentSession{}, err
+	}
+
 	if err := SaveCurrent(cacheDir, session); err != nil {
 		_ = stopStartedSession(session)
 		return CurrentSession{}, err
@@ -181,6 +198,9 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 		current.PID = pid
 	}
 	if !alive {
+		if err := restoreSystemDNSHandoff(current); err != nil {
+			return CurrentSession{}, "", err
+		}
 		if err := ClearCurrent(cacheDir); err != nil {
 			return CurrentSession{}, "", err
 		}
@@ -192,12 +212,18 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 		if err := stopHelperSession(current, force, timeout); err != nil {
 			return CurrentSession{}, "", err
 		}
+		if err := restoreSystemDNSHandoff(current); err != nil {
+			return CurrentSession{}, "", err
+		}
 		if err := ClearCurrent(cacheDir); err != nil {
 			return CurrentSession{}, "", err
 		}
 		return current, "stopped", nil
 	case config.LaunchModeLaunchd:
 		if err := stopLaunchdSessionFunc(current, timeout); err != nil {
+			return CurrentSession{}, "", err
+		}
+		if err := restoreSystemDNSHandoff(current); err != nil {
 			return CurrentSession{}, "", err
 		}
 		if err := ClearCurrent(cacheDir); err != nil {
@@ -318,6 +344,9 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 			return CurrentSession{}, "", err
 		}
 		if !alive {
+			if err := restoreSystemDNSHandoff(current); err != nil {
+				return CurrentSession{}, "", err
+			}
 			if err := ClearCurrent(cacheDir); err != nil {
 				return CurrentSession{}, "", err
 			}
@@ -339,6 +368,9 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 			return CurrentSession{}, "", err
 		}
 		if !alive {
+			if err := restoreSystemDNSHandoff(current); err != nil {
+				return CurrentSession{}, "", err
+			}
 			if err := ClearCurrent(cacheDir); err != nil {
 				return CurrentSession{}, "", err
 			}
@@ -351,14 +383,25 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 }
 
 func stopStartedSession(current CurrentSession) error {
+	restoreErr := restoreSystemDNSHandoff(current)
 	switch current.LaunchMode {
 	case config.LaunchModeHelper:
-		return killHelperSession(current)
+		if err := killHelperSession(current); err != nil {
+			return err
+		}
 	case config.LaunchModeLaunchd:
-		return stopLaunchdSessionFunc(current, 1500*time.Millisecond)
+		if err := stopLaunchdSessionFunc(current, 1500*time.Millisecond); err != nil {
+			return err
+		}
 	default:
-		return signalGroup(current.PID, syscall.SIGKILL)
+		if err := signalGroup(current.PID, syscall.SIGKILL); err != nil {
+			return err
+		}
 	}
+	if restoreErr != nil {
+		return restoreErr
+	}
+	return nil
 }
 
 func resolveLaunchMode(renderMode string, launch config.PrivilegedLaunchConfig) (string, error) {
