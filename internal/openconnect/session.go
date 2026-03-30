@@ -1,6 +1,7 @@
 package openconnect
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +56,23 @@ type stopSnapshot struct {
 	Routes     []string
 	ScutilDNS  string
 	RouteTable string
+}
+
+type connectConvergenceExpectations struct {
+	RouteOverrides bool
+	DNSShim        bool
+	ProbeSync      bool
+}
+
+type connectConvergenceState struct {
+	ConnectEventSeen  bool
+	ConnectExitSeen   bool
+	ConnectExitCode   int
+	RouteOverrideSeen bool
+	DNSShimSeen       bool
+	ProbeSyncSeen     bool
+	ProbeSyncSuccess  bool
+	PendingProbeSync  int
 }
 
 func DefaultCacheDir() string {
@@ -176,6 +195,244 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 		return false, current.PID, err
 	}
 	return alive, current.PID, nil
+}
+
+func connectConvergenceExpectationsForSession(current CurrentSession) connectConvergenceExpectations {
+	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
+		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
+		VPNDomains:     append([]string(nil), current.VPNDomains...),
+		VPNNameservers: append([]string(nil), current.VPNNameservers...),
+	})
+	if spec == nil {
+		return connectConvergenceExpectations{}
+	}
+	return connectConvergenceExpectations{
+		RouteOverrides: len(spec.RouteOverrides) > 0,
+		DNSShim:        !spec.UseScutilState && strings.TrimSpace(spec.Label) != "" && len(spec.Domains) > 0 && len(spec.Nameservers) > 0,
+	}
+}
+
+func (expect connectConvergenceExpectations) required() bool {
+	return expect.RouteOverrides || expect.DNSShim || expect.ProbeSync
+}
+
+func (state connectConvergenceState) ready(expect connectConvergenceExpectations) (bool, error) {
+	if !state.ConnectEventSeen || !state.ConnectExitSeen {
+		return false, nil
+	}
+	if state.ConnectExitCode != 0 {
+		return false, fmt.Errorf("split-include wrapper exited with status %d", state.ConnectExitCode)
+	}
+	if expect.RouteOverrides && !state.RouteOverrideSeen {
+		return false, nil
+	}
+	if expect.DNSShim && !state.DNSShimSeen {
+		return false, nil
+	}
+	if expect.ProbeSync {
+		if !state.ProbeSyncSeen || !state.ProbeSyncSuccess || state.PendingProbeSync > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func waitForPostConnectConvergence(current CurrentSession, timeout time.Duration) error {
+	expect := connectConvergenceExpectationsForSession(current)
+	if !expect.required() {
+		return nil
+	}
+
+	deadline := time.Now().Add(timeout)
+	lastState := connectConvergenceState{}
+	for {
+		alive, pid, err := SessionAlive(current)
+		if err != nil {
+			return err
+		}
+		if pid > 0 {
+			current.PID = pid
+		}
+		if !alive {
+			return fmt.Errorf("openconnect exited while applying split-include routes and dns")
+		}
+
+		state, err := readConnectConvergenceState(current.LogPath)
+		if err == nil {
+			lastState = state
+			ready, readyErr := state.ready(expect)
+			if readyErr != nil {
+				return readyErr
+			}
+			if ready {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			if lastState.ConnectEventSeen {
+				return fmt.Errorf(
+					"timed out waiting for split-include routes and dns (route_override=%t dns_shim=%t probe_sync=%t)",
+					lastState.RouteOverrideSeen,
+					lastState.DNSShimSeen,
+					!expect.ProbeSync || (lastState.ProbeSyncSeen && lastState.ProbeSyncSuccess && lastState.PendingProbeSync == 0),
+				)
+			}
+			return fmt.Errorf("timed out waiting for split-include connect hooks to start")
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func probeHostsForSession(current CurrentSession) []string {
+	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
+		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
+		VPNDomains:     append([]string(nil), current.VPNDomains...),
+		VPNNameservers: append([]string(nil), current.VPNNameservers...),
+	})
+	if spec == nil || len(spec.ProbeHosts) == 0 {
+		return nil
+	}
+	return append([]string(nil), spec.ProbeHosts...)
+}
+
+func waitForProbeRouteWarmup(current CurrentSession, timeout time.Duration) error {
+	hosts := probeHostsForSession(current)
+	if len(hosts) == 0 {
+		return nil
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		alive, pid, err := SessionAlive(current)
+		if err != nil {
+			return err
+		}
+		if pid > 0 {
+			current.PID = pid
+		}
+		if !alive {
+			return fmt.Errorf("openconnect exited while warming hostname routes")
+		}
+
+		ready, err := probeRouteWarmupReady(current.LogPath, hosts)
+		if err == nil && ready {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for hostname route warmup")
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func probeRouteWarmupReady(logPath string, hosts []string) (bool, error) {
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" || len(hosts) == 0 {
+		return false, nil
+	}
+
+	file, err := os.Open(logPath)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	remaining := map[string]struct{}{}
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		remaining[host] = struct{}{}
+	}
+	if len(remaining) == 0 {
+		return false, nil
+	}
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "vpnc_wrapper_probe_route_sync: apply ") {
+			continue
+		}
+		for host := range remaining {
+			if strings.Contains(line, "apply "+host+" ") {
+				delete(remaining, host)
+			}
+		}
+		if len(remaining) == 0 {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func readConnectConvergenceState(logPath string) (connectConvergenceState, error) {
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" {
+		return connectConvergenceState{}, nil
+	}
+
+	file, err := os.Open(logPath)
+	if err != nil {
+		return connectConvergenceState{}, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	state := connectConvergenceState{}
+	connectActive := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.HasPrefix(line, "vpnc_wrapper_reason:"):
+			reason := strings.TrimSpace(strings.TrimPrefix(line, "vpnc_wrapper_reason:"))
+			switch reason {
+			case "connect", "reconnect", "attempt-reconnect":
+				state = connectConvergenceState{ConnectEventSeen: true}
+				connectActive = true
+			default:
+				connectActive = false
+			}
+		case !connectActive:
+			continue
+		case strings.HasPrefix(line, "vpnc_wrapper_route_override: begin"):
+			state.RouteOverrideSeen = true
+		case strings.HasPrefix(line, "vpnc_wrapper_dns_shim: apply"):
+			state.DNSShimSeen = true
+		case strings.HasPrefix(line, "vpnc_wrapper_probe_route_sync_begin: apply "):
+			state.ProbeSyncSeen = true
+			state.PendingProbeSync++
+		case strings.HasPrefix(line, "vpnc_wrapper_probe_route_sync: apply "):
+			state.ProbeSyncSeen = true
+			state.ProbeSyncSuccess = true
+		case strings.HasPrefix(line, "vpnc_wrapper_probe_route_sync_end: apply "):
+			state.ProbeSyncSeen = true
+			if state.PendingProbeSync > 0 {
+				state.PendingProbeSync--
+			}
+		case strings.HasPrefix(line, "vpnc_wrapper_base_exit:"):
+			exitCode, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "vpnc_wrapper_base_exit:")))
+			if err != nil {
+				return connectConvergenceState{}, fmt.Errorf("parse connect wrapper exit: %w", err)
+			}
+			state.ConnectExitSeen = true
+			state.ConnectExitCode = exitCode
+			connectActive = false
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return connectConvergenceState{}, err
+	}
+	return state, nil
 }
 
 func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error) {

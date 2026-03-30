@@ -31,6 +31,8 @@ import (
 const (
 	authTimeout        = 5 * time.Minute
 	openconnectTimeout = 20 * time.Second
+	postConnectTimeout = 20 * time.Second
+	probeWarmupTimeout = 8 * time.Second
 )
 
 const (
@@ -369,6 +371,20 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		findOpenConnectInterface(current.PID),
 		current.Interface,
 	)
+	if connectConvergenceExpectationsForSession(current).required() {
+		writeProgressf(options.ProgressWriter, "phase: applying split-include routes and dns")
+		if err := waitForPostConnectConvergence(current, postConnectTimeout); err != nil {
+			_ = interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
+			_ = ClearCurrent(cacheDir)
+			return ConnectResult{}, formatConnectError(err, logPath)
+		}
+	}
+	if probeHosts := probeHostsForSession(current); len(probeHosts) > 0 {
+		writeProgressf(options.ProgressWriter, "phase: warming hostname routes")
+		if err := waitForProbeRouteWarmup(current, probeWarmupTimeout); err != nil {
+			writeProgressf(options.ProgressWriter, "warmup: hostname routes still converging")
+		}
+	}
 
 	if err := SaveMetadata(current); err != nil {
 		_ = interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
@@ -620,7 +636,8 @@ func supplementalResolverSpecForConnect(mode string, server string, options Conn
 			ProbeHosts: []string{
 				"gitlab.services.corp.example",
 			},
-			RouteOverrides: uniqueStrings(routeOverrides),
+			RouteOverrides:       uniqueStrings(routeOverrides),
+			ManageSearchResolver: true,
 		}
 	default:
 		return nil
@@ -892,6 +909,52 @@ resolve_probe_host_addresses() {
   printf '%%s\n' "$addresses"
 }
 
+resolve_probe_host_addresses_vpn_dns() {
+  host=$1
+  [ -n "$shim_nameservers" ] || return 0
+  command -v dig >/dev/null 2>&1 || return 0
+  printf '%%s\n' "$shim_nameservers" | while IFS= read -r ns; do
+    [ -n "$ns" ] || continue
+    dig +time=1 +tries=1 +short @"$ns" "$host" 2>/dev/null || true
+  done | filter_probe_host_addresses
+}
+
+resolve_probe_host_addresses_for_apply() {
+  host=$1
+  addresses=$(resolve_probe_host_addresses_vpn_dns "$host")
+  if [ -z "$addresses" ]; then
+    addresses=$(/usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' 2 dscacheutil -q host -a name "$host" 2>/dev/null | awk '/^ip_address:/ {print $2}' | filter_probe_host_addresses)
+  fi
+  printf '%%s\n' "$addresses"
+}
+
+resolve_probe_host_addresses_with_retry() {
+  host=$1
+  action=$2
+  attempts=${3:-8}
+  while [ "$attempts" -gt 0 ]; do
+    case "$action" in
+      apply)
+        addresses=$(resolve_probe_host_addresses_for_apply "$host")
+        ;;
+      *)
+        addresses=$(resolve_probe_host_addresses "$host")
+        ;;
+    esac
+    if [ -n "$addresses" ]; then
+      printf '%%s\n' "$addresses"
+      return 0
+    fi
+    attempts=$((attempts - 1))
+    if [ "$attempts" -le 0 ]; then
+      break
+    fi
+    printf 'vpnc_wrapper_probe_route_sync_retry: %%s %%s remaining=%%s\n' "$action" "$host" "$attempts" >> "$log_file" 2>&1
+    sleep 1
+  done
+  return 0
+}
+
 sync_probe_host_routes() {
   action=$1
   [ -n "$probe_hosts" ] || return 0
@@ -899,7 +962,14 @@ sync_probe_host_routes() {
   printf '%%s\n' "$probe_hosts" | while IFS= read -r host; do
     [ -n "$host" ] || continue
     printf 'vpnc_wrapper_probe_route_sync_begin: %%s %%s %%s\n' "$action" "$host" "$TUNDEV" >> "$log_file" 2>&1
-    addresses=$(resolve_probe_host_addresses "$host")
+    case "$action" in
+      apply)
+        addresses=$(resolve_probe_host_addresses_with_retry "$host" "$action" 6)
+        ;;
+      *)
+        addresses=$(resolve_probe_host_addresses "$host")
+        ;;
+    esac
     if [ -z "$addresses" ]; then
       printf 'vpnc_wrapper_probe_route_sync_resolve_failed: %%s %%s\n' "$action" "$host" >> "$log_file" 2>&1
       printf 'vpnc_wrapper_probe_route_sync_end: %%s %%s %%s\n' "$action" "$host" "$TUNDEV" >> "$log_file" 2>&1
@@ -925,6 +995,23 @@ sync_probe_host_routes() {
     done
     printf 'vpnc_wrapper_probe_route_sync_end: %%s %%s %%s\n' "$action" "$host" "$TUNDEV" >> "$log_file" 2>&1
   done
+}
+
+launch_probe_host_route_warmup() {
+  [ -n "$probe_hosts" ] || return 0
+  [ -n "${TUNDEV:-}" ] || return 0
+  if command -v nohup >/dev/null 2>&1; then
+    env TUNDEV="$TUNDEV" VPNGATEWAY="${VPNGATEWAY:-}" nohup "$0" --probe-sync-apply >/dev/null 2>&1 &
+  else
+    env TUNDEV="$TUNDEV" VPNGATEWAY="${VPNGATEWAY:-}" "$0" --probe-sync-apply >/dev/null 2>&1 &
+  fi
+  warmup_pid=$!
+  if [ -n "$warmup_pid" ]; then
+    printf 'vpnc_wrapper_probe_route_sync_async: apply %%s pid=%%s\n' "$TUNDEV" "$warmup_pid" >> "$log_file" 2>&1
+  else
+    printf 'vpnc_wrapper_probe_route_sync_async_failed: apply %%s\n' "$TUNDEV" >> "$log_file" 2>&1
+    sync_probe_host_routes apply
+  fi
 }
 
 apply_dns_shim() {
@@ -1092,6 +1179,11 @@ log_probe_snapshot() {
   done
 }
 
+if [ "${1:-}" = "--probe-sync-apply" ]; then
+  sync_probe_host_routes apply
+  exit 0
+fi
+
 {
   printf 'vpnc_wrapper_event: begin\n'
   printf 'vpnc_wrapper_reason: %%s\n' "${reason:-unknown}"
@@ -1139,7 +1231,7 @@ case "${reason:-}" in
       apply_scutil_state
       clear_split_include_resolvers
       apply_dns_shim
-      sync_probe_host_routes apply
+      launch_probe_host_route_warmup
     fi
     ;;
 esac
