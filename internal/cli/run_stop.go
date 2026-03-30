@@ -62,6 +62,8 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:             cfg.Render.ModeOrDefault(),
 		BypassSuffixes:   cfg.Render.BypassSuffixes,
+		TunAddresses:     append([]string(nil), cfg.Render.TunAddresses...),
+		OverlayDNSActive: prepared.renderOptions.OverlayDNS != nil,
 		PrivilegedLaunch: cfg.Render.PrivilegedLaunchOrDefault(),
 	})
 	if err != nil {
@@ -123,6 +125,8 @@ func (a *App) runReconnect(args []string) int {
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:             cfg.Render.ModeOrDefault(),
 		BypassSuffixes:   cfg.Render.BypassSuffixes,
+		TunAddresses:     append([]string(nil), cfg.Render.TunAddresses...),
+		OverlayDNSActive: prepared.renderOptions.OverlayDNS != nil,
 		PrivilegedLaunch: cfg.Render.PrivilegedLaunchOrDefault(),
 	})
 	if err != nil {
@@ -189,8 +193,9 @@ func (a *App) runStop(args []string) int {
 }
 
 type preparedStart struct {
-	profile model.Profile
-	target  string
+	profile       model.Profile
+	target        string
+	renderOptions singbox.RenderOptions
 }
 
 func (a *App) parseStartOptions(name string, args []string, refreshDefault bool) (startOptions, int, error) {
@@ -229,7 +234,8 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		return preparedStart{}, err
 	}
 
-	data, err := singbox.RenderWithOptions(cfg, profile, resolveRenderOptions(cfg.Render.ModeOrDefault()))
+	renderOptions := resolveRenderOptions(cfg.Render.ModeOrDefault())
+	data, err := singbox.RenderWithOptions(cfg, profile, renderOptions)
 	if err != nil {
 		return preparedStart{}, err
 	}
@@ -243,8 +249,9 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	}
 
 	return preparedStart{
-		profile: profile,
-		target:  target,
+		profile:       profile,
+		target:        target,
+		renderOptions: renderOptions,
 	}, nil
 }
 

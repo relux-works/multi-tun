@@ -58,6 +58,14 @@ func (a *App) runStatus(args []string) int {
 		if current.LaunchMode == config.LaunchModeLaunchd {
 			fmt.Fprintf(a.stdout, "launch_label: %s\n", current.LaunchLabel)
 		}
+		if current.DNSHandoffService != "" && current.DNSHandoffServer != "" {
+			fmt.Fprintf(a.stdout, "dns_handoff: %s -> %s\n", current.DNSHandoffService, current.DNSHandoffServer)
+			if current.DNSHandoffRestoreAuto {
+				fmt.Fprintln(a.stdout, "dns_handoff_restore: automatic")
+			} else if len(current.DNSHandoffRestoreServers) > 0 {
+				fmt.Fprintf(a.stdout, "dns_handoff_restore: %s\n", strings.Join(current.DNSHandoffRestoreServers, ", "))
+			}
+		}
 	}
 	switch mode {
 	case config.RenderModeTun:
