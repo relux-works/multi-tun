@@ -3,6 +3,7 @@ package openconnect
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -107,5 +108,141 @@ func TestActiveOverlayDNSReturnsExpandedDomainsForLiveSession(t *testing.T) {
 	}
 	if !containsString(overlay.Nameservers, "10.23.16.4") || !containsString(overlay.Nameservers, "10.23.0.23") {
 		t.Fatalf("overlay.Nameservers = %#v, want Corp nameservers", overlay.Nameservers)
+	}
+}
+
+func TestConnectConvergenceExpectationsForSplitIncludeSession(t *testing.T) {
+	expect := connectConvergenceExpectationsForSession(CurrentSession{
+		Mode:           ConnectModeSplitInclude,
+		Server:         "vpn-gw2.corp.example/outside",
+		IncludeRoutes:  []string{"10.0.0.0/8"},
+		VPNDomains:     []string{"corp.example"},
+		VPNNameservers: []string{"10.23.16.4", "10.23.0.23"},
+	})
+	if !expect.RouteOverrides || !expect.DNSShim {
+		t.Fatalf("expect = %#v, want route and dns readiness checks enabled", expect)
+	}
+	if expect.ProbeSync {
+		t.Fatalf("expect.ProbeSync = true, want false because probe warmup is no longer a hard connect gate: %#v", expect)
+	}
+}
+
+func TestReadConnectConvergenceStateUsesConnectEventNotPreInit(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openconnect.log")
+	logBody := strings.Join([]string{
+		"vpnc_wrapper_reason: pre-init",
+		"vpnc_wrapper_base_exit: 0",
+		"vpnc_wrapper_reason: connect",
+		"vpnc_wrapper_route_override: begin utun9",
+		"vpnc_wrapper_dns_shim: apply split-include",
+		"vpnc_wrapper_probe_route_sync_begin: apply gitlab.services.corp.example utun9",
+		"vpnc_wrapper_probe_route_sync: apply gitlab.services.corp.example 203.0.113.27 -> utun9",
+		"vpnc_wrapper_probe_route_sync_end: apply gitlab.services.corp.example utun9",
+		"vpnc_wrapper_base_exit: 0",
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	state, err := readConnectConvergenceState(logPath)
+	if err != nil {
+		t.Fatalf("readConnectConvergenceState() error = %v", err)
+	}
+	if !state.ConnectEventSeen || !state.ConnectExitSeen {
+		t.Fatalf("state = %#v, want connect event and exit", state)
+	}
+	if !state.RouteOverrideSeen || !state.DNSShimSeen || !state.ProbeSyncSeen || !state.ProbeSyncSuccess {
+		t.Fatalf("state = %#v, want route override, dns shim, and probe sync markers", state)
+	}
+	ready, err := state.ready(connectConvergenceExpectations{
+		RouteOverrides: true,
+		DNSShim:        true,
+	})
+	if err != nil {
+		t.Fatalf("state.ready() error = %v", err)
+	}
+	if !ready {
+		t.Fatalf("state.ready() = false, want true for converged connect event: %#v", state)
+	}
+}
+
+func TestReadConnectConvergenceStateIgnoresPendingProbeSyncForConnectReadiness(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openconnect.log")
+	logBody := strings.Join([]string{
+		"vpnc_wrapper_reason: connect",
+		"vpnc_wrapper_route_override: begin utun9",
+		"vpnc_wrapper_dns_shim: apply split-include",
+		"vpnc_wrapper_probe_route_sync_begin: apply gitlab.services.corp.example utun9",
+		"vpnc_wrapper_base_exit: 0",
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	state, err := readConnectConvergenceState(logPath)
+	if err != nil {
+		t.Fatalf("readConnectConvergenceState() error = %v", err)
+	}
+	ready, err := state.ready(connectConvergenceExpectations{
+		RouteOverrides: true,
+		DNSShim:        true,
+	})
+	if err != nil {
+		t.Fatalf("state.ready() error = %v", err)
+	}
+	if !ready {
+		t.Fatalf("state.ready() = false, want true because pending probe sync no longer blocks connect readiness: %#v", state)
+	}
+}
+
+func TestReadConnectConvergenceStateStaysNotReadyAfterProbeResolveFailure(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openconnect.log")
+	logBody := strings.Join([]string{
+		"vpnc_wrapper_reason: connect",
+		"vpnc_wrapper_route_override: begin utun9",
+		"vpnc_wrapper_dns_shim: apply split-include",
+		"vpnc_wrapper_probe_route_sync_begin: apply gitlab.services.corp.example utun9",
+		"vpnc_wrapper_probe_route_sync_resolve_failed: apply gitlab.services.corp.example",
+		"vpnc_wrapper_probe_route_sync_end: apply gitlab.services.corp.example utun9",
+		"vpnc_wrapper_base_exit: 0",
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	state, err := readConnectConvergenceState(logPath)
+	if err != nil {
+		t.Fatalf("readConnectConvergenceState() error = %v", err)
+	}
+	ready, err := state.ready(connectConvergenceExpectations{
+		RouteOverrides: true,
+		DNSShim:        true,
+	})
+	if err != nil {
+		t.Fatalf("state.ready() error = %v", err)
+	}
+	if !ready {
+		t.Fatalf("state.ready() = false, want true because unresolved probe sync no longer blocks connect convergence: %#v", state)
+	}
+}
+
+func TestProbeRouteWarmupReadyTracksApplySuccessPerHost(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openconnect.log")
+	logBody := strings.Join([]string{
+		"vpnc_wrapper_probe_route_sync_begin: apply gitlab.services.corp.example utun9",
+		"vpnc_wrapper_probe_route_sync_retry: apply gitlab.services.corp.example remaining=5",
+		"vpnc_wrapper_probe_route_sync: apply gitlab.services.corp.example 203.0.113.27 -> utun9",
+		"vpnc_wrapper_probe_route_sync_end: apply gitlab.services.corp.example utun9",
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	ready, err := probeRouteWarmupReady(logPath, []string{"gitlab.services.corp.example"})
+	if err != nil {
+		t.Fatalf("probeRouteWarmupReady() error = %v", err)
+	}
+	if !ready {
+		t.Fatalf("probeRouteWarmupReady() = false, want true")
 	}
 }

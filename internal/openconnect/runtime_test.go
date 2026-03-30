@@ -167,10 +167,15 @@ func TestScriptDiagnosticsWrapperScriptIncludesSupplementalDNSShim(t *testing.T)
 		"vpnc_wrapper_probe_route_sync_begin:",
 		"vpnc_wrapper_probe_route_sync_end:",
 		"vpnc_wrapper_probe_route_sync:",
+		"vpnc_wrapper_probe_route_sync_retry:",
+		"vpnc_wrapper_probe_route_sync_async:",
 		"vpnc_wrapper_probe_begin:",
 		"vpnc_wrapper_probe_dscacheutil_begin",
 		"vpnc_wrapper_probe_route_begin",
 		"resolve_probe_host_addresses",
+		"resolve_probe_host_addresses_vpn_dns",
+		"resolve_probe_host_addresses_for_apply",
+		"resolve_probe_host_addresses_with_retry",
 		"gitlab.services.corp.example",
 		"/etc/resolver/$domain",
 		"/etc/resolver/search.tailscale",
@@ -187,21 +192,26 @@ func TestScriptDiagnosticsWrapperScriptIncludesSupplementalDNSShim(t *testing.T)
 
 func TestScriptDiagnosticsWrapperScriptKeepsResolverShimForSplitInclude(t *testing.T) {
 	script := scriptDiagnosticsWrapperScript("/tmp/openconnect.log", "/Users/alexis/.local/bin/vpn-slice --domains-vpn-dns corp.example 10.0.0.0/8", &supplementalResolverSpec{
-		Label:        "split-include",
-		SearchDomain: "corp.example",
-		Nameservers:  []string{"10.23.16.4", "10.23.0.23"},
-		Domains:      []string{"corp.example"},
-		ProbeHosts:   []string{"gitlab.services.corp.example"},
+		Label:                "split-include",
+		SearchDomain:         "corp.example",
+		Nameservers:          []string{"10.23.16.4", "10.23.0.23"},
+		Domains:              []string{"corp.example"},
+		SearchCleanupDomains: []string{"corp.example"},
+		ProbeHosts:           []string{"gitlab.services.corp.example"},
+		ManageSearchResolver: true,
 	}, "/tmp/pycompat", []string{"10.23.16.4/32", "10.0.0.0/8"})
 
 	for _, needle := range []string{
 		"use_scutil_state='0'",
-		"manage_search_resolver='0'",
+		"manage_search_resolver='1'",
 		"vpnc_wrapper_vpngateway_route:",
 		"vpnc_wrapper_default_route_remove:",
 		"vpnc_wrapper_dns_shim: apply",
 		"vpnc_wrapper_dns_shim: remove",
-		"sync_probe_host_routes apply",
+		"launch_probe_host_route_warmup",
+		"--probe-sync-apply",
+		"vpnc_wrapper_probe_route_sync_retry:",
+		"vpnc_wrapper_probe_route_sync_async:",
 		"/etc/resolver/$domain",
 		"vpnc_wrapper_route_override_host:",
 		`"$cidr" -interface "$TUNDEV"`,
@@ -270,8 +280,8 @@ func TestSupplementalResolverSpecForConnectOnlyAppliesInFullMode(t *testing.T) {
 	if split.UseScutilState {
 		t.Fatal("split.UseScutilState = true, want false")
 	}
-	if split.ManageSearchResolver {
-		t.Fatal("split.ManageSearchResolver = true, want false")
+	if !split.ManageSearchResolver {
+		t.Fatal("split.ManageSearchResolver = false, want true")
 	}
 	if !containsString(split.RouteOverrides, "10.0.0.0/8") {
 		t.Fatalf("split.RouteOverrides = %#v, want 10.0.0.0/8", split.RouteOverrides)
