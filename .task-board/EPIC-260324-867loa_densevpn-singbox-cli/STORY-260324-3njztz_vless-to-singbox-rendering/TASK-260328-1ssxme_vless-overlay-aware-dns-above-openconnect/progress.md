@@ -8,7 +8,7 @@ codex
 2026-03-28T19:49:26Z
 
 ## Last Update
-2026-03-31T09:19:52Z
+2026-03-31T10:07:26Z
 
 ## Blocked By
 - (none)
@@ -38,6 +38,7 @@ codex
 2026-03-31 overlay DNS handoff revised: the old tun-IP handoff was replaced with system DNS handoff to the configured external vless DNS servers instead of 172.19.0.1. Overlay sessions now, by default, set the active network service DNS to the vless proxy DNS address list (currently derived from render.proxy_dns.address) and restore the prior DNS configuration on stop. Opt-out only: VLESS_TUN_ENABLE_DNS_HANDOFF=0.
 2026-03-31 saved live manual-vs-app baseline snapshot to /tmp/multi-tun-baselines-2026-03-31.md for later comparison.
 2026-03-31: manual AnyConnect+v2raytun baseline showed the remaining delta was resolver ownership, not just route excludes. The working manual stack publishes primary DNS on the utun interface, while vless-tun was only overriding Wi-Fi DNS servers via networksetup. Reworked vless overlay handoff to publish a synthetic scutil State:/Network/Service/<id> DNS+IPv4 record on the sing-box utun using vpn-core, with overlay domains as SearchDomains and proxy DNS servers as ServerAddresses. Networksetup DNS override remains only as fallback if scutil handoff cannot be applied. Added session metadata/status output for scutil handoff and unit coverage around apply/restore commands. go test ./... is green. Live retest still pending.
+2026-03-31 startup readiness follow-up: live retest showed the remaining coexistence issue had narrowed to a startup race. With openconnect+tun overlay active, browser / Apple Music / git traffic could already work while curl still intermittently timed out resolving public domains immediately after vless-tun start. Implemented a post-start readiness gate in internal/session/session.go after dns_handoff_apply_ok: overlay tun starts on macOS now wait for scutil handoff visibility plus consecutive successful public system-resolver lookups (github.com + yandex.ru) before reporting start success. On timeout, start fails and tears the session down instead of returning early. Added coverage in internal/session/session_test.go, updated README.md, ran go test ./..., and rebuilt vless-tun.
 
 ## Precondition Resources
 (none)
