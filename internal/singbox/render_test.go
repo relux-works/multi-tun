@@ -84,8 +84,9 @@ func TestRenderWithOverlayDNSUsesProxyForGenericBypasses(t *testing.T) {
 	cfg.Render.Mode = config.RenderModeTun
 	data, err := RenderWithOptions(cfg, profiles[0], RenderOptions{
 		OverlayDNS: &OverlayDNS{
-			Domains:     []string{"corp.example", "inside.corp.example"},
-			Nameservers: []string{"10.23.16.4", "10.23.0.23"},
+			Domains:       []string{"corp.example", "inside.corp.example"},
+			Nameservers:   []string{"10.23.16.4", "10.23.0.23"},
+			RouteExcludes: []string{"10.23.16.4/32", "10.23.0.23/32", "10.0.0.0/8"},
 		},
 	})
 	if err != nil {
@@ -144,6 +145,21 @@ func TestRenderWithOverlayDNSUsesProxyForGenericBypasses(t *testing.T) {
 	if got, want := direct["domain_resolver"], "dns-proxy"; got != want {
 		t.Fatalf("direct.domain_resolver = %#v, want %q", got, want)
 	}
+
+	inbounds := root["inbounds"].([]any)
+	tunInbound := inbounds[0].(map[string]any)
+	routeExcludes, ok := tunInbound["route_exclude_address"].([]any)
+	if !ok {
+		t.Fatalf("tun.route_exclude_address = %#v, want []any", tunInbound["route_exclude_address"])
+	}
+	if len(routeExcludes) != 3 {
+		t.Fatalf("tun.route_exclude_address = %#v, want three entries", routeExcludes)
+	}
+	for _, want := range []string{"10.23.16.4/32", "10.23.0.23/32", "10.0.0.0/8"} {
+		if !containsAnyString(routeExcludes, want) {
+			t.Fatalf("tun.route_exclude_address = %#v, want %q", routeExcludes, want)
+		}
+	}
 }
 
 func TestRenderWithoutBypasses(t *testing.T) {
@@ -182,6 +198,15 @@ func TestRenderWithoutBypasses(t *testing.T) {
 	if got, want := inlineRuleSet["tag"], "proxy-exceptions"; got != want {
 		t.Fatalf("rule_set.tag = %#v, want %q", got, want)
 	}
+}
+
+func containsAnyString(items []any, want string) bool {
+	for _, item := range items {
+		if got, ok := item.(string); ok && got == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRenderSystemProxyMode(t *testing.T) {
