@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"multi-tun/internal/config"
@@ -60,11 +61,14 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	}
 
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
-		Mode:             cfg.Render.ModeOrDefault(),
-		BypassSuffixes:   cfg.Render.BypassSuffixes,
-		TunAddresses:     append([]string(nil), cfg.Render.TunAddresses...),
-		OverlayDNSActive: prepared.renderOptions.OverlayDNS != nil,
-		PrivilegedLaunch: cfg.Render.PrivilegedLaunchOrDefault(),
+		Mode:              cfg.Render.ModeOrDefault(),
+		BypassSuffixes:    cfg.Render.BypassSuffixes,
+		InterfaceName:     cfg.Render.InterfaceName,
+		TunAddresses:      append([]string(nil), cfg.Render.TunAddresses...),
+		OverlayDNSActive:  prepared.renderOptions.OverlayDNS != nil,
+		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
+		SystemDNSServers:  systemDNSServers(cfg),
+		PrivilegedLaunch:  cfg.Render.PrivilegedLaunchOrDefault(),
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
@@ -123,11 +127,14 @@ func (a *App) runReconnect(args []string) int {
 	}
 
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
-		Mode:             cfg.Render.ModeOrDefault(),
-		BypassSuffixes:   cfg.Render.BypassSuffixes,
-		TunAddresses:     append([]string(nil), cfg.Render.TunAddresses...),
-		OverlayDNSActive: prepared.renderOptions.OverlayDNS != nil,
-		PrivilegedLaunch: cfg.Render.PrivilegedLaunchOrDefault(),
+		Mode:              cfg.Render.ModeOrDefault(),
+		BypassSuffixes:    cfg.Render.BypassSuffixes,
+		InterfaceName:     cfg.Render.InterfaceName,
+		TunAddresses:      append([]string(nil), cfg.Render.TunAddresses...),
+		OverlayDNSActive:  prepared.renderOptions.OverlayDNS != nil,
+		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
+		SystemDNSServers:  systemDNSServers(cfg),
+		PrivilegedLaunch:  cfg.Render.PrivilegedLaunchOrDefault(),
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
@@ -264,4 +271,29 @@ func stopCurrentSession(cacheDir string, force bool, timeout time.Duration) (*se
 		return &stopped, state, err
 	}
 	return &stopped, state, nil
+}
+
+func systemDNSServers(cfg config.ProjectConfig) []string {
+	values := []string{cfg.Render.ProxyDNS.Address}
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func overlayDNSDomains(options singbox.RenderOptions) []string {
+	if options.OverlayDNS == nil {
+		return nil
+	}
+	return append([]string(nil), options.OverlayDNS.Domains...)
 }

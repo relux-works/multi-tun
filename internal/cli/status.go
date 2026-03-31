@@ -58,8 +58,15 @@ func (a *App) runStatus(args []string) int {
 		if current.LaunchMode == config.LaunchModeLaunchd {
 			fmt.Fprintf(a.stdout, "launch_label: %s\n", current.LaunchLabel)
 		}
-		if current.DNSHandoffService != "" && current.DNSHandoffServer != "" {
-			fmt.Fprintf(a.stdout, "dns_handoff: %s -> %s\n", current.DNSHandoffService, current.DNSHandoffServer)
+		if len(current.DNSHandoffServers) > 0 {
+			switch current.DNSHandoffMode {
+			case "scutil":
+				fmt.Fprintf(a.stdout, "dns_handoff: scutil %s -> %s\n", current.DNSHandoffInterface, strings.Join(current.DNSHandoffServers, ", "))
+			default:
+				if current.DNSHandoffService != "" {
+					fmt.Fprintf(a.stdout, "dns_handoff: %s -> %s\n", current.DNSHandoffService, strings.Join(current.DNSHandoffServers, ", "))
+				}
+			}
 			if current.DNSHandoffRestoreAuto {
 				fmt.Fprintln(a.stdout, "dns_handoff_restore: automatic")
 			} else if len(current.DNSHandoffRestoreServers) > 0 {
