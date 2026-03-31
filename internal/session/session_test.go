@@ -1,8 +1,11 @@
 package session
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,5 +189,170 @@ func TestStopLegacyLaunchdSessionUsesLaunchdPath(t *testing.T) {
 	}
 	if _, err := os.Stat(CurrentPath(cacheDir)); !os.IsNotExist(err) {
 		t.Fatalf("current session file still exists: %v", err)
+	}
+}
+
+func TestScutilDNSHandoffVisibleRequiresMatchingResolverBlock(t *testing.T) {
+	t.Parallel()
+
+	current := CurrentSession{
+		DNSHandoffMode:      dnsHandoffModeScutil,
+		DNSHandoffInterface: "utun233",
+		DNSHandoffServers:   []string{"1.1.1.1"},
+	}
+
+	visibleOutput := strings.Join([]string{
+		"DNS configuration",
+		"",
+		"resolver #1",
+		"  nameserver[0] : 192.168.1.1",
+		"  if_index : 17 (en0)",
+		"",
+		"resolver #2",
+		"  nameserver[0] : 1.1.1.1",
+		"  if_index : 32 (utun233)",
+	}, "\n")
+	if !scutilDNSHandoffVisible(visibleOutput, current) {
+		t.Fatal("scutilDNSHandoffVisible() = false, want true")
+	}
+
+	mismatchedOutput := strings.Join([]string{
+		"DNS configuration",
+		"",
+		"resolver #1",
+		"  nameserver[0] : 1.1.1.1",
+		"  if_index : 17 (en0)",
+		"",
+		"resolver #2",
+		"  nameserver[0] : 192.168.1.1",
+		"  if_index : 32 (utun233)",
+	}, "\n")
+	if scutilDNSHandoffVisible(mismatchedOutput, current) {
+		t.Fatal("scutilDNSHandoffVisible() = true, want false for mismatched resolver block")
+	}
+}
+
+func TestWaitForStartupDNSReadinessRequiresConsecutiveSuccesses(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-specific startup readiness")
+	}
+
+	prevAlive := startupSessionAlive
+	prevResolve := startupResolveHost
+	prevScutil := startupScutilDNSDump
+	t.Cleanup(func() {
+		startupSessionAlive = prevAlive
+		startupResolveHost = prevResolve
+		startupScutilDNSDump = prevScutil
+	})
+
+	startupSessionAlive = func(current CurrentSession) (bool, int, error) {
+		return true, 4242, nil
+	}
+	startupScutilDNSDump = func() ([]byte, error) {
+		return []byte(strings.Join([]string{
+			"DNS configuration",
+			"",
+			"resolver #1",
+			"  nameserver[0] : 1.1.1.1",
+			"  if_index : 32 (utun233)",
+		}, "\n")), nil
+	}
+
+	call := 0
+	startupResolveHost = func(ctx context.Context, host string) ([]string, error) {
+		call++
+		if call == 2 {
+			return nil, context.DeadlineExceeded
+		}
+		return []string{"1.1.1.1"}, nil
+	}
+
+	logPath := filepath.Join(t.TempDir(), "session.log")
+	current := CurrentSession{
+		ID:                  "20260331T120000Z",
+		LogPath:             logPath,
+		Mode:                config.RenderModeTun,
+		DNSHandoffMode:      dnsHandoffModeScutil,
+		DNSHandoffInterface: "utun233",
+		DNSHandoffServers:   []string{"1.1.1.1"},
+	}
+	options := StartOptions{
+		Mode:             config.RenderModeTun,
+		OverlayDNSActive: true,
+	}
+
+	if err := waitForStartupDNSReadiness(current, options, 100*time.Millisecond, 0); err != nil {
+		t.Fatalf("waitForStartupDNSReadiness() error = %v", err)
+	}
+	if call != 6 {
+		t.Fatalf("startupResolveHost call count = %d, want %d", call, 6)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	body := string(data)
+	for _, needle := range []string{
+		"startup_readiness_begin hosts=github.com,yandex.ru",
+		"startup_readiness_pending reason=resolve yandex.ru: context deadline exceeded",
+		"startup_readiness_ok hosts=github.com,yandex.ru checks=2",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("session log missing %q:\n%s", needle, body)
+		}
+	}
+}
+
+func TestWaitForStartupDNSReadinessTimeoutIncludesLastIssue(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-specific startup readiness")
+	}
+
+	prevAlive := startupSessionAlive
+	prevResolve := startupResolveHost
+	prevScutil := startupScutilDNSDump
+	t.Cleanup(func() {
+		startupSessionAlive = prevAlive
+		startupResolveHost = prevResolve
+		startupScutilDNSDump = prevScutil
+	})
+
+	startupSessionAlive = func(current CurrentSession) (bool, int, error) {
+		return true, 4242, nil
+	}
+	startupScutilDNSDump = func() ([]byte, error) {
+		return []byte(strings.Join([]string{
+			"DNS configuration",
+			"",
+			"resolver #1",
+			"  nameserver[0] : 1.1.1.1",
+			"  if_index : 32 (utun233)",
+		}, "\n")), nil
+	}
+	startupResolveHost = func(ctx context.Context, host string) ([]string, error) {
+		return nil, context.DeadlineExceeded
+	}
+
+	current := CurrentSession{
+		ID:                  "20260331T120500Z",
+		LogPath:             filepath.Join(t.TempDir(), "session.log"),
+		Mode:                config.RenderModeTun,
+		DNSHandoffMode:      dnsHandoffModeScutil,
+		DNSHandoffInterface: "utun233",
+		DNSHandoffServers:   []string{"1.1.1.1"},
+	}
+	options := StartOptions{
+		Mode:             config.RenderModeTun,
+		OverlayDNSActive: true,
+	}
+
+	err := waitForStartupDNSReadiness(current, options, 5*time.Millisecond, 0)
+	if err == nil {
+		t.Fatal("waitForStartupDNSReadiness() error = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting for public DNS readiness") || !strings.Contains(err.Error(), "resolve github.com: context deadline exceeded") {
+		t.Fatalf("waitForStartupDNSReadiness() error = %v, want timeout with last issue", err)
 	}
 }

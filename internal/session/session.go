@@ -1,9 +1,11 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +25,10 @@ const (
 	logFilePrefix          = "sing-box-session-"
 	metadataFilePrefix     = "session-"
 	runtimeFileName        = "current-session.json"
+	startupResolveTimeout  = 8 * time.Second
+	startupResolveInterval = 300 * time.Millisecond
+	resolveProbeTimeout    = 1500 * time.Millisecond
+	resolveProbeSuccesses  = 2
 )
 
 var (
@@ -38,6 +44,35 @@ var (
 	}
 	vpnCoreSignalSession = func(pid int, signal string, group bool) error {
 		return vpncore.Signal(vpncore.DefaultServiceConfig(), pid, signal, group)
+	}
+	startupSessionAlive = func(current CurrentSession) (bool, int, error) {
+		return SessionAlive(current)
+	}
+	startupResolveHost = func(ctx context.Context, host string) ([]string, error) {
+		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+		if err != nil {
+			return nil, err
+		}
+		seen := map[string]struct{}{}
+		result := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			value := ip.String()
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+		if len(result) == 0 {
+			return nil, fmt.Errorf("empty result")
+		}
+		return result, nil
+	}
+	startupScutilDNSDump = func() ([]byte, error) {
+		return execCommand(scutilPath, "--dns").CombinedOutput()
 	}
 )
 
@@ -170,6 +205,11 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		_ = stopStartedSession(session)
 		_ = ClearCurrent(cacheDir)
 		return CurrentSession{}, fmt.Errorf("configure system DNS: %w", err)
+	}
+	if err := waitForStartupDNSReadiness(session, options, startupResolveTimeout, startupResolveInterval); err != nil {
+		_ = stopStartedSession(session)
+		_ = ClearCurrent(cacheDir)
+		return CurrentSession{}, err
 	}
 
 	if err := saveJSON(metadataPath, session); err != nil {
@@ -544,6 +584,110 @@ func waitForStableStart(current CurrentSession, timeout time.Duration) (int, err
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
+}
+
+func waitForStartupDNSReadiness(current CurrentSession, options StartOptions, timeout, interval time.Duration) error {
+	if !shouldWaitStartupDNSReadiness(current, options) {
+		return nil
+	}
+
+	hosts := startupReadinessHosts()
+	deadline := time.Now().Add(timeout)
+	consecutiveSuccesses := 0
+	lastIssue := "pending"
+	lastLoggedIssue := ""
+	appendSessionLog(current.LogPath, "startup_readiness_begin hosts=%s timeout=%s method=%s\n", strings.Join(hosts, ","), timeout, current.DNSHandoffMode)
+
+	for {
+		alive, pid, err := startupSessionAlive(current)
+		if err != nil {
+			return fmt.Errorf("check sing-box during startup readiness: %w", err)
+		}
+		if pid > 0 {
+			current.PID = pid
+		}
+		if !alive {
+			return fmt.Errorf("sing-box exited during startup readiness; inspect %s", current.LogPath)
+		}
+
+		ready, issue := startupDNSReady(current, hosts)
+		if ready {
+			consecutiveSuccesses++
+			if consecutiveSuccesses >= resolveProbeSuccesses {
+				appendSessionLog(current.LogPath, "startup_readiness_ok hosts=%s checks=%d\n", strings.Join(hosts, ","), consecutiveSuccesses)
+				return nil
+			}
+		} else {
+			consecutiveSuccesses = 0
+			lastIssue = issue
+			if issue != "" && issue != lastLoggedIssue {
+				appendSessionLog(current.LogPath, "startup_readiness_pending reason=%s\n", issue)
+				lastLoggedIssue = issue
+			}
+		}
+
+		if time.Now().After(deadline) {
+			appendSessionLog(current.LogPath, "startup_readiness_failed reason=%s\n", lastIssue)
+			return fmt.Errorf("timed out waiting for public DNS readiness (%s); inspect %s", lastIssue, current.LogPath)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func shouldWaitStartupDNSReadiness(current CurrentSession, options StartOptions) bool {
+	return runtime.GOOS == "darwin" &&
+		current.Mode == config.RenderModeTun &&
+		options.OverlayDNSActive &&
+		len(startupReadinessHosts()) > 0
+}
+
+func startupDNSReady(current CurrentSession, hosts []string) (bool, string) {
+	if current.DNSHandoffMode == dnsHandoffModeScutil {
+		raw, err := startupScutilDNSDump()
+		if err != nil {
+			return false, fmt.Sprintf("scutil --dns: %v", err)
+		}
+		if !scutilDNSHandoffVisible(string(raw), current) {
+			return false, fmt.Sprintf("scutil handoff not visible for %s", current.DNSHandoffInterface)
+		}
+	}
+
+	for _, host := range hosts {
+		ctx, cancel := context.WithTimeout(context.Background(), resolveProbeTimeout)
+		ips, err := startupResolveHost(ctx, host)
+		cancel()
+		if err != nil {
+			return false, fmt.Sprintf("resolve %s: %v", host, err)
+		}
+		if len(ips) == 0 {
+			return false, fmt.Sprintf("resolve %s: empty result", host)
+		}
+	}
+
+	return true, ""
+}
+
+func startupReadinessHosts() []string {
+	return []string{"github.com", "yandex.ru"}
+}
+
+func scutilDNSHandoffVisible(output string, current CurrentSession) bool {
+	interfaceName := strings.TrimSpace(current.DNSHandoffInterface)
+	if interfaceName == "" || len(current.DNSHandoffServers) == 0 {
+		return false
+	}
+
+	for _, block := range strings.Split(output, "\n\n") {
+		if !strings.Contains(block, "("+interfaceName+")") {
+			continue
+		}
+		for _, server := range current.DNSHandoffServers {
+			if strings.Contains(block, "nameserver[0] : "+server) || strings.Contains(block, "nameserver[1] : "+server) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*m`)

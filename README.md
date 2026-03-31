@@ -156,6 +156,8 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 Renders the selected profile to the configured sing-box JSON and then starts `sing-box` in the background.
 
+When `vless-tun` is running in `render.mode=tun` above an active `openconnect-tun` split-include session, `start` now waits for overlay DNS convergence before returning. In that overlay mode, a live `sing-box` PID alone is not treated as ready; the CLI also waits for the system public resolver path to settle so follow-up terminal clients do not race the DNS handoff.
+
 Each start creates a new timestamped session log and metadata pair under:
 
 - `~/.cache/vless-tun/sessions/sing-box-session-<UTC timestamp>.log`
