@@ -44,8 +44,9 @@ type CurrentSession struct {
 }
 
 type OverlayDNS struct {
-	Domains     []string
-	Nameservers []string
+	Domains       []string
+	Nameservers   []string
+	RouteExcludes []string
 }
 
 type stopSnapshot struct {
@@ -145,8 +146,9 @@ func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
 	}
 
 	return &OverlayDNS{
-		Domains:     append([]string(nil), spec.Domains...),
-		Nameservers: append([]string(nil), spec.Nameservers...),
+		Domains:       append([]string(nil), spec.Domains...),
+		Nameservers:   append([]string(nil), spec.Nameservers...),
+		RouteExcludes: append([]string(nil), spec.RouteOverrides...),
 	}, nil
 }
 

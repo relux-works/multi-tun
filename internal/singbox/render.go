@@ -12,8 +12,9 @@ import (
 )
 
 type OverlayDNS struct {
-	Domains     []string
-	Nameservers []string
+	Domains       []string
+	Nameservers   []string
+	RouteExcludes []string
 }
 
 type RenderOptions struct {
@@ -164,7 +165,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 		})
 	}
 
-	inbounds, err := buildInbounds(cfg.Render)
+	inbounds, err := buildInbounds(cfg.Render, overlayDNS)
 	if err != nil {
 		return nil, err
 	}
@@ -249,9 +250,24 @@ func normalizeOverlayDNS(overlay *OverlayDNS) *OverlayDNS {
 		return nil
 	}
 
+	routeExcludes := make([]string, 0, len(overlay.RouteExcludes))
+	seenRouteExcludes := map[string]struct{}{}
+	for _, route := range overlay.RouteExcludes {
+		route = strings.TrimSpace(route)
+		if route == "" {
+			continue
+		}
+		if _, ok := seenRouteExcludes[route]; ok {
+			continue
+		}
+		seenRouteExcludes[route] = struct{}{}
+		routeExcludes = append(routeExcludes, route)
+	}
+
 	return &OverlayDNS{
-		Domains:     domains,
-		Nameservers: nameservers,
+		Domains:       domains,
+		Nameservers:   nameservers,
+		RouteExcludes: routeExcludes,
 	}
 }
 
@@ -277,20 +293,22 @@ func baseRouteRules(mode string) []any {
 	return rules
 }
 
-func buildInbounds(cfg config.RenderConfig) ([]any, error) {
+func buildInbounds(cfg config.RenderConfig, overlayDNS *OverlayDNS) ([]any, error) {
 	switch cfg.ModeOrDefault() {
 	case config.RenderModeTun:
-		return []any{
-			map[string]any{
-				"type":           "tun",
-				"tag":            "tun-in",
-				"interface_name": cfg.InterfaceName,
-				"address":        cfg.TunAddresses,
-				"auto_route":     true,
-				"strict_route":   true,
-				"mtu":            1400,
-			},
-		}, nil
+		inbound := map[string]any{
+			"type":           "tun",
+			"tag":            "tun-in",
+			"interface_name": cfg.InterfaceName,
+			"address":        cfg.TunAddresses,
+			"auto_route":     true,
+			"strict_route":   true,
+			"mtu":            1400,
+		}
+		if overlayDNS != nil && len(overlayDNS.RouteExcludes) > 0 {
+			inbound["route_exclude_address"] = overlayDNS.RouteExcludes
+		}
+		return []any{inbound}, nil
 	case config.RenderModeSystemProxy:
 		return []any{
 			map[string]any{

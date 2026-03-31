@@ -109,6 +109,9 @@ func TestActiveOverlayDNSReturnsExpandedDomainsForLiveSession(t *testing.T) {
 	if !containsString(overlay.Nameservers, "10.23.16.4") || !containsString(overlay.Nameservers, "10.23.0.23") {
 		t.Fatalf("overlay.Nameservers = %#v, want Corp nameservers", overlay.Nameservers)
 	}
+	if !containsString(overlay.RouteExcludes, "10.23.16.4/32") || !containsString(overlay.RouteExcludes, "10.23.0.23/32") {
+		t.Fatalf("overlay.RouteExcludes = %#v, want Corp DNS host routes", overlay.RouteExcludes)
+	}
 }
 
 func TestConnectConvergenceExpectationsForSplitIncludeSession(t *testing.T) {
