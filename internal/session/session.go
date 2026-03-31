@@ -42,11 +42,14 @@ var (
 )
 
 type StartOptions struct {
-	Mode             string
-	BypassSuffixes   []string
-	TunAddresses     []string
-	OverlayDNSActive bool
-	PrivilegedLaunch config.PrivilegedLaunchConfig
+	Mode              string
+	BypassSuffixes    []string
+	InterfaceName     string
+	TunAddresses      []string
+	OverlayDNSActive  bool
+	OverlayDNSDomains []string
+	SystemDNSServers  []string
+	PrivilegedLaunch  config.PrivilegedLaunchConfig
 }
 
 type CurrentSession struct {
@@ -65,8 +68,11 @@ type CurrentSession struct {
 	LaunchMode               string    `json:"launch_mode,omitempty"`
 	LaunchLabel              string    `json:"launch_label,omitempty"`
 	LaunchPlistPath          string    `json:"launch_plist_path,omitempty"`
+	DNSHandoffMode           string    `json:"dns_handoff_mode,omitempty"`
 	DNSHandoffService        string    `json:"dns_handoff_service,omitempty"`
-	DNSHandoffServer         string    `json:"dns_handoff_server,omitempty"`
+	DNSHandoffServiceID      string    `json:"dns_handoff_service_id,omitempty"`
+	DNSHandoffInterface      string    `json:"dns_handoff_interface,omitempty"`
+	DNSHandoffServers        []string  `json:"dns_handoff_servers,omitempty"`
 	DNSHandoffRestoreServers []string  `json:"dns_handoff_restore_servers,omitempty"`
 	DNSHandoffRestoreAuto    bool      `json:"dns_handoff_restore_auto,omitempty"`
 }
