@@ -81,7 +81,7 @@ func TestRenderWithOverlayDNSMakesBypassesWinBeforeOverlayDNS(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Render.Mode = config.RenderModeTun
+	cfg.Network.Mode = config.RenderModeTun
 	data, err := RenderWithOptions(cfg, profiles[0], RenderOptions{
 		OverlayDNS: &OverlayDNS{
 			Domains:       []string{"corp.example", "inside.corp.example"},
@@ -187,7 +187,7 @@ func TestRenderWithoutBypasses(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Render.BypassSuffixes = nil
+	cfg.Routing.BypassSuffixes = nil
 
 	data, err := Render(cfg, profiles[0])
 	if err != nil {
@@ -234,8 +234,8 @@ func TestRenderSystemProxyMode(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Render.Mode = config.RenderModeSystemProxy
-	cfg.Render.BypassSuffixes = nil
+	cfg.Network.Mode = config.RenderModeSystemProxy
+	cfg.Routing.BypassSuffixes = nil
 
 	data, err := Render(cfg, profiles[0])
 	if err != nil {
@@ -280,8 +280,8 @@ func TestRenderSystemProxyModeWithBypasses(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Render.Mode = config.RenderModeSystemProxy
-	cfg.Render.BypassSuffixes = []string{".ru", ".xn--p1ai"}
+	cfg.Network.Mode = config.RenderModeSystemProxy
+	cfg.Routing.BypassSuffixes = []string{".ru", ".xn--p1ai"}
 
 	data, err := Render(cfg, profiles[0])
 	if err != nil {

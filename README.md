@@ -26,7 +26,7 @@ This repo also keeps live notes from previous VPN investigations:
 ```bash
 ./scripts/setup.sh
 
-# edit ~/.config/vless-tun/config.json and set your subscription_url
+# edit ~/.config/vless-tun/config.json and set source.url
 
 vless-tun refresh
 vless-tun list
@@ -47,7 +47,7 @@ dump status
 Generated artifacts:
 
 - cache snapshot: `~/.cache/vless-tun/snapshot.json` by default
-- rendered sing-box config: `~/.config/vless-tun/generated/dancevpn-sing-box.json` by default
+- rendered sing-box config: `~/.config/vless-tun/generated/sing-box.json` by default
 
 ## Commands
 
@@ -97,7 +97,7 @@ Operational notes:
 
 - `openconnect-tun` keeps its own runtime state under `~/.cache/openconnect-tun`, with session logs in `~/.cache/openconnect-tun/sessions` and the current session pointer in `~/.cache/openconnect-tun/runtime/current-session.json`. This is intentionally separate from `~/.cache/vless-tun`.
 - `vpn-core install` performs the one-time privileged setup for autonomous runs. It installs a shared root LaunchDaemon that exposes a user-owned unix socket, so later `openconnect-tun` and `vless-tun` commands can reuse the same trusted backend without repeated `sudo`.
-- on macOS `vless-tun start` in `render.mode=tun` now refuses to start if the upstream VLESS server itself already routes through another VPN interface such as `utun*`, `tun*`, `ppp*`, or `ipsec*`. That avoids accidental nested-tunnel startup where `vless-tun` silently builds on top of `v2RayTun`, AnyConnect, or another active VPN and drags the whole network into an undefined state.
+- on macOS `vless-tun start` in `network.mode=tun` now refuses to start if the upstream VLESS server itself already routes through another VPN interface such as `utun*`, `tun*`, `ppp*`, or `ipsec*`. That avoids accidental nested-tunnel startup where `vless-tun` silently builds on top of `v2RayTun`, AnyConnect, or another active VPN and drags the whole network into an undefined state.
 - Existing installs of the legacy `works.relux.openconnect-tun-helper` daemon are auto-detected for compatibility. A fresh `vpn-core install` replaces that legacy helper with the shared core service.
 - `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
 - `--profile` resolves against local AnyConnect XML `HostEntry` values and automatically deduplicates the same server repeated across `/opt/cisco/...` and `~/Downloads/...`.
@@ -198,11 +198,15 @@ Field reference:
 
 ### `vless-tun init`
 
-Creates `~/.config/vless-tun/config.json` by default. Use `--subscription-url` to inject the live DenseVPN key URL without committing it.
+Creates `~/.config/vless-tun/config.json` by default.
+
+`--subscription-url` remains the compatibility flag name, but the preferred config shape now writes it into `source.url`.
 
 ### `vless-tun refresh`
 
-Fetches the subscription URL from `~/.config/vless-tun/config.json` by default, detects whether the payload is plaintext or base64, parses all `vless://` profiles, and writes a local cache snapshot.
+Refreshes the configured VLESS source, parses all available `vless://` profiles, and writes a local cache snapshot.
+
+`source.mode=proxy` means `source.url` is fetched over HTTP and expected to resolve to one or more `vless://` entries. `source.mode=direct` means `source.url` already contains a literal `vless://...` URI and no extra fetch indirection is used.
 
 ### `vless-tun list`
 
@@ -212,7 +216,7 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 Renders the selected profile to the configured sing-box JSON and then starts `sing-box` in the background.
 
-When `vless-tun` is running in `render.mode=tun` above an active `openconnect-tun` split-include session, `start` now waits for overlay DNS convergence before returning. In that overlay mode, a live `sing-box` PID alone is not treated as ready; the CLI also waits for the system public resolver path to settle so follow-up terminal clients do not race the DNS handoff.
+When `vless-tun` is running in `network.mode=tun` above an active `openconnect-tun` split-include session, `start` now waits for overlay DNS convergence before returning. In that overlay mode, a live `sing-box` PID alone is not treated as ready; the CLI also waits for the system public resolver path to settle so follow-up terminal clients do not race the DNS handoff.
 
 Each start creates a new timestamped session log and metadata pair under:
 
@@ -223,11 +227,11 @@ The currently active session pointer is stored at:
 
 - `~/.cache/vless-tun/runtime/current-session.json`
 
-`start` is the command that should actually bring the TUN up. `status` does not connect anything by itself.
+`start` is the command that should actually bring the tunnel up. `status` does not connect anything by itself.
 
-In `render.mode=system_proxy`, `start` starts a local `mixed` inbound and lets `sing-box` manage macOS system proxy settings instead of creating `utun`.
+In `network.mode=system_proxy`, `start` starts a local `mixed` inbound and lets `sing-box` manage macOS system proxy settings instead of creating `utun`.
 
-In `render.mode=tun`, `start` now supports privileged macOS launch backends through `render.privileged_launch`:
+In `network.mode=tun`, `start` resolves the launch backend automatically. If the shared `vpn-core` daemon is installed, that is the preferred happy-path backend. An explicit `launch` block is only needed as an override for fallback or debugging:
 
 - `auto`: resolve to shared `vpn-core` when it is installed, otherwise `sudo` for TUN as a regular user and `direct` when already root
 - `sudo`: run `sudo sing-box run -c ...` after caching credentials with `sudo -v`
@@ -241,9 +245,11 @@ Reloads the local config, refreshes the subscription cache by default, rerenders
 
 This is the command to use after changing:
 
-- `selected_profile`
-- `render.mode`
-- `render.bypass_suffixes`
+- `default.profile_selector`
+- `network.mode`
+- `routing.bypass_suffixes`
+- `dns.proxy_resolver`
+- `artifacts.singbox_config_path`
 - any other render-time setting in `~/.config/vless-tun/config.json`
 
 ### `vless-tun status`
@@ -262,7 +268,7 @@ This is a heuristic runtime status, not a control plane.
 
 ### `vless-tun diagnose`
 
-Prints a focused runtime diagnostic view for the current launch backend. When `render.privileged_launch.mode=helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket and daemon PID.
+Prints a focused runtime diagnostic view for the current launch backend. When the effective launch backend resolves to `helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket and daemon PID.
 
 ### `vless-tun stop`
 
@@ -276,9 +282,9 @@ Selects a cached profile and writes a sing-box JSON config with:
 - proxy detour for the rest of the traffic
 - optional direct DNS and direct outbound for configured suffix bypasses
 
-If `render.bypass_suffixes` is empty, the renderer produces a simple full-tunnel config with no suffix-based bypasses.
+If `routing.bypass_suffixes` is empty, the renderer produces a simple full-tunnel config with no suffix-based bypasses.
 
-If `render.mode=system_proxy`, the renderer produces a non-TUN config intended for macOS bring-up without root or Network Extension privileges.
+If `network.mode=system_proxy`, the renderer produces a non-TUN config intended for macOS bring-up without root or Network Extension privileges.
 
 ## Local Config
 
@@ -292,33 +298,84 @@ Repo-local example:
 
 If you want to keep using a repo-local config, pass `--config`.
 
-Important fields:
-
-- `subscription_url`: live DenseVPN / DanceVPN subscription URL
-- `selected_profile`: optional selector by exact id, exact name, or substring
-- `cache_dir`: where refresh snapshots are stored
-- `render.mode`: `system_proxy` or `tun`
-- `render.output_path`: target sing-box config path
-- `render.proxy_listen_address`: local listen address for `system_proxy` mode
-- `render.proxy_listen_port`: local listen port for `system_proxy` mode
-- `render.interface_name`: TUN interface name for `tun` mode
-- `render.tun_addresses`: TUN addresses for `tun` mode
-- `render.privileged_launch.mode`: `auto`, `sudo`, `direct`, `helper`, or `launchd`
-- `render.privileged_launch.label`: legacy LaunchDaemon label field kept for compatibility; the shared daemon now uses `works.relux.vpn-core`
-- `render.privileged_launch.plist_path`: legacy plist field kept for compatibility; the shared daemon now uses `/Library/LaunchDaemons/works.relux.vpn-core.plist`
-- `render.bypass_suffixes`: domains that should go `direct`; set `[]` for full-tunnel bring-up
-- `render.proxy_dns`: upstream DNS endpoint for proxied traffic
-
-### Full TUN on macOS
-
-Example config fragment for a real TUN session managed by the shared `vpn-core` daemon:
+Example config:
 
 ```json
 {
-  "render": {
+  "cache_dir": "~/.cache/vless-tun",
+  "source": {
+    "mode": "proxy",
+    "url": "https://key.vpn.dance/connect?key=REPLACE_ME"
+  },
+  "network": {
     "mode": "tun",
-    "privileged_launch": {
-      "mode": "helper"
+    "tun": {
+      "interface_name": "utun233",
+      "addresses": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ]
+    },
+    "system_proxy": {
+      "listen_address": "127.0.0.1",
+      "listen_port": 2080
+    }
+  },
+  "routing": {
+    "bypass_suffixes": [
+      ".ru",
+      ".рф"
+    ]
+  },
+  "dns": {
+    "proxy_resolver": {
+      "address": "1.1.1.1",
+      "port": 853,
+      "tls_server_name": "cloudflare-dns.com"
+    }
+  },
+  "logging": {
+    "level": "info"
+  },
+  "artifacts": {
+    "singbox_config_path": "~/.config/vless-tun/generated/sing-box.json"
+  }
+}
+```
+
+Field reference:
+
+- `cache_dir`: local runtime/cache directory for refresh snapshots, session logs, and runtime metadata
+- `source.mode`: `proxy` or `direct`
+- `source.url`: the actual source address; in `proxy` mode this is an HTTP endpoint that resolves to one or more `vless://` entries, and in `direct` mode this is a literal `vless://...` URI
+- `default.profile_selector`: optional selector by exact id, exact name, or substring when the source resolves to multiple profiles
+- `network.mode`: `system_proxy` or `tun`
+- `network.tun.interface_name`: TUN interface name for `tun` mode
+- `network.tun.addresses`: TUN addresses for `tun` mode
+- `network.system_proxy.listen_address`: local listen address for `system_proxy` mode
+- `network.system_proxy.listen_port`: local listen port for `system_proxy` mode
+- `routing.bypass_suffixes`: domains that should go `direct`; set `[]` for full-tunnel bring-up
+- `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists
+- `dns.proxy_resolver`: upstream DNS endpoint for proxied traffic
+- `logging.level`: sing-box log level written into the generated config
+- `artifacts.singbox_config_path`: provider-neutral generated sing-box config artifact path
+- `launch.mode`: optional override for the runtime backend. Omit `launch` in the happy path and `vless-tun` will resolve to the shared `vpn-core` backend automatically when it is available
+- `launch.label` and `launch.plist_path`: legacy compatibility overrides only; the shared daemon now belongs to `vpn-core`, not to each `sing-box` session
+
+### Full TUN on macOS
+
+Example config fragment for a real TUN session managed by the shared `vpn-core` daemon without any explicit launch override:
+
+```json
+{
+  "network": {
+    "mode": "tun",
+    "tun": {
+      "interface_name": "utun233",
+      "addresses": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ]
     }
   }
 }
@@ -349,7 +406,7 @@ go build -o cisco-dump ./cmd/cisco-dump
 - `reconnect` is the "apply latest config" path: it rereads local config, refreshes the subscription by default, rerenders, and replaces the current session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
-- On macOS the default render mode is still `system_proxy` for low-friction bring-up, but `tun` now works through `render.privileged_launch` with the shared `vpn-core` backend.
+- On macOS the default network mode is still `system_proxy` for low-friction bring-up, but `tun` now works through the shared `vpn-core` backend by default, with `launch` kept as an explicit override only when you need it.
 - Generated config now includes `route.default_domain_resolver`, which `sing-box 1.13.x` expects as part of the DNS resolver migration path.
 - Every `start` gets its own timestamped log file so later debugging has a stable artifact even if the next session behaves differently.
 - The bypass rule is intentionally domain-suffix based because the original user requirement was `*.ru`. If later you want IP or community rulesets, extend the renderer rather than hardcoding provider-specific blobs.

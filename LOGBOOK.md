@@ -5,6 +5,15 @@
 
 ## 2026-04-02
 
+### 1720 — `vless-tun` Config Remastered Around `source`, `network`, And Provider-Neutral Artifacts
+- DECISION: the old `vless-tun` config shape overloaded root `subscription_url` plus a broad `render` block with unrelated concerns: source selection, mode, TUN/system-proxy transport, bypass policy, proxy DNS, generated artifact path, and launch backend details all lived together.
+- FIX: [internal/config/config.go](/Users/alexis/src/multi-tun/internal/config/config.go) now supports a preferred schema built around `source`, optional `default`, `network`, optional `launch`, `routing`, `dns`, `logging`, and `artifacts`, while still reading the legacy `subscription_url`, `selected_profile`, and `render` fields as fallbacks.
+- FIX: `source.mode=proxy|direct` is now real runtime behavior instead of just a config idea: [fetch.go](/Users/alexis/src/multi-tun/internal/subscription/fetch.go) treats `proxy` as an HTTP source that resolves to one or more `vless://` entries and `direct` as a literal `vless://...` source with no extra fetch hop.
+- DECISION: `launch` is now modeled as an override-only block. If it is omitted, `vless-tun` keeps the existing automatic behavior and prefers the shared `vpn-core` backend when it is available instead of forcing launch backend details into the happy-path config.
+- DECISION: the generated sing-box artifact was renamed conceptually from provider-specific `dancevpn-sing-box.json` to neutral `artifacts.singbox_config_path`, with the live config now pointing at `~/.config/vless-tun/generated/sing-box.json`.
+- LIVE CHANGE: [config.json](/Users/alexis/.config/vless-tun/config.json) was migrated to the preferred shape without any legacy mirror fields; [README.md](/Users/alexis/src/multi-tun/README.md) now documents the new tree and the optional `launch` override model.
+- TEST: Added coverage in [config_test.go](/Users/alexis/src/multi-tun/internal/config/config_test.go) and [fetch_test.go](/Users/alexis/src/multi-tun/internal/subscription/fetch_test.go); `go test ./...` passed, `./vless-tun` was rebuilt, `./vless-tun render` emitted the new `generated/sing-box.json`, and `./vless-tun status --config ...` now reports `mode: tun` with the new rendered artifact path.
+
 ### 1645 — `openconnect-tun` Config Remastered Around `default` + Nested Server Profiles
 - DECISION: the old `openconnect-tun` config shape was carrying one VPN policy across root `split_include`, top-level `servers[...]`, and top-level `profiles[...]`, which made the relationship between selected profile and real ASA endpoint indirect and hard to read.
 - FIX: [internal/openconnectcfg/config.go](/Users/alexis/src/multi-tun/internal/openconnectcfg/config.go) now supports a remastered preferred schema with `default.server_url`, `default.profile`, and nested `servers.<url>.profiles.<profile>.{mode,split_include}` while remaining backward-compatible with the legacy fields.

@@ -41,7 +41,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
 	}
-	launchCfg := cfg.Render.PrivilegedLaunchOrDefault()
+	launchCfg := cfg.LaunchOrDefault()
 
 	if current, state, alive, err := currentSessionState(cfg.CacheDir, launchCfg); err == nil && current != nil && alive {
 		fmt.Fprintf(a.stderr, "%s failed: sing-box session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
@@ -62,14 +62,14 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	}
 
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
-		Mode:              cfg.Render.ModeOrDefault(),
-		BypassSuffixes:    cfg.Render.BypassSuffixes,
-		InterfaceName:     cfg.Render.InterfaceName,
-		TunAddresses:      append([]string(nil), cfg.Render.TunAddresses...),
+		Mode:              cfg.NetworkMode(),
+		BypassSuffixes:    cfg.BypassSuffixes(),
+		InterfaceName:     cfg.TunInterfaceName(),
+		TunAddresses:      cfg.TunAddresses(),
 		OverlayDNSActive:  prepared.renderOptions.OverlayDNS != nil,
 		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
 		SystemDNSServers:  systemDNSServers(cfg),
-		PrivilegedLaunch:  cfg.Render.PrivilegedLaunchOrDefault(),
+		PrivilegedLaunch:  cfg.LaunchOrDefault(),
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
@@ -118,7 +118,7 @@ func (a *App) runReconnect(args []string) int {
 		return 1
 	}
 
-	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.Render.PrivilegedLaunchOrDefault(), *force, *timeout)
+	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.LaunchOrDefault(), *force, *timeout)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		if stopped != nil && stopped.LogPath != "" {
@@ -128,14 +128,14 @@ func (a *App) runReconnect(args []string) int {
 	}
 
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
-		Mode:              cfg.Render.ModeOrDefault(),
-		BypassSuffixes:    cfg.Render.BypassSuffixes,
-		InterfaceName:     cfg.Render.InterfaceName,
-		TunAddresses:      append([]string(nil), cfg.Render.TunAddresses...),
+		Mode:              cfg.NetworkMode(),
+		BypassSuffixes:    cfg.BypassSuffixes(),
+		InterfaceName:     cfg.TunInterfaceName(),
+		TunAddresses:      cfg.TunAddresses(),
 		OverlayDNSActive:  prepared.renderOptions.OverlayDNS != nil,
 		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
 		SystemDNSServers:  systemDNSServers(cfg),
-		PrivilegedLaunch:  cfg.Render.PrivilegedLaunchOrDefault(),
+		PrivilegedLaunch:  cfg.LaunchOrDefault(),
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
@@ -175,7 +175,7 @@ func (a *App) runStop(args []string) int {
 		return 1
 	}
 
-	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.Render.PrivilegedLaunchOrDefault(), *force, *timeout)
+	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.LaunchOrDefault(), *force, *timeout)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "stop failed: %v\n", err)
 		if stopped != nil && stopped.LogPath != "" {
@@ -237,20 +237,20 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 
 	selector := options.profileSelector
 	if selector == "" {
-		selector = cfg.SelectedProfile
+		selector = cfg.DefaultProfileSelector()
 	}
 	profile, err := subscription.SelectProfile(snapshot.Profiles, selector)
 	if err != nil {
 		return preparedStart{}, err
 	}
 
-	renderOptions := resolveRenderOptions(cfg.Render.ModeOrDefault())
+	renderOptions := resolveRenderOptions(cfg.NetworkMode())
 	data, err := singbox.RenderWithOptions(cfg, profile, renderOptions)
 	if err != nil {
 		return preparedStart{}, err
 	}
 
-	target := cfg.Render.OutputPath
+	target := cfg.SingboxConfigPath()
 	if options.outputPath != "" {
 		target = options.outputPath
 	}
@@ -277,7 +277,7 @@ func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, f
 }
 
 func systemDNSServers(cfg config.ProjectConfig) []string {
-	values := []string{cfg.Render.ProxyDNS.Address}
+	values := []string{cfg.ProxyResolver().Address}
 	seen := map[string]struct{}{}
 	result := make([]string, 0, len(values))
 	for _, value := range values {

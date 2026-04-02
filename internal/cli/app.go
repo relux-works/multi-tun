@@ -83,8 +83,8 @@ func (a *App) runInit(args []string) int {
 	}
 
 	fmt.Fprintf(a.stdout, "initialized %s\n", config.ResolveInitPath(*configPath))
-	if strings.Contains(cfg.SubscriptionURL, "REPLACE_ME") {
-		fmt.Fprintln(a.stdout, "subscription_url still has placeholder value; edit the file or rerun with --subscription-url")
+	if strings.Contains(cfg.SourceURL(), "REPLACE_ME") {
+		fmt.Fprintln(a.stdout, "source.url still has placeholder value; edit the file or rerun with --subscription-url")
 	}
 	return 0
 }
@@ -104,7 +104,7 @@ func (a *App) runRefresh(args []string) int {
 		return 1
 	}
 
-	snapshot, err := subscription.Refresh(context.Background(), cfg.SubscriptionURL, cfg.CacheDir)
+	snapshot, err := subscription.Refresh(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "refresh failed: %v\n", err)
 		return 1
@@ -170,7 +170,7 @@ func (a *App) runRender(args []string) int {
 
 	selector := *profileSelector
 	if selector == "" {
-		selector = cfg.SelectedProfile
+		selector = cfg.DefaultProfileSelector()
 	}
 
 	profile, err := subscription.SelectProfile(snapshot.Profiles, selector)
@@ -179,13 +179,13 @@ func (a *App) runRender(args []string) int {
 		return 1
 	}
 
-	data, err := singbox.RenderWithOptions(cfg, profile, resolveRenderOptions(cfg.Render.ModeOrDefault()))
+	data, err := singbox.RenderWithOptions(cfg, profile, resolveRenderOptions(cfg.NetworkMode()))
 	if err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1
 	}
 
-	target := cfg.Render.OutputPath
+	target := cfg.SingboxConfigPath()
 	if *outputPath != "" {
 		target = *outputPath
 	}
@@ -200,7 +200,7 @@ func (a *App) runRender(args []string) int {
 
 func (a *App) loadSnapshot(cfg config.ProjectConfig, refresh bool) (subscription.CacheSnapshot, error) {
 	if refresh {
-		return subscription.Refresh(context.Background(), cfg.SubscriptionURL, cfg.CacheDir)
+		return subscription.Refresh(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir)
 	}
 
 	snapshot, err := subscription.LoadCache(cfg.CacheDir)
@@ -210,7 +210,7 @@ func (a *App) loadSnapshot(cfg config.ProjectConfig, refresh bool) (subscription
 	if !errors.Is(err, os.ErrNotExist) {
 		return subscription.CacheSnapshot{}, err
 	}
-	return subscription.Refresh(context.Background(), cfg.SubscriptionURL, cfg.CacheDir)
+	return subscription.Refresh(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir)
 }
 
 func loadConfig(configPath string) (config.ProjectConfig, error) {

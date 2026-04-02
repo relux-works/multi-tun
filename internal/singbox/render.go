@@ -30,11 +30,12 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 	if err != nil {
 		return nil, err
 	}
-	mode := cfg.Render.ModeOrDefault()
-	bypassSuffixes := cfg.Render.NormalizedBypassSuffixes()
-	bypassExcludes := cfg.Render.NormalizedBypassExcludes()
+	mode := cfg.NetworkMode()
+	bypassSuffixes := cfg.NormalizedBypassSuffixes()
+	bypassExcludes := cfg.NormalizedBypassExcludes()
 	overlayDNS := normalizeOverlayDNS(options.OverlayDNS)
 	useOverlayDNS := mode == config.RenderModeTun && overlayDNS != nil
+	proxyResolver := cfg.ProxyResolver()
 
 	proxyOutbound := map[string]any{
 		"type":        "vless",
@@ -66,12 +67,12 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 		map[string]any{
 			"type":        "tls",
 			"tag":         "dns-proxy",
-			"server":      cfg.Render.ProxyDNS.Address,
-			"server_port": cfg.Render.ProxyDNS.Port,
+			"server":      proxyResolver.Address,
+			"server_port": proxyResolver.Port,
 			"detour":      "proxy",
 			"tls": map[string]any{
 				"enabled":     true,
-				"server_name": cfg.Render.ProxyDNS.TLSServerName,
+				"server_name": proxyResolver.TLSServerName,
 			},
 		},
 	}
@@ -166,14 +167,14 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 		})
 	}
 
-	inbounds, err := buildInbounds(cfg.Render, overlayDNS)
+	inbounds, err := buildInbounds(cfg, overlayDNS)
 	if err != nil {
 		return nil, err
 	}
 
 	root := map[string]any{
 		"log": map[string]any{
-			"level": cfg.Render.LogLevel,
+			"level": cfg.LogLevel(),
 		},
 		"dns": map[string]any{
 			"servers":         dnsServers,
@@ -294,14 +295,14 @@ func baseRouteRules(mode string) []any {
 	return rules
 }
 
-func buildInbounds(cfg config.RenderConfig, overlayDNS *OverlayDNS) ([]any, error) {
-	switch cfg.ModeOrDefault() {
+func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS) ([]any, error) {
+	switch cfg.NetworkMode() {
 	case config.RenderModeTun:
 		inbound := map[string]any{
 			"type":           "tun",
 			"tag":            "tun-in",
-			"interface_name": cfg.InterfaceName,
-			"address":        cfg.TunAddresses,
+			"interface_name": cfg.TunInterfaceName(),
+			"address":        cfg.TunAddresses(),
 			"auto_route":     true,
 			"strict_route":   true,
 			"mtu":            1400,
@@ -315,13 +316,13 @@ func buildInbounds(cfg config.RenderConfig, overlayDNS *OverlayDNS) ([]any, erro
 			map[string]any{
 				"type":             "mixed",
 				"tag":              "mixed-in",
-				"listen":           cfg.ProxyListenAddress,
-				"listen_port":      cfg.ProxyListenPort,
+				"listen":           cfg.SystemProxyListenAddress(),
+				"listen_port":      cfg.SystemProxyListenPort(),
 				"set_system_proxy": true,
 			},
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported render mode %q", cfg.ModeOrDefault())
+		return nil, fmt.Errorf("unsupported render mode %q", cfg.NetworkMode())
 	}
 }
 
