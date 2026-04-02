@@ -11,6 +11,28 @@ openconnect-tun setup --vpn-name "Corp VPN" --server-url "vpn.example.com/engine
 
 `vless-tun init` remains available as a compatibility alias for the older bootstrap flow.
 
+## Seed OpenConnect auth in Keychain
+
+```bash
+security add-generic-password -U -a 'corp-vpn/username' -s multi-tun -w 'alice'
+security add-generic-password -U -a 'corp-vpn/password' -s multi-tun -w 'correct-horse-battery-staple'
+security add-generic-password -U -a 'corp-vpn/totp_secret' -s multi-tun -w 'BASE32SECRET'
+```
+
+## Read stored OpenConnect auth
+
+```bash
+security find-generic-password -a 'corp-vpn/username' -s multi-tun -w
+security find-generic-password -a 'corp-vpn/password' -s multi-tun -w
+security find-generic-password -a 'corp-vpn/totp_secret' -s multi-tun -w
+```
+
+## Generate a TOTP code from Keychain
+
+```bash
+oathtool --totp -b "$(security find-generic-password -a 'corp-vpn/totp_secret' -s multi-tun -w)"
+```
+
 ## Refresh subscription cache
 
 ```bash

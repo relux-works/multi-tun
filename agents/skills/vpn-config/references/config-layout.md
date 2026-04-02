@@ -93,4 +93,27 @@ Notes:
 
 - `openconnect-tun setup --vpn-name ...` scaffolds this config in `full` mode with no bypasses.
 - `setup` also seeds placeholder keychain entries for username, password, and TOTP secret so the user can review and replace them later.
+- The config stores account names, not raw secrets. The actual values should live in the macOS Keychain service `multi-tun`.
 - Split-routing policy lives under `servers.<url>.profiles.<profile>.split_include` when the profile is moved from `full` to `split-include`.
+
+Populate or update auth values like this:
+
+```bash
+security add-generic-password -U -a 'corp-vpn/username' -s multi-tun -w 'alice'
+security add-generic-password -U -a 'corp-vpn/password' -s multi-tun -w 'correct-horse-battery-staple'
+security add-generic-password -U -a 'corp-vpn/totp_secret' -s multi-tun -w 'BASE32SECRET'
+```
+
+Verify them like this:
+
+```bash
+security find-generic-password -a 'corp-vpn/username' -s multi-tun -w
+security find-generic-password -a 'corp-vpn/password' -s multi-tun -w
+security find-generic-password -a 'corp-vpn/totp_secret' -s multi-tun -w
+```
+
+Generate a current TOTP code from the stored secret with:
+
+```bash
+oathtool --totp -b "$(security find-generic-password -a 'corp-vpn/totp_secret' -s multi-tun -w)"
+```
