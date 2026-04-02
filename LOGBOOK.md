@@ -3,6 +3,65 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-04-02
+
+### 1645 — `openconnect-tun` Config Remastered Around `default` + Nested Server Profiles
+- DECISION: the old `openconnect-tun` config shape was carrying one VPN policy across root `split_include`, top-level `servers[...]`, and top-level `profiles[...]`, which made the relationship between selected profile and real ASA endpoint indirect and hard to read.
+- FIX: [internal/openconnectcfg/config.go](/Users/alexis/src/multi-tun/internal/openconnectcfg/config.go) now supports a remastered preferred schema with `default.server_url`, `default.profile`, and nested `servers.<url>.profiles.<profile>.{mode,split_include}` while remaining backward-compatible with the legacy fields.
+- FIX: [internal/openconnectcli/app.go](/Users/alexis/src/multi-tun/internal/openconnectcli/app.go) now resolves defaults from the new `default` block, resolves configured server URLs directly from nested profile entries before falling back to AnyConnect XML, and prefers profile-scoped `mode` over the legacy root `default_mode`.
+- FIX: `vpn_domains` are now normalized as suffix masks rather than a plain deduped string list, so covered entries like `inside.corp.example` collapse under `corp.example` during option resolution.
+- LIVE CHANGE: `~/.config/openconnect-tun/config.json` was migrated from the mixed legacy-plus-draft state to the new single-shape layout, with Corp split-include routes/nameservers/profile policy now living only under `servers.vpn-gw2.corp.example/outside.profiles.Ural Outside extended`.
+- TEST: Added coverage in [config_test.go](/Users/alexis/src/multi-tun/internal/openconnectcfg/config_test.go) and [app_test.go](/Users/alexis/src/multi-tun/internal/openconnectcli/app_test.go); `go test ./...` passed and `./openconnect-tun` was rebuilt.
+
+### 1510 — `openconnect-tun stop` Now Clears Orphaned Root Resolver State
+- ROOT CAUSE: interrupted `openconnect-tun` runs could leave root-owned `/etc/resolver/*` split-include files behind after `runtime/current-session.json` was already gone; in that state `openconnect-tun status` showed `session: none`, but `scutil --dns` still published `corp.example -> 10.23.16.4/10.23.0.23`, which is enough to break official Cisco AnyConnect SSO navigation on the same host.
+- FIX: [internal/openconnect/session.go](/Users/alexis/src/multi-tun/internal/openconnect/session.go) now runs orphaned resolver cleanup from `Stop(...)` for `cleaned_orphaned`, `stale_cleaned`, and `cleared_starting_cleaned` states; cleanup goes through the shared `vpn-core` helper when available and removes only files marked as owned by `openconnect-tun`.
+- FIX: [internal/openconnectcli/app.go](/Users/alexis/src/multi-tun/internal/openconnectcli/app.go) now reports those cleanup states explicitly, and [internal/openconnect/session_test.go](/Users/alexis/src/multi-tun/internal/openconnect/session_test.go) covers the no-session and pid=0 starting-session cases.
+- LIVE VERIFY: `./openconnect-tun stop` on 2026-04-02 removed the stale Corp resolver set; `/etc/resolver` collapsed back to `search.tailscale` only and `scutil --dns` no longer showed Corp supplemental resolvers.
+
+### 1450 — Native CSD Was Still Using The Old Hostname Resolver For Cert Hash
+- ROOT CAUSE: after `fetching_saml_config` was fixed, aggregate hostscan could still fall back to `csd-post.sh` because [internal/openconnect/runtime.go](/Users/alexis/src/multi-tun/internal/openconnect/runtime.go) fetched the server cert SHA1 with `tls.Dial(hostname:443)`, which still used the pre-fix system resolver path for `vpn-gw2.corp.example`.
+- FINDING: live session `openconnect-session-20260402T111926Z.log` reached `aggregate_auth_hostscan` and logged only `hostscan_csd_wrapper: /opt/homebrew/.../csd-post.sh` before the user interrupted, confirming native `libcsd` had been rejected before wrapper execution even though `~/.cisco/vpn/cache/lib64_appid/libcsd.dylib` existed.
+- FIX: [internal/openconnect/runtime.go](/Users/alexis/src/multi-tun/internal/openconnect/runtime.go) now resolves the server address through `resolveOpenConnectDialAddress(...)` before the TLS dial used for cert hashing, and hostscan logs `hostscan_csd_native_unavailable` when native CSD setup fails.
+- TEST: [internal/openconnect/runtime_test.go](/Users/alexis/src/multi-tun/internal/openconnect/runtime_test.go) now covers SHA1 fetch through a resolved fallback address; `go test ./...` passed and `./openconnect-tun` was rebuilt.
+
+### 1420 — vless Overlay DNS Was Outranking Existing Bypass Suffixes
+- ROOT CAUSE: with `vless-tun` active in `tun` mode, broad bypasses (`.ru`, `.xn--p1ai`) already existed, but overlay render still routed matching corporate suffixes to `dns-overlay` before evaluating bypass DNS rules. That made `vpn-gw2.corp.example` resolve on the corporate overlay path despite explicit bypass intent.
+- FIX: [internal/singbox/render.go](/Users/alexis/src/multi-tun/internal/singbox/render.go) now adds `dns-direct` under overlay when bypass suffixes exist and orders tun-mode DNS rules as `proxy-exceptions -> ru-direct -> dns-overlay -> final proxy`, so bypass DNS wins over broader overlay suffixes.
+- FIX: local `~/.config/openconnect-tun/config.json` now lists `vpn-gw2.corp.example` in the active `bypass_suffixes` overrides for `vpn-gw2.corp.example/outside` and `Ural Outside extended`.
+- TEST: [internal/singbox/render_test.go](/Users/alexis/src/multi-tun/internal/singbox/render_test.go) updated for the new precedence model; `go test ./...` passed and `./vless-tun` was rebuilt.
+
+### 1358 — SAML Bootstrap Hung On Pre-VPN `corp.example` Supplemental DNS
+- ROOT CAUSE: live `openconnect-tun start` stalled at `auth_stage: fetching_saml_config` because `vpn-gw2.corp.example` matched an active `corp.example` supplemental resolver on `10.23.16.4/10.23.0.23` before VPN establishment; on this host both Go `net.LookupHost`/`getaddrinfo` and `dscacheutil` could hang on that path, so aggregate-auth never read the initial SAML config.
+- FINDING: plain `dig vpn-gw2.corp.example` returned `198.51.100.22` immediately and `curl --resolve vpn-gw2.corp.example:443:198.51.100.22 https://vpn-gw2.corp.example/outside` returned `HTTP/1.1 200 OK`, isolating the blocker to local resolver selection rather than ASA reachability.
+- FIX: [internal/openconnect/runtime.go](/Users/alexis/src/multi-tun/internal/openconnect/runtime.go) now bounds the primary host lookup with a short timeout, prefers aliases plus `dig` fallback before `dscacheutil`, and applies a timeout to `dscacheutil` itself.
+- TEST: [internal/openconnect/runtime_test.go](/Users/alexis/src/multi-tun/internal/openconnect/runtime_test.go) adds regression coverage for timeout-to-fallback and `dig` fallback; `go test ./...` passed and `./openconnect-tun` was rebuilt.
+
+## 2026-04-01
+
+### 1349 — portal DNS Splits Between Public And Corporate Views
+- FINDING: official AnyConnect dump `cisco-dump-session-20260401T103101Z` captured conflicting `portal.corp.example` views inside one session: `snapshots/host-probes-network_change-20260401T103227.970Z.txt` shows `dscacheutil` plus route pinned to `10.25.1.4` on `utun5`, corporate `dig @10.23.16.4/.23` also returns `10.25.1.4`, and TCP/HTTPS probes time out; later `snapshots/host-probes-network_change-20260401T103326.093Z.txt` shows `dscacheutil`, route, and HTTPS back on public `203.0.113.27` via `en0` with `HTTP/2 302`.
+- FINDING: standalone `openconnect-tun` dump `cisco-dump-session-20260401T103604Z` stayed on the private view through `snapshots/host-probes-final_stop-20260401T103737.762Z.txt`: `dscacheutil` and route resolve `portal.corp.example` to `10.25.1.4` on `utun5`, plain `dig` still returns `www.corp.example` -> `203.0.113.27`, corporate `dig @10.23.16.4/.23` returns `10.25.1.4`, and TCP/HTTPS probes time out.
+- STATUS: treat `portal.corp.example` as a separate DNS-routing edge case, not as the same class of failure as the broader Corp suffix merge/order bug.
+
+### 1130 — vless-tun Stop/Status Now Recover Legacy Launchd Sessions
+- FIX: `internal/session/session.go` now resolves current session via `ResolveCurrent(...)`, falling back to a live `works.relux.vless-tun` LaunchDaemon plus latest launchd session metadata when `runtime/current-session.json` is missing after reboot.
+- FIX: `internal/session/launchd.go` now reads `launchctl print system/<label>` without `sudo` first, so normal-user `vless-tun status|diagnose` can detect legacy system launchd services; privileged `bootout` still requires sudo.
+- FIX: `internal/cli/status.go`, `internal/cli/diagnose.go`, and `internal/cli/run_stop.go` now use the recovered launchd session, so `vless-tun stop` enters the privileged launchd stop path instead of returning `no current session file found`.
+- TEST: Added launchd fallback coverage in `internal/session/session_test.go`; `go test ./internal/session ./internal/cli` and `go test ./...` pass.
+- LIVE VERIFY: rebuilt `vless-tun`; live `vless-tun status` now shows `session: active`, `pid: 570`, `launch_mode: launchd` for the orphaned daemon on the host.
+
+### 1110 — Live vless-tun Config Moved Off Legacy Launchd Mode
+- DECISION: live `~/.config/vless-tun/config.json` now sets `render.privileged_launch.mode="sudo"` so future `vless-tun run` starts only on explicit user command and no longer chooses the legacy launchd path for this host.
+- FINDING: `vless-tun diagnose` now reports `configured_launch_mode: sudo`, while the already-loaded `works.relux.vless-tun` LaunchDaemon remains active until removed with root privileges.
+- BLOCKED: unloading `system/works.relux.vless-tun` and deleting `/Library/LaunchDaemons/works.relux.vless-tun.plist` require admin authentication on the host; agent-side `sudo -n` and unprivileged `launchctl bootout` both failed.
+
+### 1103 — vless-tun Status Misses RunAtLoad LaunchDaemon After Reboot
+- FINDING: live host state showed `openconnect-tun status -> session: none, state: disconnected`, but `vless-tun status` reported `connection: degraded` with `session: none` while `launchctl print system/works.relux.vless-tun` showed a running LaunchDaemon pid and `netstat -rn -f inet` still routed `0/1` and `128/1` via `utun233`.
+- ROOT CAUSE: `~/.config/vless-tun/config.json` still pins `render.privileged_launch.mode=launchd`, `/Library/LaunchDaemons/works.relux.vless-tun.plist` has `RunAtLoad=true`, and `internal/cli/status.go` only reports an active session when `~/.cache/vless-tun/runtime/current-session.json` exists; after reboot the daemon restarts `sing-box` but that runtime pointer is absent, so CLI loses ownership while the tunnel stays active.
+- ANOMALY: the active daemon was still using legacy session log `/Users/alexis/.cache/vless-tun/sessions/sing-box-session-20260328T101711Z.log`, confirming launchd service persistence independent of newer helper-mode session metadata.
+- STATUS: Diagnosed on live host; cleanup/fix not applied in this slice.
+
 ## 2026-03-27
 
 ### 1758 — split-include Now Augments User Masks With Official Corp Supplemental DNS Suffixes
