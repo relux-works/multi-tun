@@ -87,7 +87,8 @@ func TestActiveOverlayDNSReturnsExpandedDomainsForLiveSession(t *testing.T) {
 		PID:            os.Getpid(),
 		Mode:           ConnectModeSplitInclude,
 		Server:         "vpn-gw2.corp.example/outside",
-		VPNDomains:     []string{"corp.example"},
+		VPNDomains:     []string{"corp.example", "bypass.corp.example"},
+		BypassSuffixes: []string{"bypass.corp.example"},
 		VPNNameservers: []string{"10.23.16.4", "10.23.0.23"},
 	}
 	if err := SaveCurrent(cacheDir, current); err != nil {
@@ -105,6 +106,9 @@ func TestActiveOverlayDNSReturnsExpandedDomainsForLiveSession(t *testing.T) {
 		if !containsString(overlay.Domains, domain) {
 			t.Fatalf("overlay.Domains = %#v, want %q", overlay.Domains, domain)
 		}
+	}
+	if containsString(overlay.Domains, "bypass.corp.example") {
+		t.Fatalf("overlay.Domains = %#v, want bypass.corp.example excluded by bypass", overlay.Domains)
 	}
 	if !containsString(overlay.Nameservers, "10.23.16.4") || !containsString(overlay.Nameservers, "10.23.0.23") {
 		t.Fatalf("overlay.Nameservers = %#v, want Corp nameservers", overlay.Nameservers)
@@ -247,5 +251,60 @@ func TestProbeRouteWarmupReadyTracksApplySuccessPerHost(t *testing.T) {
 	}
 	if !ready {
 		t.Fatalf("probeRouteWarmupReady() = false, want true")
+	}
+}
+
+func TestStopCleansOrphanedResolverStateWithoutCurrentSession(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := SaveCurrent(cacheDir, CurrentSession{}); err != nil {
+		t.Fatalf("SaveCurrent() error = %v", err)
+	}
+
+	prevCleanup := cleanupOrphanedResolverStateOpenConnect
+	cleanupOrphanedResolverStateOpenConnect = func(cacheDir string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() {
+		cleanupOrphanedResolverStateOpenConnect = prevCleanup
+	})
+
+	current, state, err := Stop(cacheDir, time.Second)
+	if err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if state != "cleaned_orphaned" {
+		t.Fatalf("state = %q, want cleaned_orphaned", state)
+	}
+	if current.PID != 0 {
+		t.Fatalf("current.PID = %d, want 0", current.PID)
+	}
+}
+
+func TestStopClearsStartingSessionAndCleansOrphanedResolverState(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := SaveCurrent(cacheDir, CurrentSession{ID: "20260402T111926Z"}); err != nil {
+		t.Fatalf("SaveCurrent() error = %v", err)
+	}
+
+	prevCleanup := cleanupOrphanedResolverStateOpenConnect
+	cleanupOrphanedResolverStateOpenConnect = func(cacheDir string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() {
+		cleanupOrphanedResolverStateOpenConnect = prevCleanup
+	})
+
+	current, state, err := Stop(cacheDir, time.Second)
+	if err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if state != "cleared_starting_cleaned" {
+		t.Fatalf("state = %q, want cleared_starting_cleaned", state)
+	}
+	if current.ID != "20260402T111926Z" {
+		t.Fatalf("current.ID = %q, want session id preserved", current.ID)
+	}
+	if _, err := LoadCurrent(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("LoadCurrent() error = %v, want os.ErrNotExist", err)
 	}
 }

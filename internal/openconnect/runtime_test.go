@@ -2,6 +2,8 @@ package openconnect
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFindOpenConnectPIDFromOutput(t *testing.T) {
@@ -196,6 +199,7 @@ func TestScriptDiagnosticsWrapperScriptKeepsResolverShimForSplitInclude(t *testi
 		SearchDomain:         "corp.example",
 		Nameservers:          []string{"10.23.16.4", "10.23.0.23"},
 		Domains:              []string{"corp.example"},
+		BypassDomains:        []string{"bypass.corp.example"},
 		SearchCleanupDomains: []string{"corp.example"},
 		ProbeHosts:           []string{"gitlab.services.corp.example"},
 		ManageSearchResolver: true,
@@ -208,6 +212,11 @@ func TestScriptDiagnosticsWrapperScriptKeepsResolverShimForSplitInclude(t *testi
 		"vpnc_wrapper_default_route_remove:",
 		"vpnc_wrapper_dns_shim: apply",
 		"vpnc_wrapper_dns_shim: remove",
+		"capture_public_nameservers",
+		"load_public_nameservers",
+		"vpnc_wrapper_public_bypass: apply",
+		"vpnc_wrapper_public_bypass: remove",
+		"bypass.corp.example",
 		"launch_probe_host_route_warmup",
 		"--probe-sync-apply",
 		"vpnc_wrapper_probe_route_sync_retry:",
@@ -254,7 +263,8 @@ func TestSupplementalResolverSpecForConnectOnlyAppliesInFullMode(t *testing.T) {
 
 	split := supplementalResolverSpecForConnect(ConnectModeSplitInclude, "vpn-gw2.corp.example/outside", ConnectOptions{
 		IncludeRoutes:  []string{"10.0.0.0/8"},
-		VPNDomains:     []string{"corp.example"},
+		VPNDomains:     []string{"corp.example", "bypass.corp.example"},
+		BypassSuffixes: []string{"bypass.corp.example"},
 		VPNNameservers: []string{"10.23.16.4", "10.23.0.23"},
 	})
 	if split == nil {
@@ -268,6 +278,12 @@ func TestSupplementalResolverSpecForConnectOnlyAppliesInFullMode(t *testing.T) {
 	}
 	if !containsString(split.Domains, "corp.example") {
 		t.Fatalf("split.Domains = %#v, want corp.example", split.Domains)
+	}
+	if containsString(split.Domains, "bypass.corp.example") {
+		t.Fatalf("split.Domains = %#v, want bypass.corp.example removed by bypass", split.Domains)
+	}
+	if !containsString(split.BypassDomains, "bypass.corp.example") {
+		t.Fatalf("split.BypassDomains = %#v, want bypass.corp.example", split.BypassDomains)
 	}
 	for _, domain := range []string{"inside.corp.example", "region.corp.example", "branch.example"} {
 		if !containsString(split.Domains, domain) {
@@ -1619,6 +1635,57 @@ func TestResolveNativeCSDHostURLFallsBackToSystemLookup(t *testing.T) {
 	}
 }
 
+func TestLookupOpenConnectHostsFallsBackAfterPrimaryLookupTimeout(t *testing.T) {
+	prevLookupHost := lookupHostOpenConnect
+	prevSystemLookupHost := systemLookupHostOpenConnect
+	prevLookupTimeout := lookupHostTimeoutOpenConnect
+	lookupHostTimeoutOpenConnect = 10 * time.Millisecond
+	lookupHostOpenConnect = func(host string) ([]string, error) {
+		if host != "vpn-gw2.timeout.test" {
+			t.Fatalf("lookup host = %q, want vpn-gw2.timeout.test", host)
+		}
+		time.Sleep(50 * time.Millisecond)
+		return nil, &net.DNSError{Err: "i/o timeout", Name: host}
+	}
+	systemLookupHostOpenConnect = func(host string) []string {
+		if host != "vpn-gw2.timeout.test" {
+			t.Fatalf("system lookup host = %q, want vpn-gw2.timeout.test", host)
+		}
+		return []string{"198.51.100.22"}
+	}
+	t.Cleanup(func() {
+		lookupHostOpenConnect = prevLookupHost
+		systemLookupHostOpenConnect = prevSystemLookupHost
+		lookupHostTimeoutOpenConnect = prevLookupTimeout
+	})
+
+	hosts, err := lookupOpenConnectHosts("vpn-gw2.timeout.test")
+	if err != nil {
+		t.Fatalf("lookupOpenConnectHosts() error = %v", err)
+	}
+	if len(hosts) != 1 || hosts[0] != "198.51.100.22" {
+		t.Fatalf("lookupOpenConnectHosts() = %v, want [198.51.100.22]", hosts)
+	}
+}
+
+func TestLookupHostViaSystemSourcesPrefersDigFallback(t *testing.T) {
+	prevDigLookup := lookupHostViaDigOpenConnect
+	lookupHostViaDigOpenConnect = func(host string) []string {
+		if host != "vpn-gw2.dig.test" {
+			t.Fatalf("dig lookup host = %q, want vpn-gw2.dig.test", host)
+		}
+		return []string{"198.51.100.22"}
+	}
+	t.Cleanup(func() {
+		lookupHostViaDigOpenConnect = prevDigLookup
+	})
+
+	hosts := lookupHostViaSystemSourcesOpenConnect("vpn-gw2.dig.test")
+	if len(hosts) != 1 || hosts[0] != "198.51.100.22" {
+		t.Fatalf("lookupHostViaSystemSourcesOpenConnect() = %v, want [198.51.100.22]", hosts)
+	}
+}
+
 func TestNewSAMLHTTPClientDialsSystemResolvedAddress(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Host; got != "vpn-gw2.internal.corp.example" && !strings.HasPrefix(got, "vpn-gw2.internal.corp.example:") {
@@ -1669,6 +1736,52 @@ func TestNewSAMLHTTPClientDialsSystemResolvedAddress(t *testing.T) {
 	}
 	if string(body) != "ok" {
 		t.Fatalf("body = %q, want ok", string(body))
+	}
+}
+
+func TestFetchServerCertSHA1UsesResolvedAddress(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer server.Close()
+
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(server.URL) error = %v", err)
+	}
+	serverHost, serverPort, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("SplitHostPort(server host) error = %v", err)
+	}
+
+	prevLookupHost := lookupHostOpenConnect
+	prevSystemLookupHost := systemLookupHostOpenConnect
+	lookupHostOpenConnect = func(host string) ([]string, error) {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host}
+	}
+	systemLookupHostOpenConnect = func(host string) []string {
+		if host != "vpn-gw2.internal.corp.example" {
+			t.Fatalf("system lookup host = %q, want vpn-gw2.internal.corp.example", host)
+		}
+		return []string{serverHost}
+	}
+	t.Cleanup(func() {
+		lookupHostOpenConnect = prevLookupHost
+		systemLookupHostOpenConnect = prevSystemLookupHost
+	})
+
+	got, err := fetchServerCertSHA1("vpn-gw2.internal.corp.example", serverPort)
+	if err != nil {
+		t.Fatalf("fetchServerCertSHA1() error = %v", err)
+	}
+	rawCert := server.TLS.Certificates[0].Certificate[0]
+	sum := sha1.Sum(rawCert)
+	want := strings.ToUpper(hex.EncodeToString(sum[:]))
+	if got != want {
+		t.Fatalf("fetchServerCertSHA1() = %q, want %q", got, want)
 	}
 }
 

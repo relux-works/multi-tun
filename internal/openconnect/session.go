@@ -21,7 +21,10 @@ const (
 	logFilePrefix          = "openconnect-session-"
 	metadataFilePrefix     = "session-"
 	runtimeFileName        = "current-session.json"
+	orphanCleanupLogName   = "orphan-cleanup.log"
 )
+
+var cleanupOrphanedResolverStateOpenConnect = cleanupOrphanedResolverState
 
 type CurrentSession struct {
 	ID               string    `json:"id"`
@@ -39,6 +42,7 @@ type CurrentSession struct {
 	Profile          string    `json:"profile,omitempty"`
 	IncludeRoutes    []string  `json:"include_routes,omitempty"`
 	VPNDomains       []string  `json:"vpn_domains,omitempty"`
+	BypassSuffixes   []string  `json:"bypass_suffixes,omitempty"`
 	VPNNameservers   []string  `json:"vpn_nameservers,omitempty"`
 	HelperSocketPath string    `json:"helper_socket_path,omitempty"`
 }
@@ -139,6 +143,7 @@ func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
 	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
 		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
 		VPNDomains:     append([]string(nil), current.VPNDomains...),
+		BypassSuffixes: append([]string(nil), current.BypassSuffixes...),
 		VPNNameservers: append([]string(nil), current.VPNNameservers...),
 	})
 	if spec == nil || len(spec.Domains) == 0 || len(spec.Nameservers) == 0 {
@@ -203,6 +208,7 @@ func connectConvergenceExpectationsForSession(current CurrentSession) connectCon
 	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
 		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
 		VPNDomains:     append([]string(nil), current.VPNDomains...),
+		BypassSuffixes: append([]string(nil), current.BypassSuffixes...),
 		VPNNameservers: append([]string(nil), current.VPNNameservers...),
 	})
 	if spec == nil {
@@ -290,6 +296,7 @@ func probeHostsForSession(current CurrentSession) []string {
 	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
 		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
 		VPNDomains:     append([]string(nil), current.VPNDomains...),
+		BypassSuffixes: append([]string(nil), current.BypassSuffixes...),
 		VPNNameservers: append([]string(nil), current.VPNNameservers...),
 	})
 	if spec == nil || len(spec.ProbeHosts) == 0 {
@@ -442,9 +449,10 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 	if errors.Is(err, os.ErrNotExist) {
 		pid, pidErr := findOpenConnectPID()
 		if pidErr != nil {
-			return CurrentSession{}, "", err
+			current = CurrentSession{}
+		} else {
+			current = CurrentSession{PID: pid}
 		}
-		current = CurrentSession{PID: pid}
 	} else if err != nil {
 		return CurrentSession{}, "", err
 	}
@@ -458,13 +466,34 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 			if err := ClearCurrent(cacheDir); err != nil {
 				return CurrentSession{}, "", err
 			}
+			cleaned, cleanupErr := cleanupOrphanedResolverStateOpenConnect(cacheDir)
+			if cleanupErr != nil {
+				return CurrentSession{}, "", cleanupErr
+			}
+			if cleaned {
+				return current, "cleared_starting_cleaned", nil
+			}
 			return current, "cleared_starting", nil
+		}
+		cleaned, cleanupErr := cleanupOrphanedResolverStateOpenConnect(cacheDir)
+		if cleanupErr != nil {
+			return CurrentSession{}, "", cleanupErr
+		}
+		if cleaned {
+			return current, "cleaned_orphaned", nil
 		}
 		return current, "none", nil
 	}
 	if !alive {
 		if err := ClearCurrent(cacheDir); err != nil {
 			return CurrentSession{}, "", err
+		}
+		cleaned, cleanupErr := cleanupOrphanedResolverStateOpenConnect(cacheDir)
+		if cleanupErr != nil {
+			return CurrentSession{}, "", cleanupErr
+		}
+		if cleaned {
+			return current, "stale_cleaned", nil
 		}
 		return current, "stale", nil
 	}
@@ -579,6 +608,7 @@ func sessionCleanupPending(cacheDir string, current CurrentSession) (bool, error
 	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
 		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
 		VPNDomains:     append([]string(nil), current.VPNDomains...),
+		BypassSuffixes: append([]string(nil), current.BypassSuffixes...),
 		VPNNameservers: append([]string(nil), current.VPNNameservers...),
 	})
 	if spec == nil {
@@ -790,6 +820,7 @@ func writeLogHeader(file *os.File, current CurrentSession) {
 	_, _ = fmt.Fprintf(file, "script: %s\n", current.Script)
 	_, _ = fmt.Fprintf(file, "routes: %s\n", joinOrNone(current.IncludeRoutes))
 	_, _ = fmt.Fprintf(file, "vpn_domains: %s\n", joinOrNone(current.VPNDomains))
+	_, _ = fmt.Fprintf(file, "bypass_suffixes: %s\n", joinOrNone(current.BypassSuffixes))
 	_, _ = fmt.Fprintf(file, "vpn_nameservers: %s\n", joinOrNone(current.VPNNameservers))
 	_, _ = fmt.Fprintf(file, "command: %s\n", joinOrNone(current.Command))
 	_, _ = fmt.Fprintf(file, "--- openconnect output follows ---\n")
@@ -830,6 +861,7 @@ func LastRelevantLogLine(path string) string {
 			strings.HasPrefix(line, "script:"),
 			strings.HasPrefix(line, "routes:"),
 			strings.HasPrefix(line, "vpn_domains:"),
+			strings.HasPrefix(line, "bypass_suffixes:"),
 			strings.HasPrefix(line, "vpn_nameservers:"),
 			strings.HasPrefix(line, "command:"),
 			strings.HasPrefix(line, "---"):
@@ -845,4 +877,94 @@ func joinOrNone(values []string) string {
 		return "none"
 	}
 	return strings.Join(values, ", ")
+}
+
+func cleanupOrphanedResolverState(cacheDir string) (bool, error) {
+	if state, _, err := DetectState(); err == nil && state == StateConnected {
+		return false, nil
+	}
+	if !orphanedResolverArtifactsPresent() {
+		return false, nil
+	}
+
+	cacheDir = ResolveCacheDir(cacheDir)
+	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
+		return true, fmt.Errorf("prepare orphan cleanup runtime dir: %w", err)
+	}
+	logPath := filepath.Join(RuntimeDir(cacheDir), orphanCleanupLogName)
+	command := []string{"/bin/sh", "-c", orphanedResolverCleanupScript()}
+
+	mode, helperCfg, err := resolvePrivilegedMode(PrivilegedModeAuto)
+	if err != nil {
+		return true, fmt.Errorf("resolve privileged mode for orphan cleanup: %w", err)
+	}
+	switch mode {
+	case PrivilegedModeHelper:
+		if err := helperRun(helperCfg, command, "", logPath); err != nil {
+			return true, fmt.Errorf("run orphan cleanup via helper: %w", err)
+		}
+	default:
+		if mode == PrivilegedModeSudo {
+			if err := ensureSudoCredentials(); err != nil {
+				return true, fmt.Errorf("sudo authentication for orphan cleanup: %w", err)
+			}
+		}
+		execName, execArgs := elevatedCommand(mode, command...)
+		cmd := execCommandOpenConnect(execName, execArgs...)
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return true, fmt.Errorf("open orphan cleanup log: %w", err)
+		}
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		runErr := cmd.Run()
+		_ = logFile.Close()
+		if runErr != nil {
+			return true, fmt.Errorf("run orphan cleanup: %w", runErr)
+		}
+	}
+
+	if orphanedResolverArtifactsPresent() {
+		return true, fmt.Errorf("orphaned openconnect resolver artifacts still present after cleanup")
+	}
+	return true, nil
+}
+
+func orphanedResolverArtifactsPresent() bool {
+	for _, domain := range orphanedResolverArtifactDomains() {
+		if _, err := os.Stat(filepath.Join("/etc/resolver", domain)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func orphanedResolverArtifactDomains() []string {
+	domains := []string{
+		"bypass.corp.example",
+		"vpn-gw2.corp.example",
+	}
+	if spec := supplementalResolverSpecForServer("vpn-gw2.corp.example/outside"); spec != nil {
+		domains = append(domains, spec.Domains...)
+	}
+	return uniqueStrings(domains)
+}
+
+func orphanedResolverCleanupScript() string {
+	return `set -eu
+
+if [ ! -d /etc/resolver ]; then
+  exit 0
+fi
+
+for f in /etc/resolver/*; do
+  [ -f "$f" ] || continue
+  first_line=$(head -n 1 "$f" 2>/dev/null || true)
+  case "$first_line" in
+    '# Added by openconnect-tun DNS shim'*|'# Added by openconnect-tun public bypass'*)
+      rm -f "$f"
+      ;;
+  esac
+done
+`
 }

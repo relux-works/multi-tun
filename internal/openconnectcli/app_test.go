@@ -245,13 +245,420 @@ func TestParseRunOptionsMergesCLIWithSplitIncludeDefaults(t *testing.T) {
 	}
 }
 
+func TestParseRunOptionsUsesProfileSpecificSplitIncludeOverrides(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default_profile": "Ural Outside extended",
+  "default_mode": "split-include",
+  "split_include": {
+    "routes": ["10.0.0.0/8"],
+    "vpn_domains": ["corp.example"],
+    "nameservers": ["10.23.16.4", "10.23.0.23"]
+  },
+  "profiles": {
+    "Ural Outside extended": {
+      "split_include": {
+        "routes": ["172.16.0.0/12"],
+        "vpn_domains": ["services.corp.example"],
+        "nameservers": ["10.24.60.8"]
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.profile != "Ural Outside extended" {
+		t.Fatalf("profile = %q, want %q", options.profile, "Ural Outside extended")
+	}
+	if !reflect.DeepEqual(options.includeRoutes, []string{"172.16.0.0/12"}) {
+		t.Fatalf("includeRoutes = %#v", options.includeRoutes)
+	}
+	if !reflect.DeepEqual(options.vpnDomains, []string{"services.corp.example"}) {
+		t.Fatalf("vpnDomains = %#v", options.vpnDomains)
+	}
+	if !reflect.DeepEqual(options.vpnNameservers, []string{"10.24.60.8"}) {
+		t.Fatalf("vpnNameservers = %#v", options.vpnNameservers)
+	}
+}
+
+func TestParseRunOptionsUsesServerSpecificSplitIncludeOverrides(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default_mode": "split-include",
+  "split_include": {
+    "routes": ["10.0.0.0/8"],
+    "vpn_domains": ["corp.example"],
+    "nameservers": ["10.23.16.4", "10.23.0.23"]
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "split_include": {
+        "routes": ["11.0.0.0/8"],
+        "vpn_domains": ["outside.corp.example"],
+        "nameservers": ["10.24.60.197"]
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{
+		"--config", configPath,
+		"--dry-run",
+		"--server", "vpn-gw2.corp.example/outside",
+	})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if !reflect.DeepEqual(options.includeRoutes, []string{"11.0.0.0/8"}) {
+		t.Fatalf("includeRoutes = %#v", options.includeRoutes)
+	}
+	if !reflect.DeepEqual(options.vpnDomains, []string{"outside.corp.example"}) {
+		t.Fatalf("vpnDomains = %#v", options.vpnDomains)
+	}
+	if !reflect.DeepEqual(options.vpnNameservers, []string{"10.24.60.197"}) {
+		t.Fatalf("vpnNameservers = %#v", options.vpnNameservers)
+	}
+}
+
+func TestParseRunOptionsProfileOverridesBeatServerOverrides(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default_server": "vpn-gw2.corp.example/outside",
+  "default_profile": "Ural Outside extended",
+  "default_mode": "split-include",
+  "split_include": {
+    "routes": ["10.0.0.0/8"],
+    "vpn_domains": ["corp.example"],
+    "nameservers": ["10.23.16.4", "10.23.0.23"]
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "split_include": {
+        "routes": ["11.0.0.0/8"],
+        "vpn_domains": ["server.corp.example"],
+        "nameservers": ["10.24.60.197"]
+      }
+    }
+  },
+  "profiles": {
+    "Ural Outside extended": {
+      "split_include": {
+        "routes": ["172.16.0.0/12"],
+        "vpn_domains": ["profile.corp.example"],
+        "nameservers": ["10.24.60.8"]
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if !reflect.DeepEqual(options.includeRoutes, []string{"172.16.0.0/12"}) {
+		t.Fatalf("includeRoutes = %#v", options.includeRoutes)
+	}
+	if !reflect.DeepEqual(options.vpnDomains, []string{"profile.corp.example"}) {
+		t.Fatalf("vpnDomains = %#v", options.vpnDomains)
+	}
+	if !reflect.DeepEqual(options.vpnNameservers, []string{"10.24.60.8"}) {
+		t.Fatalf("vpnNameservers = %#v", options.vpnNameservers)
+	}
+}
+
+func TestParseRunOptionsAllowsOverridesToClearGlobalSplitIncludeLists(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default_profile": "Public Corp",
+  "default_mode": "split-include",
+  "split_include": {
+    "routes": ["10.0.0.0/8"],
+    "vpn_domains": ["corp.example"],
+    "nameservers": ["10.23.16.4", "10.23.0.23"]
+  },
+  "profiles": {
+    "Public Corp": {
+      "split_include": {
+        "routes": [],
+        "vpn_domains": [],
+        "nameservers": []
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.includeRoutes != nil {
+		t.Fatalf("includeRoutes = %#v, want nil", options.includeRoutes)
+	}
+	if options.vpnDomains != nil {
+		t.Fatalf("vpnDomains = %#v, want nil", options.vpnDomains)
+	}
+	if options.vpnNameservers != nil {
+		t.Fatalf("vpnNameservers = %#v, want nil", options.vpnNameservers)
+	}
+}
+
+func TestParseRunOptionsAppliesBypassSuffixesOverVPNDomains(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default_mode": "split-include",
+  "split_include": {
+    "routes": ["10.0.0.0/8"],
+    "vpn_domains": ["corp.example", "bypass.corp.example"],
+    "bypass_suffixes": [".Bypass.Corp.Example"],
+    "nameservers": ["10.23.16.4", "10.23.0.23"]
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if !reflect.DeepEqual(options.vpnDomains, []string{"corp.example"}) {
+		t.Fatalf("vpnDomains = %#v", options.vpnDomains)
+	}
+	if !reflect.DeepEqual(options.bypassSuffixes, []string{"bypass.corp.example"}) {
+		t.Fatalf("bypassSuffixes = %#v", options.bypassSuffixes)
+	}
+}
+
+func TestParseRunOptionsUsesServerOverridesResolvedFromDefaultProfile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	profileDir := filepath.Join(homeDir, "Downloads", "cisco-anyconnect-profiles", "profiles")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileDir) error = %v", err)
+	}
+	profilePath := filepath.Join(profileDir, "corp.xml")
+	if err := os.WriteFile(profilePath, []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<AnyConnectProfile>
+  <ServerList>
+    <HostEntry>
+      <HostName>Ural Outside extended</HostName>
+      <HostAddress>vpn-gw2.corp.example/outside</HostAddress>
+    </HostEntry>
+  </ServerList>
+</AnyConnectProfile>
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(profilePath) error = %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default_profile": "Ural Outside extended",
+  "default_mode": "split-include",
+  "split_include": {
+    "routes": ["10.0.0.0/8"],
+    "vpn_domains": ["corp.example"],
+    "nameservers": ["10.23.16.4", "10.23.0.23"]
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "split_include": {
+        "vpn_domains": ["server.corp.example"],
+        "bypass_suffixes": ["bypass.corp.example"],
+        "nameservers": ["10.24.60.197"]
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.profile != "Ural Outside extended" {
+		t.Fatalf("profile = %q, want %q", options.profile, "Ural Outside extended")
+	}
+	if !reflect.DeepEqual(options.vpnDomains, []string{"server.corp.example"}) {
+		t.Fatalf("vpnDomains = %#v", options.vpnDomains)
+	}
+	if !reflect.DeepEqual(options.bypassSuffixes, []string{"bypass.corp.example"}) {
+		t.Fatalf("bypassSuffixes = %#v", options.bypassSuffixes)
+	}
+	if !reflect.DeepEqual(options.vpnNameservers, []string{"10.24.60.197"}) {
+		t.Fatalf("vpnNameservers = %#v", options.vpnNameservers)
+	}
+}
+
+func TestParseRunOptionsUsesRemasteredDefaultSelectionAndNestedProfilePolicy(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include",
+          "split_include": {
+            "routes": ["10.0.0.0/8", "172.16.0.0/12"],
+            "vpn_domains": ["corp.example", "inside.corp.example", "branch.example"],
+            "bypass_suffixes": ["bypass.corp.example"],
+            "nameservers": ["10.23.16.4", "10.23.0.23"]
+          }
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.server != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("server = %q, want %q", options.server, "vpn-gw2.corp.example/outside")
+	}
+	if options.profile != "Ural Outside extended" {
+		t.Fatalf("profile = %q, want %q", options.profile, "Ural Outside extended")
+	}
+	if options.mode != openconnect.ConnectModeSplitInclude {
+		t.Fatalf("mode = %q, want %q", options.mode, openconnect.ConnectModeSplitInclude)
+	}
+	if !reflect.DeepEqual(options.includeRoutes, []string{"10.0.0.0/8", "172.16.0.0/12"}) {
+		t.Fatalf("includeRoutes = %#v", options.includeRoutes)
+	}
+	if !reflect.DeepEqual(options.vpnDomains, []string{"corp.example", "branch.example"}) {
+		t.Fatalf("vpnDomains = %#v, want covered child domains collapsed", options.vpnDomains)
+	}
+	if !reflect.DeepEqual(options.bypassSuffixes, []string{"bypass.corp.example"}) {
+		t.Fatalf("bypassSuffixes = %#v", options.bypassSuffixes)
+	}
+	if !reflect.DeepEqual(options.vpnNameservers, []string{"10.23.16.4", "10.23.0.23"}) {
+		t.Fatalf("vpnNameservers = %#v", options.vpnNameservers)
+	}
+}
+
+func TestParseRunOptionsResolvesServerFromNestedProfileWithoutXML(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include",
+          "split_include": {
+            "vpn_domains": ["corp.example"],
+            "nameservers": ["10.23.16.4"]
+          }
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.server != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("server = %q, want config-resolved server", options.server)
+	}
+	if options.mode != openconnect.ConnectModeSplitInclude {
+		t.Fatalf("mode = %q, want split-include", options.mode)
+	}
+}
+
+func TestNormalizeDomainSuffixListCollapsesCoveredSuffixes(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeDomainSuffixList([]string{
+		"inside.corp.example",
+		"corp.example",
+		"MSK.Corp.RU",
+		"branch.example",
+		".inside.corp.example",
+	})
+
+	want := []string{"corp.example", "branch.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalizeDomainSuffixList() = %#v, want %#v", got, want)
+	}
+}
+
 func TestResolveSplitIncludeTargetsIgnoresDefaultsOutsideSplitMode(t *testing.T) {
 	t.Parallel()
 
 	routes, domains := resolveSplitIncludeTargets(openconnect.ConnectModeFull, openconnectcfg.SplitIncludeConfig{
 		Routes:     []string{"10.0.0.0/8"},
 		VPNDomains: []string{"corp.example"},
-	}, []string{"172.16.0.0/12"}, []string{"branch.example"})
+	}, []string{"172.16.0.0/12"}, []string{"branch.example"}, nil)
 
 	if routes != nil {
 		t.Fatalf("routes = %#v, want nil", routes)

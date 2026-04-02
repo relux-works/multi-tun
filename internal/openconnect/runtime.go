@@ -48,12 +48,15 @@ const (
 )
 
 var (
-	execLookPathOpenConnect        = exec.LookPath
-	execCommandOpenConnect         = exec.Command
-	lookupHostOpenConnect          = net.LookupHost
-	systemLookupHostOpenConnect    = lookupHostViaSystemSourcesOpenConnect
-	userHomeDirOpenConnect         = os.UserHomeDir
-	stdinSupportsPromptOpenConnect = func() bool {
+	execLookPathOpenConnect          = exec.LookPath
+	execCommandOpenConnect           = exec.Command
+	lookupHostOpenConnect            = net.LookupHost
+	systemLookupHostOpenConnect      = lookupHostViaSystemSourcesOpenConnect
+	userHomeDirOpenConnect           = os.UserHomeDir
+	lookupHostTimeoutOpenConnect     = 2 * time.Second
+	resolveCommandTimeoutOpenConnect = 2 * time.Second
+	lookupHostViaDigOpenConnect      = lookupHostViaDigCommandOpenConnect
+	stdinSupportsPromptOpenConnect   = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd()))
 	}
 	serverCertSHA1OpenConnect = fetchServerCertSHA1
@@ -93,6 +96,7 @@ type ConnectOptions struct {
 	PrivilegedMode string
 	IncludeRoutes  []string
 	VPNDomains     []string
+	BypassSuffixes []string
 	VPNNameservers []string
 	Credentials    Credentials
 	ProfilePaths   []string
@@ -124,6 +128,7 @@ type supplementalResolverSpec struct {
 	Label                string
 	Nameservers          []string
 	Domains              []string
+	BypassDomains        []string
 	SearchDomain         string
 	SearchCleanupDomains []string
 	ProbeHosts           []string
@@ -311,6 +316,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		Profile:        options.Profile,
 		IncludeRoutes:  append([]string(nil), options.IncludeRoutes...),
 		VPNDomains:     append([]string(nil), options.VPNDomains...),
+		BypassSuffixes: append([]string(nil), options.BypassSuffixes...),
 		VPNNameservers: append([]string(nil), options.VPNNameservers...),
 	}
 	if privilegedMode == PrivilegedModeHelper {
@@ -619,6 +625,7 @@ func supplementalResolverSpecForConnect(mode string, server string, options Conn
 			routeOverrides = append(routeOverrides, nameserver+"/32")
 		}
 		routeOverrides = append(routeOverrides, options.IncludeRoutes...)
+		bypassDomains := normalizeDomainSuffixesOpenConnect(options.BypassSuffixes)
 		domains := append([]string(nil), options.VPNDomains...)
 		cleanupDomains := append([]string(nil), options.VPNDomains...)
 		searchDomain := firstNonEmpty(firstNonEmpty(options.VPNDomains...), "")
@@ -627,12 +634,18 @@ func supplementalResolverSpecForConnect(mode string, server string, options Conn
 			cleanupDomains = append(cleanupDomains, serverSpec.SearchCleanupDomains...)
 			searchDomain = firstNonEmpty(serverSpec.SearchDomain, firstNonEmpty(options.VPNDomains...))
 		}
+		domains = filterCoveredDomainsOpenConnect(uniqueStrings(domains), bypassDomains)
+		cleanupDomains = uniqueStrings(cleanupDomains)
+		if domainCoveredBySuffixesOpenConnect(searchDomain, bypassDomains) {
+			searchDomain = firstNonEmpty(firstNonEmpty(domains...), "")
+		}
 		return &supplementalResolverSpec{
 			Label:                "split-include",
 			Nameservers:          append([]string(nil), options.VPNNameservers...),
-			Domains:              uniqueStrings(domains),
+			Domains:              domains,
+			BypassDomains:        bypassDomains,
 			SearchDomain:         searchDomain,
-			SearchCleanupDomains: uniqueStrings(cleanupDomains),
+			SearchCleanupDomains: cleanupDomains,
 			ProbeHosts: []string{
 				"gitlab.services.corp.example",
 			},
@@ -681,6 +694,58 @@ func uniqueStrings(values []string) []string {
 	return result
 }
 
+func normalizeDomainSuffixesOpenConnect(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		value = strings.TrimLeft(value, ".")
+		if value == "" {
+			continue
+		}
+		normalized = append(normalized, value)
+	}
+	return uniqueStrings(normalized)
+}
+
+func filterCoveredDomainsOpenConnect(domains []string, bypassSuffixes []string) []string {
+	if len(domains) == 0 {
+		return nil
+	}
+	if len(bypassSuffixes) == 0 {
+		return domains
+	}
+	filtered := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		if domainCoveredBySuffixesOpenConnect(domain, bypassSuffixes) {
+			continue
+		}
+		filtered = append(filtered, domain)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func domainCoveredBySuffixesOpenConnect(domain string, suffixes []string) bool {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = strings.TrimLeft(domain, ".")
+	if domain == "" {
+		return false
+	}
+	for _, suffix := range suffixes {
+		suffix = strings.TrimSpace(strings.ToLower(suffix))
+		suffix = strings.TrimLeft(suffix, ".")
+		if suffix == "" {
+			continue
+		}
+		if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func supplementalResolverServiceID(sessionID, label string) string {
 	sum := sha1.Sum([]byte("openconnect-tun:" + strings.TrimSpace(sessionID) + ":" + strings.TrimSpace(label)))
 	token := strings.ToUpper(hex.EncodeToString(sum[:16]))
@@ -691,6 +756,7 @@ func scriptDiagnosticsWrapperScript(logPath, baseScript string, supplemental *su
 	shimLabel := ""
 	shimNameservers := ""
 	shimDomains := ""
+	bypassDomains := ""
 	shimSearchDomain := ""
 	searchCleanupDomains := ""
 	probeHosts := ""
@@ -701,6 +767,7 @@ func scriptDiagnosticsWrapperScript(logPath, baseScript string, supplemental *su
 		shimLabel = supplemental.Label
 		shimNameservers = shellLines(supplemental.Nameservers)
 		shimDomains = shellLines(supplemental.Domains)
+		bypassDomains = shellLines(supplemental.BypassDomains)
 		shimSearchDomain = supplemental.SearchDomain
 		searchCleanupDomains = shellLines(supplemental.SearchCleanupDomains)
 		probeHosts = shellLines(supplemental.ProbeHosts)
@@ -720,11 +787,13 @@ helper_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 search_backup="$helper_dir/search.tailscale.backup"
 default_gateway_file="$helper_dir/default-gateway"
 default_interface_file="$helper_dir/default-interface"
+public_nameserver_file="$helper_dir/public-nameservers"
 log_file=%s
 base_command=%s
 shim_label=%s
 shim_nameservers=%s
 shim_domains=%s
+bypass_domains=%s
 shim_search_domain=%s
 search_cleanup_domains=%s
 probe_hosts=%s
@@ -812,6 +881,58 @@ load_default_interface() {
     return 0
   fi
   /sbin/route -n get default 2>/dev/null | awk '/^[[:space:]]*interface:/{print $2; exit}'
+}
+
+capture_public_nameservers() {
+  default_iface=$(load_default_interface)
+  tmp_path=$(mktemp "/tmp/openconnect-tun-ns.XXXXXX") || return 0
+  scutil --dns 2>/dev/null | awk -v iface="$default_iface" '
+    function flush() {
+      if (!matched) {
+        count=0
+        return
+      }
+      for (i = 1; i <= count; i++) {
+        if (ns[i] != "") {
+          print ns[i]
+        }
+      }
+      exit
+    }
+    /^resolver #[0-9]+/ {
+      flush()
+      delete ns
+      count=0
+      matched=0
+      next
+    }
+    /^[[:space:]]*nameserver\[[0-9]+\][[:space:]]*:/ {
+      value=$NF
+      if (value != "") {
+        ns[++count]=value
+      }
+      next
+    }
+    iface != "" && $0 ~ "if_index[[:space:]]*:[[:space:]]*[0-9]+[[:space:]]*\\(" iface "\\)" {
+      matched=1
+      next
+    }
+    END {
+      flush()
+    }
+  ' | awk '!seen[$0]++' > "$tmp_path"
+  if [ -s "$tmp_path" ]; then
+    mv "$tmp_path" "$public_nameserver_file"
+    printf 'vpnc_wrapper_public_nameservers: %%s\n' "$(tr '\n' ' ' < "$public_nameserver_file" | sed 's/[[:space:]]*$//')" >> "$log_file" 2>&1
+  else
+    rm -f "$tmp_path"
+    printf 'vpnc_wrapper_public_nameservers_failed\n' >> "$log_file" 2>&1
+  fi
+}
+
+load_public_nameservers() {
+  [ -f "$public_nameserver_file" ] || return 0
+  cat "$public_nameserver_file"
 }
 
 pin_vpn_gateway_route() {
@@ -1034,6 +1155,24 @@ apply_dns_shim() {
   sanitize_search_resolver
 }
 
+apply_public_bypass_shim() {
+  [ -n "$bypass_domains" ] || return 0
+  public_nameservers=$(load_public_nameservers)
+  [ -n "$public_nameservers" ] || return 0
+  mkdir -p /etc/resolver || return 0
+  printf 'vpnc_wrapper_public_bypass: apply\n' >> "$log_file" 2>&1
+  printf '%%s\n' "$bypass_domains" | while IFS= read -r domain; do
+    [ -n "$domain" ] || continue
+    resolver_path="/etc/resolver/$domain"
+    tmp_path=$(mktemp "/tmp/openconnect-tun-public-resolver.XXXXXX") || exit 1
+    {
+      printf '# Added by openconnect-tun public bypass\n'
+      printf 'nameserver %%s\n' $public_nameservers
+    } > "$tmp_path"
+    mv "$tmp_path" "$resolver_path"
+  done
+}
+
 apply_scutil_state() {
   [ "$use_scutil_state" = "1" ] || return 0
   [ -n "$scutil_service_id" ] || return 0
@@ -1107,6 +1246,20 @@ remove_dns_shim() {
   done
   restore_search_resolver
   sanitize_search_resolver
+}
+
+remove_public_bypass_shim() {
+  [ -n "$bypass_domains" ] || return 0
+  mkdir -p /etc/resolver || return 0
+  printf 'vpnc_wrapper_public_bypass: remove\n' >> "$log_file" 2>&1
+  printf '%%s\n' "$bypass_domains" | while IFS= read -r domain; do
+    [ -n "$domain" ] || continue
+    resolver_path="/etc/resolver/$domain"
+    [ -f "$resolver_path" ] || continue
+    if head -n 1 "$resolver_path" 2>/dev/null | grep -Fq '# Added by openconnect-tun public bypass'; then
+      rm -f "$resolver_path"
+    fi
+  done
 }
 
 clear_split_include_resolvers() {
@@ -1197,6 +1350,7 @@ log_snapshot before
 case "${reason:-}" in
   pre-init)
     capture_default_route
+    capture_public_nameservers
     [ "$diag_probes_enabled" = "1" ] && log_probe_snapshot
     ;;
 esac
@@ -1219,6 +1373,7 @@ case "${reason:-}" in
   disconnect)
     remove_vpn_gateway_route
     sync_probe_host_routes remove
+    remove_public_bypass_shim
     remove_scutil_state
     clear_split_include_resolvers
     remove_dns_shim
@@ -1231,6 +1386,7 @@ case "${reason:-}" in
       apply_scutil_state
       clear_split_include_resolvers
       apply_dns_shim
+      apply_public_bypass_shim
       launch_probe_host_route_warmup
     fi
     ;;
@@ -1245,7 +1401,7 @@ case "${reason:-}" in
     ;;
 esac
 exit "$rc"
-`, shellQuote(logPath), shellQuote(baseScript), shellQuote(shimLabel), shellQuote(shimNameservers), shellQuote(shimDomains), shellQuote(shimSearchDomain), shellQuote(searchCleanupDomains), shellQuote(probeHosts), shellQuote(manageSearchResolver), shellQuote(useScutilState), shellQuote(scutilServiceID), shellQuote(pyCompatDir), shellQuote(routeOverrideLines))
+`, shellQuote(logPath), shellQuote(baseScript), shellQuote(shimLabel), shellQuote(shimNameservers), shellQuote(shimDomains), shellQuote(bypassDomains), shellQuote(shimSearchDomain), shellQuote(searchCleanupDomains), shellQuote(probeHosts), shellQuote(manageSearchResolver), shellQuote(useScutilState), shellQuote(scutilServiceID), shellQuote(pyCompatDir), shellQuote(routeOverrideLines))
 }
 
 const vpnSliceDistutilsCompatInit = `from .version import LooseVersion
@@ -1856,7 +2012,7 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 }
 
 func performHostScan(ocPath string, state *samlAuthState, logWriter io.Writer) error {
-	csd, err := prepareCSDWrapper(ocPath, state.GroupAccess)
+	csd, err := prepareCSDWrapper(ocPath, state.GroupAccess, logWriter)
 	if err != nil {
 		return err
 	}
@@ -2281,6 +2437,21 @@ func commandOutput(name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func commandOutputWithTimeout(timeout time.Duration, name string, args ...string) string {
+	if timeout <= 0 {
+		return commandOutput(name, args...)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	out, err := execCommandContext(ctx, name, args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func readFileIfExists(path string) string {
 	if strings.TrimSpace(path) == "" {
 		return ""
@@ -2657,11 +2828,15 @@ type csdWrapperSpec struct {
 	Cleanup     func()
 }
 
-func prepareCSDWrapper(ocPath string, server string) (*csdWrapperSpec, error) {
+func prepareCSDWrapper(ocPath string, server string, logWriter io.Writer) (*csdWrapperSpec, error) {
 	csdPostPath := findOpenConnectCSDPostScript(ocPath)
 	var nativeCSD *nativeCSDConfig
+	var nativeErr error
 	if strings.TrimSpace(server) != "" {
-		nativeCSD, _ = resolveNativeCSDConfigForServer(server)
+		nativeCSD, nativeErr = resolveNativeCSDConfigForServer(server)
+		if nativeErr != nil {
+			writeLogf(logWriter, "hostscan_csd_native_unavailable: %v", nativeErr)
+		}
 	}
 	if csdPostPath == "" && nativeCSD == nil {
 		return nil, fmt.Errorf("csd-post.sh not found")
@@ -3961,7 +4136,7 @@ func resolveOpenConnectDialAddress(address string) (string, error) {
 }
 
 func lookupOpenConnectHosts(host string) ([]string, error) {
-	hosts, err := lookupHostOpenConnect(host)
+	hosts, err := lookupHostWithTimeoutOpenConnect(host, lookupHostTimeoutOpenConnect)
 	if len(hosts) > 0 {
 		return hosts, nil
 	}
@@ -3974,8 +4149,39 @@ func lookupOpenConnectHosts(host string) ([]string, error) {
 	return nil, nil
 }
 
+func lookupHostWithTimeoutOpenConnect(host string, timeout time.Duration) ([]string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil, nil
+	}
+	if timeout <= 0 {
+		return lookupHostOpenConnect(host)
+	}
+
+	type result struct {
+		hosts []string
+		err   error
+	}
+
+	resultCh := make(chan result, 1)
+	go func() {
+		hosts, err := lookupHostOpenConnect(host)
+		resultCh <- result{hosts: hosts, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case res := <-resultCh:
+		return res.hosts, res.err
+	case <-timer.C:
+		return nil, fmt.Errorf("lookup host %s timed out after %s", host, timeout)
+	}
+}
+
 func lookupHostViaDSCacheutilOpenConnect(host string) []string {
-	output := commandOutput("dscacheutil", "-q", "host", "-a", "name", strings.TrimSpace(host))
+	output := commandOutputWithTimeout(resolveCommandTimeoutOpenConnect, "dscacheutil", "-q", "host", "-a", "name", strings.TrimSpace(host))
 	if output == "" {
 		return nil
 	}
@@ -3999,11 +4205,58 @@ func lookupHostViaDSCacheutilOpenConnect(host string) []string {
 	return hosts
 }
 
+func lookupHostViaDigCommandOpenConnect(host string) []string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var hosts []string
+	for _, recordType := range []string{"A", "AAAA"} {
+		output := commandOutputWithTimeout(
+			resolveCommandTimeoutOpenConnect,
+			"dig",
+			"+short",
+			"+time=2",
+			"+tries=1",
+			host,
+			recordType,
+		)
+		if output == "" {
+			continue
+		}
+		for _, line := range strings.Split(output, "\n") {
+			value := strings.TrimSpace(line)
+			if value == "" || strings.HasPrefix(value, ";") {
+				continue
+			}
+			ip := net.ParseIP(value)
+			if ip == nil {
+				continue
+			}
+			normalized := ip.String()
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			hosts = append(hosts, normalized)
+		}
+	}
+	return hosts
+}
+
 func lookupHostViaSystemSourcesOpenConnect(host string) []string {
+	if hosts := lookupHostAliasesCacheOpenConnect(host); len(hosts) > 0 {
+		return hosts
+	}
+	if hosts := lookupHostViaDigOpenConnect(host); len(hosts) > 0 {
+		return hosts
+	}
 	if hosts := lookupHostViaDSCacheutilOpenConnect(host); len(hosts) > 0 {
 		return hosts
 	}
-	return lookupHostAliasesCacheOpenConnect(host)
+	return nil
 }
 
 func lookupHostAliasesCacheOpenConnect(host string) []string {
@@ -4132,6 +4385,9 @@ func fetchServerCertSHA1(host string, port string) (string, error) {
 		port = "443"
 	}
 	address := net.JoinHostPort(host, port)
+	if resolvedAddress, err := resolveOpenConnectDialAddress(address); err == nil {
+		address = resolvedAddress
+	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	conn, err := tls.DialWithDialer(dialer, "tcp", address, &tls.Config{
 		ServerName:         host,
