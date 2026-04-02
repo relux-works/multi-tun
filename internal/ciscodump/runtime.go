@@ -14,28 +14,56 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"multi-tun/internal/vpncore"
 )
 
 const (
-	defaultInterface        = "lo0"
-	defaultFilter           = "tcp and host 127.0.0.1"
-	defaultPcapFileName     = "localhost-loopback.pcap"
+	defaultInterface        = "pktap,all"
+	defaultFilter           = "tcp or udp"
+	defaultPcapFileName     = "traffic-capture.pcap"
+	defaultOCSCInterface    = "lo0"
+	defaultOCSCFilter       = "tcp and host 127.0.0.1"
+	defaultOCSCPcapFileName = "localhost-loopback.pcap"
 	defaultStopTimeout      = 5 * time.Second
 	snapshotTimestampFormat = "20060102T150405.000Z"
+	defaultProbePort        = 443
+	hostLookupTimeout       = 2 * time.Second
+	hostDialTimeout         = 3 * time.Second
+	hostHTTPTimeout         = 4 * time.Second
+	tcpdumpBackendDirect    = "direct"
+	tcpdumpBackendVPNCore   = "vpn-core"
+	tcpdumpBackendSudo      = "sudo"
 )
 
 var (
-	execCommandCiscoDump = exec.Command
-	currentProcessRegex  = regexp.MustCompile(`(?i)(/opt/cisco|/Applications/Cisco|/Applications/AnyConnect|\.cisco/hostscan/bin64/cscan|vpnagentd|vpnui|acwebhelper|cscan|acextension|acsockext)`)
+	execCommandCiscoDump        = exec.Command
+	execCommandContextCiscoDump = exec.CommandContext
+	vpnCoreAvailableCiscoDump   = func() bool {
+		return vpncore.Available(vpncore.DefaultServiceConfig())
+	}
+	vpnCoreSpawnDetachedCiscoDump = func(command []string, logPath string, setPGID bool) (int, error) {
+		return vpncore.SpawnDetached(vpncore.DefaultServiceConfig(), command, "", logPath, setPGID)
+	}
+	vpnCoreSignalCiscoDump = func(pid int, signal string, group bool) error {
+		return vpncore.Signal(vpncore.DefaultServiceConfig(), pid, signal, group)
+	}
+	currentProcessRegex     = regexp.MustCompile(`(?i)(/opt/cisco|/Applications/Cisco|/Applications/AnyConnect|\.cisco/hostscan/bin64/cscan|vpnagentd|vpnui|acwebhelper|cscan|acextension|acsockext)`)
+	defaultProbeHosts       = []string{"gitlab.services.corp.example", "portal.corp.example"}
+	defaultProbeNameservers = []string{"10.23.16.4", "10.23.0.23"}
 )
 
 type StartOptions struct {
-	Interface     string
-	Filter        string
-	TcpdumpBinary string
-	NoTcpdump     bool
+	Interface        string
+	Filter           string
+	TcpdumpBinary    string
+	NoTcpdump        bool
+	NoHostProbes     bool
+	ProbeHosts       []string
+	ProbeNameservers []string
 }
 
 type DaemonOptions struct {
@@ -44,6 +72,7 @@ type DaemonOptions struct {
 	MetadataPath   string
 	ArtifactDir    string
 	PcapPath       string
+	OCSCPcapPath   string
 	Interface      string
 	Filter         string
 	TcpdumpBinary  string
@@ -68,12 +97,18 @@ type captureIterationResult struct {
 	processErr error
 	socketErr  error
 	networkErr error
+	probeErr   error
 	fileErr    error
 }
 
 type socketSnapshot struct {
 	content string
 	digest  string
+}
+
+type runningTCPDump struct {
+	pid  int
+	stop func(time.Duration) error
 }
 
 func Start(cacheDir string, options StartOptions) (CurrentSession, error) {
@@ -84,7 +119,7 @@ func Start(cacheDir string, options StartOptions) (CurrentSession, error) {
 			return CurrentSession{}, aliveErr
 		}
 		if alive {
-			return CurrentSession{}, fmt.Errorf("cisco-dump session %s is already active (pid=%d)", current.ID, current.PID)
+			return CurrentSession{}, fmt.Errorf("dump session %s is already active (pid=%d)", current.ID, current.PID)
 		}
 		if err := ClearCurrent(cacheDir); err != nil {
 			return CurrentSession{}, err
@@ -111,20 +146,30 @@ func Start(cacheDir string, options StartOptions) (CurrentSession, error) {
 	interfaceName := resolveInterface(options.Interface)
 	filter := resolveFilter(options.Filter)
 	tcpdumpBinary := strings.TrimSpace(options.TcpdumpBinary)
+	tcpdumpBackend := ""
 	if !options.NoTcpdump {
 		var err error
 		tcpdumpBinary, err = resolveTcpdumpBinary(tcpdumpBinary)
 		if err != nil {
 			return CurrentSession{}, err
 		}
-		if err := ensureSudoCredentials(); err != nil {
-			return CurrentSession{}, fmt.Errorf("sudo authentication: %w", err)
+		tcpdumpBackend = resolveTCPDumpBackend()
+		if tcpdumpBackend == tcpdumpBackendSudo {
+			if err := ensureSudoCredentials(); err != nil {
+				return CurrentSession{}, fmt.Errorf("sudo authentication: %w", err)
+			}
 		}
 	}
 
 	pcapPath := ""
+	ocscPcapPath := ""
 	if !options.NoTcpdump {
-		pcapPath = filepath.Join(artifactDir, defaultPcapFileName)
+		if shouldStartOCSCLoopbackCapture(interfaceName, filter) {
+			pcapPath = filepath.Join(artifactDir, defaultPcapFileName)
+			ocscPcapPath = filepath.Join(artifactDir, defaultOCSCPcapFileName)
+		} else {
+			pcapPath = filepath.Join(artifactDir, defaultOCSCPcapFileName)
+		}
 	}
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -139,15 +184,19 @@ func Start(cacheDir string, options StartOptions) (CurrentSession, error) {
 	}
 
 	current := CurrentSession{
-		ID:             sessionID,
-		StartedAt:      time.Now().UTC(),
-		LogPath:        logPath,
-		MetadataPath:   metadataPath,
-		ArtifactDir:    artifactDir,
-		PcapPath:       pcapPath,
-		Interface:      interfaceName,
-		Filter:         filter,
-		TcpdumpEnabled: !options.NoTcpdump,
+		ID:               sessionID,
+		StartedAt:        time.Now().UTC(),
+		LogPath:          logPath,
+		MetadataPath:     metadataPath,
+		ArtifactDir:      artifactDir,
+		PcapPath:         pcapPath,
+		OCSCPcapPath:     ocscPcapPath,
+		Interface:        interfaceName,
+		Filter:           filter,
+		TcpdumpEnabled:   !options.NoTcpdump,
+		TcpdumpBackend:   tcpdumpBackend,
+		ProbeHosts:       resolveProbeHosts(options.ProbeHosts, options.NoHostProbes),
+		ProbeNameservers: resolveProbeNameservers(options.ProbeNameservers, options.NoHostProbes),
 	}
 	writeLogHeader(logFile, current)
 
@@ -162,6 +211,9 @@ func Start(cacheDir string, options StartOptions) (CurrentSession, error) {
 	}
 	if pcapPath != "" {
 		args = append(args, "--pcap-path", pcapPath)
+	}
+	if ocscPcapPath != "" {
+		args = append(args, "--ocsc-pcap-path", ocscPcapPath)
 	}
 	if options.NoTcpdump {
 		args = append(args, "--no-tcpdump")
@@ -223,18 +275,42 @@ func RunDaemon(options DaemonOptions) error {
 	if current.PcapPath != "" {
 		fmt.Fprintf(os.Stdout, "pcap_file: %s\n", current.PcapPath)
 	}
+	if current.OCSCPcapPath != "" {
+		fmt.Fprintf(os.Stdout, "ocsc_pcap_file: %s\n", current.OCSCPcapPath)
+	}
+	if current.TcpdumpBackend != "" {
+		fmt.Fprintf(os.Stdout, "tcpdump_backend: %s\n", current.TcpdumpBackend)
+	}
+	if len(current.ProbeHosts) > 0 {
+		fmt.Fprintf(os.Stdout, "probe_hosts: %s\n", strings.Join(current.ProbeHosts, ", "))
+	}
+	if len(current.ProbeNameservers) > 0 {
+		fmt.Fprintf(os.Stdout, "probe_nameservers: %s\n", strings.Join(current.ProbeNameservers, ", "))
+	}
 
-	var tcpdumpCmd *exec.Cmd
+	var primaryCapture runningTCPDump
+	var ocscCapture runningTCPDump
 	if current.TcpdumpEnabled {
-		tcpdumpCmd, err = startTCPDump(options)
+		primaryCapture, err = startTCPDump(current, options.TcpdumpBinary, current.Interface, current.Filter, current.PcapPath)
 		if err != nil {
 			return err
 		}
-		current.TcpdumpPID = tcpdumpCmd.Process.Pid
+		current.TcpdumpPID = primaryCapture.pid
+		if current.OCSCPcapPath != "" {
+			ocscCapture, err = startTCPDump(current, options.TcpdumpBinary, defaultOCSCInterface, defaultOCSCFilter, current.OCSCPcapPath)
+			if err != nil {
+				_ = primaryCapture.stop(defaultStopTimeout)
+				return err
+			}
+			current.OCSCTcpdumpPID = ocscCapture.pid
+		}
 		if err := SaveMetadata(current); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stdout, "tcpdump_pid: %d\n", current.TcpdumpPID)
+		if current.OCSCTcpdumpPID > 0 {
+			fmt.Fprintf(os.Stdout, "ocsc_tcpdump_pid: %d\n", current.OCSCTcpdumpPID)
+		}
 	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -250,14 +326,19 @@ func RunDaemon(options DaemonOptions) error {
 		select {
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stdout, "phase: stopping\n")
-			logCaptureIterationErrors("final_", monitor.captureState(current))
-			if tcpdumpCmd != nil {
-				if err := stopChildProcess(tcpdumpCmd, defaultStopTimeout); err != nil {
+			logCaptureIterationErrors("final_", monitor.captureStateWithoutHostProbes(current))
+			if primaryCapture.stop != nil {
+				if err := primaryCapture.stop(defaultStopTimeout); err != nil {
 					fmt.Fprintf(os.Stdout, "tcpdump_stop_error: %v\n", err)
 				}
 			}
-			if current.PcapPath != "" {
-				artifacts, err := AnalyzeOCSCArtifactDir(current.ArtifactDir, current.PcapPath)
+			if ocscCapture.stop != nil {
+				if err := ocscCapture.stop(defaultStopTimeout); err != nil {
+					fmt.Fprintf(os.Stdout, "ocsc_tcpdump_stop_error: %v\n", err)
+				}
+			}
+			if ocscPcapPath := resolveOCSCPcapPath(current); ocscPcapPath != "" {
+				artifacts, err := AnalyzeOCSCArtifactDir(current.ArtifactDir, ocscPcapPath)
 				if err != nil {
 					fmt.Fprintf(os.Stdout, "ocsc_analysis_error: %v\n", err)
 				} else if artifacts.FrameCount > 0 {
@@ -321,6 +402,7 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 					current = refreshed
 				}
 			}
+			current = captureFinalStopHostProbes(current)
 			if err := ClearCurrent(cacheDir); err != nil {
 				return CurrentSession{}, "", err
 			}
@@ -330,7 +412,7 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 	}
 
 	if !force {
-		return current, "timeout", fmt.Errorf("timeout waiting for cisco-dump session %s to stop", current.ID)
+		return current, "timeout", fmt.Errorf("timeout waiting for dump session %s to stop", current.ID)
 	}
 	if err := killProcessGroup(current.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return CurrentSession{}, "", err
@@ -347,6 +429,7 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 					current = refreshed
 				}
 			}
+			current = captureFinalStopHostProbes(current)
 			if err := ClearCurrent(cacheDir); err != nil {
 				return CurrentSession{}, "", err
 			}
@@ -354,7 +437,7 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return current, "timeout", fmt.Errorf("timeout waiting for forced cisco-dump session %s to stop", current.ID)
+	return current, "timeout", fmt.Errorf("timeout waiting for forced dump session %s to stop", current.ID)
 }
 
 func waitForStableStart(current CurrentSession, timeout time.Duration) error {
@@ -365,7 +448,7 @@ func waitForStableStart(current CurrentSession, timeout time.Duration) error {
 			return err
 		}
 		if !alive {
-			return fmt.Errorf("cisco-dump daemon exited during startup")
+			return fmt.Errorf("dump daemon exited during startup")
 		}
 		if time.Now().After(deadline) {
 			return nil
@@ -386,6 +469,80 @@ func resolveFilter(value string) string {
 		return defaultFilter
 	}
 	return strings.TrimSpace(value)
+}
+
+func resolveTCPDumpBackend() string {
+	switch {
+	case os.Geteuid() == 0:
+		return tcpdumpBackendDirect
+	case vpnCoreAvailableCiscoDump():
+		return tcpdumpBackendVPNCore
+	default:
+		return tcpdumpBackendSudo
+	}
+}
+
+func shouldStartOCSCLoopbackCapture(interfaceName, filter string) bool {
+	return strings.TrimSpace(interfaceName) != defaultOCSCInterface ||
+		strings.TrimSpace(filter) != defaultOCSCFilter
+}
+
+func resolveOCSCPcapPath(current CurrentSession) string {
+	if strings.TrimSpace(current.OCSCPcapPath) != "" {
+		return strings.TrimSpace(current.OCSCPcapPath)
+	}
+	if strings.TrimSpace(current.PcapPath) == "" {
+		return ""
+	}
+	if strings.TrimSpace(current.Interface) == defaultOCSCInterface && strings.TrimSpace(current.Filter) == defaultOCSCFilter {
+		return strings.TrimSpace(current.PcapPath)
+	}
+	return ""
+}
+
+func resolveProbeHosts(values []string, disabled bool) []string {
+	if disabled {
+		return nil
+	}
+	normalized := normalizeTrimmedList(values)
+	if len(normalized) == 0 {
+		return append([]string(nil), defaultProbeHosts...)
+	}
+	return normalized
+}
+
+func resolveProbeNameservers(values []string, disabled bool) []string {
+	if disabled {
+		return nil
+	}
+	normalized := normalizeTrimmedList(values)
+	if len(normalized) == 0 {
+		return append([]string(nil), defaultProbeNameservers...)
+	}
+	return normalized
+}
+
+func normalizeTrimmedList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func resolveTcpdumpBinary(value string) (string, error) {
@@ -410,19 +567,57 @@ func ensureSudoCredentials() error {
 	return cmd.Run()
 }
 
-func startTCPDump(options DaemonOptions) (*exec.Cmd, error) {
-	args := buildTCPDumpCommandArgs(options.TcpdumpBinary, options.Interface, options.PcapPath, options.Filter, currentUsername())
-	cmd := execCommandCiscoDump("sudo", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stdout
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start tcpdump: %w", err)
+func startTCPDump(current CurrentSession, binary, interfaceName, filter, pcapPath string) (runningTCPDump, error) {
+	command := buildTCPDumpCommand(binary, interfaceName, pcapPath, filter, currentUsername())
+	switch current.TcpdumpBackend {
+	case "", tcpdumpBackendSudo:
+		args := append([]string{"-n"}, command...)
+		cmd := execCommandCiscoDump("sudo", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stdout
+		if err := cmd.Start(); err != nil {
+			return runningTCPDump{}, fmt.Errorf("start tcpdump: %w", err)
+		}
+		return runningTCPDump{
+			pid: cmd.Process.Pid,
+			stop: func(timeout time.Duration) error {
+				return stopChildProcess(cmd, timeout)
+			},
+		}, nil
+	case tcpdumpBackendDirect:
+		cmd := execCommandCiscoDump(command[0], command[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stdout
+		if err := cmd.Start(); err != nil {
+			return runningTCPDump{}, fmt.Errorf("start tcpdump: %w", err)
+		}
+		return runningTCPDump{
+			pid: cmd.Process.Pid,
+			stop: func(timeout time.Duration) error {
+				return stopChildProcess(cmd, timeout)
+			},
+		}, nil
+	case tcpdumpBackendVPNCore:
+		pid, err := vpnCoreSpawnDetachedCiscoDump(command, current.LogPath, false)
+		if err != nil {
+			return runningTCPDump{}, fmt.Errorf("start tcpdump via vpn-core: %w", err)
+		}
+		return runningTCPDump{
+			pid: pid,
+			stop: func(timeout time.Duration) error {
+				return stopDetachedPID(pid, timeout)
+			},
+		}, nil
+	default:
+		return runningTCPDump{}, fmt.Errorf("unsupported tcpdump backend %q", current.TcpdumpBackend)
 	}
-	return cmd, nil
 }
 
-func buildTCPDumpCommandArgs(binary, interfaceName, pcapPath, filter, username string) []string {
-	args := []string{"-n", binary, "-i", interfaceName, "-s", "0", "-U"}
+func buildTCPDumpCommand(binary, interfaceName, pcapPath, filter, username string) []string {
+	args := []string{binary, "-i", interfaceName, "-s", "0", "-U"}
+	if strings.HasPrefix(interfaceName, "pktap") {
+		args = append(args, "--apple-pcapng")
+	}
 	if username != "" {
 		args = append(args, "-Z", username)
 	}
@@ -440,6 +635,9 @@ func logCaptureIterationErrors(prefix string, result captureIterationResult) {
 	}
 	if result.networkErr != nil {
 		fmt.Fprintf(os.Stdout, "%snetwork_snapshot_error: %v\n", prefix, result.networkErr)
+	}
+	if result.probeErr != nil {
+		fmt.Fprintf(os.Stdout, "%sprobe_snapshot_error: %v\n", prefix, result.probeErr)
 	}
 	if result.fileErr != nil {
 		fmt.Fprintf(os.Stdout, "%slog_copy_error: %v\n", prefix, result.fileErr)
@@ -485,6 +683,44 @@ func stopChildProcess(cmd *exec.Cmd, timeout time.Duration) error {
 	}
 }
 
+func stopDetachedPID(pid int, timeout time.Duration) error {
+	if pid <= 0 {
+		return nil
+	}
+	if err := vpnCoreSignalCiscoDump(pid, "TERM", false); err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		alive, err := ProcessAlive(pid)
+		if err != nil {
+			return err
+		}
+		if !alive {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if err := vpnCoreSignalCiscoDump(pid, "KILL", false); err != nil {
+		return err
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		alive, err := ProcessAlive(pid)
+		if err != nil {
+			return err
+		}
+		if !alive {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for detached tcpdump pid %d to stop", pid)
+}
+
 func killProcessGroup(pid int, sig syscall.Signal) error {
 	if pid <= 0 {
 		return nil
@@ -493,6 +729,14 @@ func killProcessGroup(pid int, sig syscall.Signal) error {
 }
 
 func (m *monitorState) captureState(current CurrentSession) captureIterationResult {
+	return m.captureStateWithOptions(current, true)
+}
+
+func (m *monitorState) captureStateWithoutHostProbes(current CurrentSession) captureIterationResult {
+	return m.captureStateWithOptions(current, false)
+}
+
+func (m *monitorState) captureStateWithOptions(current CurrentSession, includeHostProbes bool) captureIterationResult {
 	var result captureIterationResult
 
 	lines, err := interestingProcessLines()
@@ -505,8 +749,13 @@ func (m *monitorState) captureState(current CurrentSession) captureIterationResu
 		if err := m.snapshotSockets(current, lines); err != nil {
 			result.socketErr = err
 		}
-		if err := m.snapshotNetwork(current); err != nil {
+		networkChanged, err := m.snapshotNetwork(current)
+		if err != nil {
 			result.networkErr = err
+		} else if includeHostProbes && networkChanged {
+			if err := m.snapshotHostProbes(current, "network_change"); err != nil {
+				result.probeErr = err
+			}
 		}
 	}
 	if err := m.copyRelevantCiscoFiles(current.ArtifactDir); err != nil {
@@ -656,14 +905,14 @@ func (m *monitorState) snapshotSockets(current CurrentSession, lines []string) e
 	return os.WriteFile(path, []byte(builder.String()), 0o644)
 }
 
-func (m *monitorState) snapshotNetwork(current CurrentSession) error {
+func (m *monitorState) snapshotNetwork(current CurrentSession) (bool, error) {
 	snapshot := buildNetworkSnapshot()
 	digest := strings.TrimSpace(snapshot.digest)
 	if digest == "" {
 		digest = "empty"
 	}
 	if digest == m.lastNetworkDigest {
-		return nil
+		return false, nil
 	}
 	m.lastNetworkDigest = digest
 	m.snapshotCount++
@@ -679,7 +928,148 @@ func (m *monitorState) snapshotNetwork(current CurrentSession) error {
 		builder.WriteString("\n")
 	}
 
+	if err := os.WriteFile(path, []byte(builder.String()), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (m *monitorState) snapshotHostProbes(current CurrentSession, trigger string) error {
+	if len(current.ProbeHosts) == 0 {
+		return nil
+	}
+
+	m.snapshotCount++
+	timestamp := time.Now().UTC().Format(snapshotTimestampFormat)
+	trigger = strings.TrimSpace(trigger)
+	if trigger == "" {
+		trigger = "snapshot"
+	}
+	trigger = strings.ReplaceAll(trigger, " ", "-")
+	path := filepath.Join(current.ArtifactDir, "snapshots", "host-probes-"+trigger+"-"+timestamp+".txt")
+
+	var builder strings.Builder
+	builder.WriteString("timestamp: " + time.Now().UTC().Format(time.RFC3339) + "\n")
+	builder.WriteString("session_id: " + current.ID + "\n")
+	builder.WriteString("trigger: " + trigger + "\n")
+	builder.WriteString("probe_hosts: " + strings.Join(current.ProbeHosts, ", ") + "\n")
+	if len(current.ProbeNameservers) > 0 {
+		builder.WriteString("probe_nameservers: " + strings.Join(current.ProbeNameservers, ", ") + "\n")
+	}
+	builder.WriteString("\n")
+
+	content := buildHostProbeSnapshot(current)
+	builder.WriteString(content)
+	if !strings.HasSuffix(content, "\n") {
+		builder.WriteString("\n")
+	}
+
 	return os.WriteFile(path, []byte(builder.String()), 0o644)
+}
+
+func buildHostProbeSnapshot(current CurrentSession) string {
+	type probeTask struct {
+		title   string
+		timeout time.Duration
+		name    string
+		args    []string
+	}
+
+	var tasks []probeTask
+	for _, host := range current.ProbeHosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+
+		tasks = append(tasks,
+			probeTask{title: "probe_dscacheutil " + host, timeout: hostLookupTimeout, name: "dscacheutil", args: []string{"-q", "host", "-a", "name", host}},
+			probeTask{title: "probe_route_get " + host, timeout: hostLookupTimeout, name: "route", args: []string{"-n", "get", host}},
+			probeTask{title: "probe_dig_system " + host, timeout: hostLookupTimeout, name: "dig", args: []string{"+time=1", "+tries=1", "+short", host}},
+		)
+		for _, nameserver := range current.ProbeNameservers {
+			nameserver = strings.TrimSpace(nameserver)
+			if nameserver == "" {
+				continue
+			}
+			tasks = append(tasks, probeTask{
+				title:   "probe_dig " + host + " @" + nameserver,
+				timeout: hostLookupTimeout,
+				name:    "dig",
+				args:    []string{"+time=1", "+tries=1", "+short", "@" + nameserver, host},
+			})
+		}
+		tasks = append(tasks,
+			probeTask{
+				title:   "probe_tcp_443 " + host,
+				timeout: hostDialTimeout,
+				name:    "nc",
+				args:    []string{"-G", strconv.Itoa(int(hostDialTimeout / time.Second)), "-vz", host, strconv.Itoa(defaultProbePort)},
+			},
+			probeTask{
+				title:   "probe_https " + host,
+				timeout: hostHTTPTimeout,
+				name:    "curl",
+				args: []string{
+					"-ksS",
+					"-o", "/dev/null",
+					"-D", "-",
+					"--connect-timeout", strconv.Itoa(int(hostDialTimeout / time.Second)),
+					"--max-time", strconv.Itoa(int(hostHTTPTimeout / time.Second)),
+					"-w", "\\nhttp_code=%{http_code}\\nremote_ip=%{remote_ip}\\nremote_port=%{remote_port}\\nurl_effective=%{url_effective}\\nssl_verify_result=%{ssl_verify_result}\\n",
+					"https://" + host,
+				},
+			},
+		)
+	}
+	if len(tasks) == 0 {
+		return "output: <empty>\n"
+	}
+
+	sections := make([]string, len(tasks))
+	var wg sync.WaitGroup
+	wg.Add(len(tasks))
+	for i, task := range tasks {
+		go func(index int, task probeTask) {
+			defer wg.Done()
+			sections[index] = captureCommandSectionWithTimeout(task.title, task.timeout, false, task.name, task.args...)
+		}(i, task)
+	}
+	wg.Wait()
+
+	return strings.Join(sections, "\n\n")
+}
+
+func captureFinalStopHostProbes(current CurrentSession) CurrentSession {
+	if len(current.ProbeHosts) == 0 || strings.TrimSpace(current.ArtifactDir) == "" {
+		return current
+	}
+
+	monitor := &monitorState{snapshotCount: current.SnapshotCount}
+	if err := monitor.snapshotHostProbes(current, "final_stop"); err != nil {
+		appendRuntimeLogLine(current.LogPath, fmt.Sprintf("final_stop_probe_error: %v", err))
+		return current
+	}
+
+	current.SnapshotCount = monitor.snapshotCount
+	if err := SaveMetadata(current); err != nil {
+		appendRuntimeLogLine(current.LogPath, fmt.Sprintf("final_stop_probe_metadata_error: %v", err))
+	}
+	return current
+}
+
+func appendRuntimeLogLine(path, line string) {
+	path = strings.TrimSpace(path)
+	line = strings.TrimSpace(line)
+	if path == "" || line == "" {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = fmt.Fprintf(file, "%s\n", line)
 }
 
 func buildSocketSnapshot(lines []string, useSudo bool) socketSnapshot {
@@ -798,6 +1188,11 @@ func buildNetworkSnapshot() socketSnapshot {
 
 func captureCommandSection(title string, useSudo bool, name string, args ...string) string {
 	out, err := runCommandCombined(useSudo, name, args...)
+	return formatSnapshotSection(title, formatCommandLine(useSudo, name, args...), err, string(out))
+}
+
+func captureCommandSectionWithTimeout(title string, timeout time.Duration, useSudo bool, name string, args ...string) string {
+	out, err := runCommandCombinedWithTimeout(timeout, useSudo, name, args...)
 	return formatSnapshotSection(title, formatCommandLine(useSudo, name, args...), err, string(out))
 }
 
@@ -996,6 +1391,31 @@ func runCommandCombined(useSudo bool, name string, args ...string) ([]byte, erro
 	}
 	cmd := execCommandCiscoDump(command, commandArgs...)
 	return cmd.CombinedOutput()
+}
+
+func runCommandCombinedWithTimeout(timeout time.Duration, useSudo bool, name string, args ...string) ([]byte, error) {
+	if timeout <= 0 {
+		return runCommandCombined(useSudo, name, args...)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	command := name
+	commandArgs := args
+	if useSudo {
+		command = "sudo"
+		commandArgs = append([]string{"-n", name}, args...)
+	}
+	cmd := execCommandContextCiscoDump(ctx, command, commandArgs...)
+	out, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if len(out) == 0 {
+			out = []byte("command timed out\n")
+		}
+		return out, fmt.Errorf("timed out after %s", timeout)
+	}
+	return out, err
 }
 
 func formatCommandLine(useSudo bool, name string, args ...string) string {

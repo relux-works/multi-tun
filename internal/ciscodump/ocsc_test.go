@@ -48,7 +48,7 @@ func TestAnalyzeOCSCArtifactDir_WritesSummaryAndTimeline(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	pcapPath := filepath.Join(tempDir, defaultPcapFileName)
+	pcapPath := filepath.Join(tempDir, defaultOCSCPcapFileName)
 
 	payload := append(le32(4), le32(0)...)
 	payload = append(payload, []byte("Please enter the requested proxy credentials.\x00")...)

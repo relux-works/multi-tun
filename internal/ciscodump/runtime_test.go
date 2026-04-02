@@ -8,12 +8,11 @@ import (
 	"testing"
 )
 
-func TestBuildTCPDumpCommandArgs_DropsPrivilegesAndSplitsFilter(t *testing.T) {
+func TestBuildTCPDumpCommand_SplitsFilter(t *testing.T) {
 	t.Parallel()
 
-	got := buildTCPDumpCommandArgs("/usr/sbin/tcpdump", "lo0", "/tmp/cisco.pcap", "tcp and host 127.0.0.1 and port 60808", "alexis")
+	got := buildTCPDumpCommand("/usr/sbin/tcpdump", "lo0", "/tmp/cisco.pcap", "tcp and host 127.0.0.1 and port 60808", "alexis")
 	want := []string{
-		"-n",
 		"/usr/sbin/tcpdump",
 		"-i", "lo0",
 		"-s", "0",
@@ -23,7 +22,26 @@ func TestBuildTCPDumpCommandArgs_DropsPrivilegesAndSplitsFilter(t *testing.T) {
 		"tcp", "and", "host", "127.0.0.1", "and", "port", "60808",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("buildTCPDumpCommandArgs() = %#v, want %#v", got, want)
+		t.Fatalf("buildTCPDumpCommand() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildTCPDumpCommand_EnablesApplePCAPNGForPktap(t *testing.T) {
+	t.Parallel()
+
+	got := buildTCPDumpCommand("/usr/sbin/tcpdump", "pktap,all", "/tmp/cisco.pcap", "tcp or udp", "alexis")
+	want := []string{
+		"/usr/sbin/tcpdump",
+		"-i", "pktap,all",
+		"-s", "0",
+		"-U",
+		"--apple-pcapng",
+		"-Z", "alexis",
+		"-w", "/tmp/cisco.pcap",
+		"tcp", "or", "udp",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildTCPDumpCommand() = %#v, want %#v", got, want)
 	}
 }
 
@@ -174,5 +192,37 @@ func TestReadResolverDirSnapshotIncludesFiles(t *testing.T) {
 		if !strings.Contains(got, needle) {
 			t.Fatalf("resolver snapshot missing %q:\n%s", needle, got)
 		}
+	}
+}
+
+func TestResolveProbeHosts_UsesDefaultsUnlessDisabled(t *testing.T) {
+	t.Parallel()
+
+	if got := resolveProbeHosts(nil, false); !reflect.DeepEqual(got, defaultProbeHosts) {
+		t.Fatalf("resolveProbeHosts(nil, false) = %#v, want %#v", got, defaultProbeHosts)
+	}
+	if got := resolveProbeHosts(nil, true); got != nil {
+		t.Fatalf("resolveProbeHosts(nil, true) = %#v, want nil", got)
+	}
+}
+
+func TestResolveProbeNameservers_DeduplicatesTrimmedValues(t *testing.T) {
+	t.Parallel()
+
+	got := resolveProbeNameservers([]string{" 10.23.16.4 ", "", "10.23.0.23", "10.23.16.4"}, false)
+	want := []string{"10.23.16.4", "10.23.0.23"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolveProbeNameservers() = %#v, want %#v", got, want)
+	}
+}
+
+func TestShouldStartOCSCLoopbackCapture_OnlySkipsLegacyLoopbackPrimary(t *testing.T) {
+	t.Parallel()
+
+	if got := shouldStartOCSCLoopbackCapture(defaultOCSCInterface, defaultOCSCFilter); got {
+		t.Fatalf("shouldStartOCSCLoopbackCapture(loopback default) = %t, want false", got)
+	}
+	if got := shouldStartOCSCLoopbackCapture(defaultInterface, defaultFilter); !got {
+		t.Fatalf("shouldStartOCSCLoopbackCapture(default primary) = %t, want true", got)
 	}
 }

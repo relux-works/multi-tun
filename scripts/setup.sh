@@ -9,7 +9,8 @@ PROJECT_NAME="multi-tun"
 SKILL_CONTENT_DIR="$PROJECT_ROOT/agents/skills/$SKILL_NAME"
 VLESS_CLI_NAME="vless-tun"
 OPENCONNECT_CLI_NAME="openconnect-tun"
-CISCO_DUMP_CLI_NAME="cisco-dump"
+DUMP_CLI_NAME="dump"
+CISCO_DUMP_COMPAT_NAME="cisco-dump"
 VPN_CORE_CLI_NAME="vpn-core"
 
 AGENTS_DIR="$HOME/.agents/skills"
@@ -71,20 +72,22 @@ cd "$PROJECT_ROOT"
 go build -o "$VLESS_CLI_NAME" ./cmd/vless-tun/
 echo "Building $OPENCONNECT_CLI_NAME binary..."
 go build -o "$OPENCONNECT_CLI_NAME" ./cmd/openconnect-tun/
-echo "Building $CISCO_DUMP_CLI_NAME binary..."
-go build -o "$CISCO_DUMP_CLI_NAME" ./cmd/cisco-dump/
+echo "Building $DUMP_CLI_NAME binary..."
+go build -o "$DUMP_CLI_NAME" ./cmd/dump/
 echo "Building $VPN_CORE_CLI_NAME binary..."
 go build -o "$VPN_CORE_CLI_NAME" ./cmd/vpn-core/
 
 mkdir -p "$BIN_DIR"
 ln -sf "$PROJECT_ROOT/$VLESS_CLI_NAME" "$BIN_DIR/$VLESS_CLI_NAME"
 ln -sf "$PROJECT_ROOT/$OPENCONNECT_CLI_NAME" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
-ln -sf "$PROJECT_ROOT/$CISCO_DUMP_CLI_NAME" "$BIN_DIR/$CISCO_DUMP_CLI_NAME"
+ln -sf "$PROJECT_ROOT/$DUMP_CLI_NAME" "$BIN_DIR/$DUMP_CLI_NAME"
+ln -sf "$PROJECT_ROOT/$DUMP_CLI_NAME" "$BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
 ln -sf "$PROJECT_ROOT/$VPN_CORE_CLI_NAME" "$BIN_DIR/$VPN_CORE_CLI_NAME"
 rm -f "$BIN_DIR/vpn-config"
 echo "  Binary -> $BIN_DIR/$VLESS_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$OPENCONNECT_CLI_NAME"
-echo "  Binary -> $BIN_DIR/$CISCO_DUMP_CLI_NAME"
+echo "  Binary -> $BIN_DIR/$DUMP_CLI_NAME"
+echo "  Alias  -> $BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
 echo "  Binary -> $BIN_DIR/$VPN_CORE_CLI_NAME"
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
@@ -157,4 +160,4 @@ echo "  $VLESS_CLI_NAME refresh"
 echo "  $VLESS_CLI_NAME render"
 echo "  $VPN_CORE_CLI_NAME install"
 echo "  $OPENCONNECT_CLI_NAME inspect-profiles"
-echo "  $CISCO_DUMP_CLI_NAME start"
+echo "  $DUMP_CLI_NAME start"
