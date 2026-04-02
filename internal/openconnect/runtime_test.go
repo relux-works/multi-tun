@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -113,6 +114,92 @@ func TestFindOpenConnectCSDPostScriptPrefersStableHomebrewOptPath(t *testing.T) 
 	got := findOpenConnectCSDPostScript(rawBinary)
 	if filepath.Clean(got) != filepath.Clean(stableScript) && filepath.Clean(got) != filepath.Clean("/private"+stableScript) {
 		t.Fatalf("findOpenConnectCSDPostScript() = %q, want %q", got, stableScript)
+	}
+}
+
+func TestSynchronizedStringBufferPreservesConcurrentWrites(t *testing.T) {
+	var buf synchronizedStringBuffer
+
+	const tokenWrites = 64
+	const noiseWrites = 64
+
+	var wg sync.WaitGroup
+	for i := 0; i < tokenWrites; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := buf.Write([]byte("TOKEN_SUCCESS\n")); err != nil {
+				t.Errorf("Write(TOKEN_SUCCESS) error = %v", err)
+			}
+		}()
+	}
+	for i := 0; i < noiseWrites; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := buf.Write([]byte("noise\n")); err != nil {
+				t.Errorf("Write(noise) error = %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got := buf.String()
+	if count := strings.Count(got, "TOKEN_SUCCESS"); count != tokenWrites {
+		t.Fatalf("TOKEN_SUCCESS count = %d, want %d; output = %q", count, tokenWrites, got)
+	}
+	if count := strings.Count(got, "noise"); count != noiseWrites {
+		t.Fatalf("noise count = %d, want %d; output = %q", count, noiseWrites, got)
+	}
+}
+
+func TestPerformHostScanAcceptsTokenSuccessFromFakeCSDPostScript(t *testing.T) {
+	root := t.TempDir()
+
+	cellarBinary := filepath.Join(root, "Cellar", "openconnect", "9.12_1", "bin", "openconnect")
+	if err := os.MkdirAll(filepath.Dir(cellarBinary), 0o755); err != nil {
+		t.Fatalf("MkdirAll(cellarBinary) error = %v", err)
+	}
+	if err := os.WriteFile(cellarBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(cellarBinary) error = %v", err)
+	}
+
+	rawBinary := filepath.Join(root, "bin", "openconnect")
+	if err := os.MkdirAll(filepath.Dir(rawBinary), 0o755); err != nil {
+		t.Fatalf("MkdirAll(rawBinary) error = %v", err)
+	}
+	if err := os.Symlink(cellarBinary, rawBinary); err != nil {
+		t.Fatalf("Symlink(rawBinary) error = %v", err)
+	}
+
+	stableScript := filepath.Join(root, "opt", "openconnect", "libexec", "openconnect", "csd-post.sh")
+	if err := os.MkdirAll(filepath.Dir(stableScript), 0o755); err != nil {
+		t.Fatalf("MkdirAll(stableScript) error = %v", err)
+	}
+	fakeScript := `#!/bin/sh
+set -eu
+(printf 'hostscan-noise-start\n' >&2; sleep 0.05; printf 'hostscan-noise-end\n' >&2) &
+printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+sleep 0.02
+printf '%s\n' '<hostscan><status>TOKEN_SUCCESS</status></hostscan>'
+wait
+`
+	if err := os.WriteFile(stableScript, []byte(fakeScript), 0o755); err != nil {
+		t.Fatalf("WriteFile(stableScript) error = %v", err)
+	}
+
+	state := &samlAuthState{
+		BaseHost:       "vpn-gw2.corp.example",
+		GroupAccess:    "",
+		HostScanTicket: "ticket",
+		HostScanToken:  "stub",
+	}
+	var log bytes.Buffer
+	if err := performHostScan(rawBinary, state, &log); err != nil {
+		t.Fatalf("performHostScan() error = %v\nlog:\n%s", err, log.String())
+	}
+	if !strings.Contains(log.String(), "TOKEN_SUCCESS") {
+		t.Fatalf("hostscan log missing TOKEN_SUCCESS: %q", log.String())
 	}
 }
 

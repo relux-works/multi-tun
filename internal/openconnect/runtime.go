@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -2034,11 +2035,12 @@ func performHostScan(ocPath string, state *samlAuthState, logWriter io.Writer) e
 	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
 	defer cancel()
 
-	var output strings.Builder
+	var output synchronizedStringBuffer
+	concurrentLogWriter := synchronizedWriter(logWriter)
 	cmd := execCommandContext(ctx, csd.WrapperPath, cmdArgs...)
 	cmd.Env = append(os.Environ(), append(csd.Env, "CSD_HOSTNAME="+state.BaseHost)...)
-	cmd.Stdout = io.MultiWriter(logWriter, &output)
-	cmd.Stderr = io.MultiWriter(logWriter, &output)
+	cmd.Stdout = io.MultiWriter(concurrentLogWriter, &output)
+	cmd.Stderr = io.MultiWriter(concurrentLogWriter, &output)
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -2054,6 +2056,41 @@ func performHostScan(ocPath string, state *samlAuthState, logWriter io.Writer) e
 		writeLogf(logWriter, "hostscan_token_source: token.xml")
 	}
 	return nil
+}
+
+type synchronizedStringBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (b *synchronizedStringBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *synchronizedStringBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func synchronizedWriter(w io.Writer) io.Writer {
+	if w == nil {
+		return io.Discard
+	}
+	return &lockedWriter{w: w}
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.w.Write(p)
 }
 
 func waitForHostScan(state *samlAuthState, logWriter io.Writer) error {
@@ -4157,6 +4194,7 @@ func lookupHostWithTimeoutOpenConnect(host string, timeout time.Duration) ([]str
 	if timeout <= 0 {
 		return lookupHostOpenConnect(host)
 	}
+	lookup := lookupHostOpenConnect
 
 	type result struct {
 		hosts []string
@@ -4165,7 +4203,7 @@ func lookupHostWithTimeoutOpenConnect(host string, timeout time.Duration) ([]str
 
 	resultCh := make(chan result, 1)
 	go func() {
-		hosts, err := lookupHostOpenConnect(host)
+		hosts, err := lookup(host)
 		resultCh <- result{hosts: hosts, err: err}
 	}()
 
