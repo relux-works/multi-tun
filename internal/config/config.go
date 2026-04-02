@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -42,6 +41,12 @@ type ProjectConfig struct {
 	SubscriptionURL string        `json:"subscription_url,omitempty"`
 	SelectedProfile string        `json:"selected_profile,omitempty"`
 	Render          *RenderConfig `json:"render,omitempty"`
+}
+
+type SetupOptions struct {
+	SourceURL       string
+	SourceMode      string
+	ProfileSelector string
 }
 
 type SourceConfig struct {
@@ -215,6 +220,10 @@ func Load(path string) (ProjectConfig, error) {
 }
 
 func Init(path, subscriptionURL string, force bool) (ProjectConfig, error) {
+	return Setup(path, SetupOptions{SourceURL: subscriptionURL}, force)
+}
+
+func Setup(path string, options SetupOptions, force bool) (ProjectConfig, error) {
 	path = ResolveInitPath(path)
 	if !force {
 		if _, err := os.Stat(path); err == nil {
@@ -225,9 +234,21 @@ func Init(path, subscriptionURL string, force bool) (ProjectConfig, error) {
 	}
 
 	cfg := DefaultForPath(path)
-	if subscriptionURL != "" {
-		cfg.Source.URL = subscriptionURL
-		cfg.Source.Mode = inferSourceMode(subscriptionURL)
+	if options.SourceURL != "" {
+		cfg.Source.URL = strings.TrimSpace(options.SourceURL)
+		if strings.TrimSpace(options.SourceMode) != "" {
+			cfg.Source.Mode = strings.TrimSpace(options.SourceMode)
+		} else {
+			cfg.Source.Mode = inferSourceMode(options.SourceURL)
+		}
+	} else if strings.TrimSpace(options.SourceMode) != "" {
+		cfg.Source.Mode = strings.TrimSpace(options.SourceMode)
+	}
+	if selector := strings.TrimSpace(options.ProfileSelector); selector != "" {
+		cfg.Default = &DefaultConfig{ProfileSelector: selector}
+	}
+	if err := cfg.Validate(); err != nil {
+		return ProjectConfig{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return ProjectConfig{}, err
@@ -637,8 +658,5 @@ func inferSourceMode(sourceURL string) string {
 }
 
 func defaultRenderMode() string {
-	if runtime.GOOS == "darwin" {
-		return RenderModeSystemProxy
-	}
 	return RenderModeTun
 }

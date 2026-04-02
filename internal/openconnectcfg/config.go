@@ -16,10 +16,17 @@ type Config struct {
 	DefaultServer  string                  `json:"default_server,omitempty"`
 	DefaultProfile string                  `json:"default_profile,omitempty"`
 	DefaultMode    string                  `json:"default_mode,omitempty"`
-	SplitInclude   SplitIncludeConfig      `json:"split_include,omitempty"`
+	SplitInclude   *SplitIncludeConfig     `json:"split_include,omitempty"`
 	Profiles       map[string]VPNConfig    `json:"profiles,omitempty"`
 	Servers        map[string]ServerConfig `json:"servers,omitempty"`
 	Auth           AuthConfig              `json:"auth,omitempty"`
+}
+
+type SetupOptions struct {
+	ServerURL string
+	Profile   string
+	Force     bool
+	Auth      AuthConfig
 }
 
 type DefaultSelection struct {
@@ -60,6 +67,71 @@ func DefaultPath() string {
 		return filepath.Join(dir, "openconnect-tun", "config.json")
 	}
 	return filepath.Join("configs", "openconnect-tun.local.json")
+}
+
+func ResolveInitPath(path string) string {
+	if strings.TrimSpace(path) != "" {
+		return absOrOriginal(path)
+	}
+	return DefaultPath()
+}
+
+func DefaultForPath(path string) Config {
+	cfg := Config{
+		CacheDir: ".cache/openconnect-tun",
+	}
+
+	if absPath := absOrOriginal(path); absPath == DefaultPath() {
+		if cacheRoot := userCacheRoot(); cacheRoot != "" {
+			cfg.CacheDir = filepath.Join(cacheRoot, "openconnect-tun")
+		}
+	}
+
+	return cfg
+}
+
+func Init(path string, options SetupOptions) (Config, string, error) {
+	resolved := ResolveInitPath(path)
+	if !options.Force {
+		if _, err := os.Stat(resolved); err == nil {
+			return Config{}, resolved, errors.New("config already exists")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Config{}, resolved, err
+		}
+	}
+
+	serverURL := strings.TrimSpace(options.ServerURL)
+	profile := strings.TrimSpace(options.Profile)
+	if serverURL == "" {
+		return Config{}, resolved, errors.New("server_url is required")
+	}
+	if profile == "" {
+		return Config{}, resolved, errors.New("profile is required")
+	}
+
+	cfg := DefaultForPath(resolved)
+	cfg.Default = DefaultSelection{
+		ServerURL: serverURL,
+		Profile:   profile,
+	}
+	cfg.Servers = map[string]ServerConfig{
+		serverURL: {
+			Profiles: map[string]ProfileConfig{
+				profile: {
+					Mode: "full",
+				},
+			},
+		},
+	}
+	cfg.Auth = options.Auth
+
+	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
+		return Config{}, resolved, err
+	}
+	if err := writeJSON(resolved, cfg); err != nil {
+		return Config{}, resolved, err
+	}
+	return cfg, resolved, nil
 }
 
 func ResolveLoadPath(path string) string {
@@ -120,7 +192,7 @@ func (c Config) EffectiveMode(server string, profile string) string {
 }
 
 func (c Config) EffectiveSplitInclude(server string, profile string) SplitIncludeConfig {
-	result := cloneSplitIncludeConfig(c.SplitInclude)
+	result := mergeSplitIncludeOverride(SplitIncludeConfig{}, c.SplitInclude)
 	server = strings.TrimSpace(server)
 	profile = strings.TrimSpace(profile)
 	if override, ok := c.Servers[server]; ok {
@@ -175,6 +247,16 @@ func userConfigRoot() string {
 	return ""
 }
 
+func userCacheRoot() string {
+	if value := os.Getenv("XDG_CACHE_HOME"); value != "" {
+		return value
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".cache")
+	}
+	return ""
+}
+
 func absOrOriginal(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
 		return abs
@@ -225,4 +307,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func writeJSON(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"multi-tun/internal/keychain"
 	"multi-tun/internal/openconnect"
@@ -27,7 +28,14 @@ type statusView struct {
 	CiscoState  openconnect.State
 }
 
-var keychainGet = keychain.Get
+var (
+	keychainGet                   = keychain.Get
+	keychainSetWithOptions        = keychain.SetWithOptions
+	keychainExists                = keychain.Exists
+	resolveSetupHostEntry         = openconnect.ResolveServerFromProfiles
+	defaultSetupProfileSearchPath = openconnect.DefaultProfileSearchPaths
+	userHomeDirOpenConnect        = os.UserHomeDir
+)
 
 func New(stdout, stderr io.Writer) *App {
 	return &App{stdout: stdout, stderr: stderr}
@@ -76,6 +84,8 @@ func (a *App) Run(args []string) int {
 	case "help", "-h", "--help":
 		a.printUsage()
 		return 0
+	case "setup":
+		return a.runSetup(args[1:])
 	case "start":
 		return a.runStart(args[1:])
 	case "run":
@@ -105,6 +115,95 @@ func (a *App) Run(args []string) int {
 		a.printUsage()
 		return 2
 	}
+}
+
+func (a *App) runSetup(args []string) int {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+
+	configPath := fs.String("config", "", "Path to openconnect-tun config file")
+	vpnName := fs.String("vpn-name", "", "User-facing VPN profile name from AnyConnect XML")
+	profile := fs.String("profile", "", "Explicit profile name; defaults to --vpn-name when omitted")
+	serverURL := fs.String("server-url", "", "Explicit server URL override")
+	usernameAccount := fs.String("username-account", "", "Override keychain account for username")
+	passwordAccount := fs.String("password-account", "", "Override keychain account for password")
+	totpAccount := fs.String("totp-account", "", "Override keychain account for TOTP secret")
+	force := fs.Bool("force", false, "Overwrite config if it already exists")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	selectedProfile := strings.TrimSpace(*profile)
+	if selectedProfile == "" {
+		selectedProfile = strings.TrimSpace(*vpnName)
+	}
+	if selectedProfile == "" {
+		fmt.Fprintln(a.stderr, "setup failed: --vpn-name or --profile is required")
+		return 1
+	}
+
+	resolvedServerURL := strings.TrimSpace(*serverURL)
+	if resolvedServerURL == "" {
+		homeDir, err := userHomeDirOpenConnect()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "setup failed: resolve home dir: %v\n", err)
+			return 1
+		}
+		entry, err := resolveSetupHostEntry(defaultSetupProfileSearchPath(homeDir), selectedProfile)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "setup failed: resolve server URL for %q: %v\n", selectedProfile, err)
+			return 1
+		}
+		resolvedServerURL = strings.TrimSpace(entry.Address)
+	}
+
+	accountBase := defaultOpenConnectAccountBase(resolvedServerURL)
+	authCfg := openconnectcfg.AuthConfig{
+		UsernameKeychainAccount: firstNonEmpty(strings.TrimSpace(*usernameAccount), keychain.TunnelKey(accountBase, "username")),
+		PasswordKeychainAccount: firstNonEmpty(strings.TrimSpace(*passwordAccount), keychain.TunnelKey(accountBase, "password")),
+		TOTPKeychainAccount:     firstNonEmpty(strings.TrimSpace(*totpAccount), keychain.TunnelKey(accountBase, "totp_secret")),
+	}
+	placeholders := map[string]string{
+		authCfg.UsernameKeychainAccount: "REPLACE_ME_USERNAME",
+		authCfg.PasswordKeychainAccount: "REPLACE_ME_PASSWORD",
+		authCfg.TOTPKeychainAccount:     "REPLACE_ME_TOTP_SECRET",
+	}
+	for account, value := range placeholders {
+		writeValue := value
+		if !*force && keychainExists(account) {
+			currentValue, err := keychainGet(account)
+			if err != nil {
+				fmt.Fprintf(a.stderr, "setup failed: read existing keychain item %q: %v\n", account, err)
+				return 1
+			}
+			writeValue = currentValue
+		}
+		if err := keychainSetWithOptions(account, writeValue, setupKeychainOptions(resolvedServerURL, selectedProfile, account)); err != nil {
+			fmt.Fprintf(a.stderr, "setup failed: keychain placeholder %q: %v\n", account, err)
+			return 1
+		}
+	}
+
+	cfg, resolvedConfigPath, err := openconnectcfg.Init(*configPath, openconnectcfg.SetupOptions{
+		ServerURL: resolvedServerURL,
+		Profile:   selectedProfile,
+		Force:     *force,
+		Auth:      authCfg,
+	})
+	if err != nil {
+		fmt.Fprintf(a.stderr, "setup failed: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(a.stdout, "configured %s\n", resolvedConfigPath)
+	fmt.Fprintf(a.stdout, "config: %s\n", resolvedConfigPath)
+	fmt.Fprintf(a.stdout, "server_url: %s\n", cfg.DefaultSelection().ServerURL)
+	fmt.Fprintf(a.stdout, "profile: %s\n", cfg.DefaultSelection().Profile)
+	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.EffectiveMode(cfg.DefaultSelection().ServerURL, cfg.DefaultSelection().Profile))
+	fmt.Fprintf(a.stdout, "username_keychain_account: %s\n", authCfg.UsernameKeychainAccount)
+	fmt.Fprintf(a.stdout, "password_keychain_account: %s\n", authCfg.PasswordKeychainAccount)
+	fmt.Fprintf(a.stdout, "totp_secret_keychain_account: %s\n", authCfg.TOTPKeychainAccount)
+	return 0
 }
 
 func (a *App) runStatus(args []string) int {
@@ -642,6 +741,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "openconnect-tun inspects Cisco AnyConnect / ASA profile state for bypass planning.")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
+	fmt.Fprintln(a.stdout, "  openconnect-tun setup --vpn-name name [--server-url host/path] [--config path] [--force]")
 	fmt.Fprintln(a.stdout, "  openconnect-tun start [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
 	fmt.Fprintln(a.stdout, "  openconnect-tun reconnect [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
 	fmt.Fprintln(a.stdout, "  openconnect-tun stop")
@@ -655,6 +755,65 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  run -> start")
 	fmt.Fprintln(a.stdout, "  connect -> run")
 	fmt.Fprintln(a.stdout, "  disconnect -> stop")
+}
+
+func defaultOpenConnectAccountBase(serverURL string) string {
+	serverURL = strings.TrimSpace(strings.ToLower(serverURL))
+	if serverURL == "" {
+		return "openconnect"
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range serverURL {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			lastDash = false
+		case !lastDash:
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	result := strings.Trim(b.String(), "-")
+	if result == "" {
+		return "openconnect"
+	}
+	return result
+}
+
+func setupKeychainOptions(serverURL string, profile string, account string) keychain.SetOptions {
+	credentialType := strings.TrimSpace(account)
+	if idx := strings.LastIndex(credentialType, "/"); idx >= 0 && idx+1 < len(credentialType) {
+		credentialType = credentialType[idx+1:]
+	}
+
+	var title string
+	switch credentialType {
+	case "username":
+		title = "username"
+	case "password":
+		title = "password"
+	case "totp_secret":
+		title = "TOTP secret"
+	default:
+		title = credentialType
+	}
+
+	context := strings.TrimSpace(serverURL)
+	if context == "" {
+		context = strings.TrimSpace(profile)
+	}
+
+	comment := fmt.Sprintf("Managed by openconnect-tun setup for %s", context)
+	if strings.TrimSpace(profile) != "" && strings.TrimSpace(profile) != context {
+		comment = fmt.Sprintf("%s (profile: %s)", comment, profile)
+	}
+
+	return keychain.SetOptions{
+		Label:   fmt.Sprintf("multi-tun %s (%s)", title, context),
+		Kind:    fmt.Sprintf("multi-tun openconnect %s", title),
+		Comment: comment,
+	}
 }
 
 type multiValueFlag []string

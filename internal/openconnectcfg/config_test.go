@@ -1,6 +1,8 @@
 package openconnectcfg
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -99,5 +101,39 @@ func TestResolveServerURLForProfileRejectsAmbiguousNestedProfiles(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "multiple configured servers") {
 		t.Fatalf("ResolveServerURLForProfile() error = %v, want ambiguity message", err)
+	}
+}
+
+func TestInitWritesFullModeScaffold(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "openconnect.json")
+	cfg, resolved, err := Init(path, SetupOptions{
+		ServerURL: "vpn.example.com/engineering",
+		Profile:   "Corp VPN",
+		Auth: AuthConfig{
+			UsernameKeychainAccount: "vpn-example-com-engineering/username",
+			PasswordKeychainAccount: "vpn-example-com-engineering/password",
+			TOTPKeychainAccount:     "vpn-example-com-engineering/totp_secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if got, want := resolved, path; got != want {
+		t.Fatalf("resolved = %q, want %q", got, want)
+	}
+	selection := cfg.DefaultSelection()
+	if got, want := selection.ServerURL, "vpn.example.com/engineering"; got != want {
+		t.Fatalf("selection.ServerURL = %q, want %q", got, want)
+	}
+	if got, want := selection.Profile, "Corp VPN"; got != want {
+		t.Fatalf("selection.Profile = %q, want %q", got, want)
+	}
+	if got, want := cfg.EffectiveMode(selection.ServerURL, selection.Profile), "full"; got != want {
+		t.Fatalf("EffectiveMode() = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Stat(path) error = %v", err)
 	}
 }

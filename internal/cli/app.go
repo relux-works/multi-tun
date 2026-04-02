@@ -37,6 +37,8 @@ func (a *App) Run(args []string) int {
 	case "help", "-h", "--help":
 		a.printUsage()
 		return 0
+	case "setup":
+		return a.runSetup(args[1:])
 	case "init":
 		return a.runInit(args[1:])
 	case "refresh":
@@ -62,6 +64,43 @@ func (a *App) Run(args []string) int {
 		a.printUsage()
 		return 2
 	}
+}
+
+func (a *App) runSetup(args []string) int {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+
+	configPath := fs.String("config", "", "Path to config file")
+	sourceURL := fs.String("source-url", os.Getenv("DANCEVPN_SUBSCRIPTION_URL"), "VLESS source URL or literal vless:// URI")
+	sourceMode := fs.String("source-mode", "", "Optional source mode override: proxy or direct")
+	profileSelector := fs.String("profile", "", "Optional default profile selector by id, name, or substring")
+	force := fs.Bool("force", false, "Overwrite config if it already exists")
+
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	cfg, err := config.Setup(*configPath, config.SetupOptions{
+		SourceURL:       *sourceURL,
+		SourceMode:      *sourceMode,
+		ProfileSelector: *profileSelector,
+	}, *force)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "setup failed: %v\n", err)
+		return 1
+	}
+
+	resolvedPath := config.ResolveInitPath(*configPath)
+	fmt.Fprintf(a.stdout, "configured %s\n", resolvedPath)
+	fmt.Fprintf(a.stdout, "config: %s\n", resolvedPath)
+	fmt.Fprintf(a.stdout, "source_mode: %s\n", cfg.SourceMode())
+	if cfg.DefaultProfileSelector() != "" {
+		fmt.Fprintf(a.stdout, "default_profile_selector: %s\n", cfg.DefaultProfileSelector())
+	}
+	if strings.Contains(cfg.SourceURL(), "REPLACE_ME") {
+		fmt.Fprintln(a.stdout, "source.url still has placeholder value; edit the file or rerun with --source-url")
+	}
+	return 0
 }
 
 func (a *App) runInit(args []string) int {
@@ -231,6 +270,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "vless-tun manages DenseVPN subscriptions and renders sing-box configs.")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
+	fmt.Fprintln(a.stdout, "  vless-tun setup [--config path] [--source-url URL] [--source-mode proxy|direct] [--profile selector] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun init [--config path] [--subscription-url URL] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path]")
 	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--refresh]")
