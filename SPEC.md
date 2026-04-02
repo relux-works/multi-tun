@@ -64,6 +64,7 @@ Build local CLIs and agent guidance that can:
 - `status`: show local runtime state, launch backend, cached selection, and configured bypasses
 - `stop`: stop the recorded `sing-box` session
 - `render`: emit sing-box config
+- in `render.mode=tun` on macOS, startup must reject nested-tunnel bring-up when the upstream VLESS server route already points at another VPN interface (`utun*`, `tun*`, `ppp*`, `ipsec*`)
 - `openconnect-tun status`: inspect AnyConnect CLI state and active connection metadata
 - `openconnect-tun profiles`: list ASA profiles surfaced by `vpn hosts`
 - `openconnect-tun inspect-profiles`: parse local AnyConnect XML profiles and expose server entries plus bypass-relevant flags
@@ -73,6 +74,7 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun helper install|status|uninstall`: compatibility wrapper around `vpn-core`
 - `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
 - `openconnect-tun stop`: stop the active OpenConnect process cleanly
+- `dump start|status|stop|inspect`: canonical packet-dump workflow for tunnel-aware VPN diagnostics; `cisco-dump` remains as a compatibility alias
 
 ## Non-Goals For This Iteration
 

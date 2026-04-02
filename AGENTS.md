@@ -22,6 +22,8 @@ Run from repo root:
 - `./scripts/setup.sh`: build `vless-tun` and `openconnect-tun`, symlink them into `~/.local/bin`, install the skill payload.
 - `go build -o vless-tun ./cmd/vless-tun`: local build without installation.
 - `go build -o openconnect-tun ./cmd/openconnect-tun`: local build without installation.
+- `go build -o dump ./cmd/dump`: local build without installation.
+- `go build -o cisco-dump ./cmd/cisco-dump`: compatibility build for the legacy alias.
 - `go test ./...`: run unit tests.
 - `go fmt ./...`: format all Go packages.
 - `vless-tun init`: create `configs/local.json` from defaults.
@@ -33,6 +35,7 @@ Run from repo root:
 - `openconnect-tun status`: inspect Cisco AnyConnect CLI state and active ASA connection info.
 - `openconnect-tun profiles`: list profiles returned by `vpn hosts`.
 - `openconnect-tun inspect-profiles`: inspect local AnyConnect XML profiles for bypass-relevant flags and server entries.
+- `dump start|status|stop|inspect`: canonical packet-dump workflow for tunnel-aware VPN diagnostics; `cisco-dump` remains a compatibility alias.
 
 ## Board Workflow
 

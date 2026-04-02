@@ -1,10 +1,10 @@
 # multi-tun
 
-`multi-tun` currently hosts two local CLIs:
+`multi-tun` currently hosts local CLIs for:
 
 - `vless-tun` for DenseVPN / DanceVPN over `sing-box`
 - `openconnect-tun` for Cisco AnyConnect / ASA profile inspection and future OpenConnect runtime work
-- `cisco-dump` for manual AnyConnect/CSD capture sessions and local dump artifacts
+- `dump` for manual VPN capture sessions and local dump artifacts
 
 The `vless-tun` flow replaces the `v2RayTun` client path with a controllable `sing-box` workflow for DenseVPN / DanceVPN subscriptions.
 
@@ -39,7 +39,7 @@ vless-tun render
 openconnect-tun status
 openconnect-tun profiles
 openconnect-tun inspect-profiles
-cisco-dump status
+dump status
 ```
 
 `./scripts/setup.sh` now also refreshes the repo-local `agents-infra` runtime when `agents-infra` is installed, layers project-specific local instructions into `.agents/.instructions/`, and exposes the repo `vpn-config` skill plus `project-management` in local `.claude/skills` and `.codex/skills`.
@@ -80,21 +80,24 @@ openconnect-tun start --profile 'Ural Outside extended' --mode split-include \
   --route 198.51.100.0/24 \
   --route 203.0.113.0/24 \
   --vpn-domains corp.example,digital.example,services.corp.example \
+  --bypass-suffixes bypass.corp.example \
   --dry-run
 openconnect-tun reconnect --profile 'Ural Outside extended' --mode full
 openconnect-tun routes
 openconnect-tun stop
 
-cisco-dump start
-cisco-dump status
-cisco-dump stop
-cisco-dump inspect --session-id 20260326T144914Z
+dump start
+dump start --probe-host gitlab.services.corp.example --probe-host portal.corp.example
+dump status
+dump stop
+dump inspect --session-id 20260326T144914Z
 ```
 
 Operational notes:
 
 - `openconnect-tun` keeps its own runtime state under `~/.cache/openconnect-tun`, with session logs in `~/.cache/openconnect-tun/sessions` and the current session pointer in `~/.cache/openconnect-tun/runtime/current-session.json`. This is intentionally separate from `~/.cache/vless-tun`.
 - `vpn-core install` performs the one-time privileged setup for autonomous runs. It installs a shared root LaunchDaemon that exposes a user-owned unix socket, so later `openconnect-tun` and `vless-tun` commands can reuse the same trusted backend without repeated `sudo`.
+- on macOS `vless-tun start` in `render.mode=tun` now refuses to start if the upstream VLESS server itself already routes through another VPN interface such as `utun*`, `tun*`, `ppp*`, or `ipsec*`. That avoids accidental nested-tunnel startup where `vless-tun` silently builds on top of `v2RayTun`, AnyConnect, or another active VPN and drags the whole network into an undefined state.
 - Existing installs of the legacy `works.relux.openconnect-tun-helper` daemon are auto-detected for compatibility. A fresh `vpn-core install` replaces that legacy helper with the shared core service.
 - `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
 - `--profile` resolves against local AnyConnect XML `HostEntry` values and automatically deduplicates the same server repeated across `/opt/cisco/...` and `~/Downloads/...`.
@@ -102,34 +105,68 @@ Operational notes:
 - `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. Current Corp bootstrap convention is fully keychain-backed: `auth.username_keychain_account=corp-vpn/username` and `auth.password_keychain_account=corp-vpn/password`. Plain `auth.username` remains as a compatibility fallback. `totp_secret_keychain_account` stays optional and is intentionally not wired by default.
 - live auth now defaults to `--auth aggregate`, which is the only path that currently completes Corp SSO+CSD on this machine; `--auth openconnect` remains available as the direct `openconnect --authenticate` path for debugging. `vpn-auth` is used for the browser-assisted SAML steps in aggregate mode, with preset-cookie support for follow-up pages.
 - the CSD helper is resolved from the active OpenConnect install, preferring native Cisco `libcsd.dylib` when it is available under `~/.cisco/...`; otherwise it falls back to Homebrew's stable `opt/openconnect/libexec/openconnect/csd-post.sh` path instead of versioned `Cellar/...` paths. The fallback `csd-post.sh` path is still wrapped with tiny macOS shims for `pidof` and GNU-style `stat -c %Y`.
-- `cisco-dump` keeps its own runtime state under `~/.cache/cisco-dump`, with session logs in `~/.cache/cisco-dump/sessions`, the current session pointer in `~/.cache/cisco-dump/runtime/current-session.json`, mirrored Cisco logs and cache artifacts under each session directory, tracked Cisco per-pid `lsof` snapshots, all-loopback TCP snapshots from `lsof`/`netstat`, and optional localhost loopback pcaps via `tcpdump`.
-- when a `cisco-dump` session stops with a loopback pcap present, it now also derives `ocsc-timeline.txt` and `ocsc-summary.txt` from AnyConnect OCSC loopback traffic. `cisco-dump inspect --session-id ...` can re-run that decoder on an older captured session.
+- `dump` is now the canonical activity-oriented name for packet diagnostics. `cisco-dump` remains installed as a compatibility alias, while runtime state stays under `~/.cache/cisco-dump` for continuity.
+- `dump` keeps its own runtime state under `~/.cache/cisco-dump`, with session logs in `~/.cache/cisco-dump/sessions`, the current session pointer in `~/.cache/cisco-dump/runtime/current-session.json`, mirrored Cisco logs and cache artifacts under each session directory, tracked Cisco per-pid `lsof` snapshots, all-loopback TCP snapshots from `lsof`/`netstat`, a default tunnel-aware traffic capture pcap, a separate loopback OCSC pcap, and host-level DNS/route/TCP/HTTPS probe snapshots for Corp targets.
+- `dump start` now defaults to `pktap,all` with a broad `tcp or udp` filter so tunnel traffic on `utun*`, loopback IPC, and ordinary uplink traffic are captured in one session. A separate `localhost-loopback.pcap` sidecar is still recorded so OCSC decoding remains stable.
+- when a `dump` session stops with an OCSC loopback pcap present, it now also derives `ocsc-timeline.txt` and `ocsc-summary.txt` from AnyConnect OCSC loopback traffic. `dump inspect --session-id ...` can re-run that decoder on an older captured session.
+- `dump start` now defaults to probing `gitlab.services.corp.example` and `portal.corp.example`; pass `--probe-host`, `--probe-ns`, or `--no-host-probes` when you need a different target set.
+- live `dump` `tcpdump` capture now prefers the shared `vpn-core` backend when it is installed, and falls back to `sudo` otherwise. The rest of the diagnostic session stays in user space.
 - live `start` now emits compact `auth_stage:` updates in the terminal during authentication instead of forcing you to tail the session log for every auth transition. The full detailed auth log still stays in the session log file.
 - live `start` now resolves the privileged backend automatically: shared `vpn-core` first when it is installed, otherwise the old `sudo -v` + `sudo -n` path so the privileged password prompt still does not compete with the cookie being piped into `--cookie-on-stdin`.
 - `--mode full` uses the stock `vpnc-script`, so OpenConnect will own default route and global DNS. Treat it as a smoke-test path, not a coexistence-safe mode.
 - `--mode split-include` uses `vpn-slice`. On macOS that means scoped `/etc/resolver/<domain>` files for VPN DNS instead of replacing the global resolver stack, which is the direction we want for Corp coexistence next to `vless-tun`.
 
-Example `openconnect-tun` config:
+#### `openconnect-tun` configuration
+
+Default live config path:
+
+- `~/.config/openconnect-tun/config.json`
+
+Example config:
 
 ```json
 {
   "cache_dir": "~/.cache/openconnect-tun",
-  "default_profile": "Ural Outside extended",
-  "default_mode": "split-include",
-  "split_include": {
-    "routes": [
-      "10.0.0.0/8",
-      "11.0.0.0/8",
-      "172.16.0.0/12",
-      "192.168.0.0/16"
-    ],
-    "nameservers": [
-      "10.23.16.4",
-      "10.23.0.23"
-    ],
-    "vpn_domains": [
-      "corp.example"
-    ]
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include",
+          "split_include": {
+            "routes": [
+              "10.0.0.0/8",
+              "11.0.0.0/8",
+              "172.16.0.0/12",
+              "192.168.0.0/16"
+            ],
+            "nameservers": [
+              "10.23.16.4",
+              "10.23.0.23"
+            ],
+            "vpn_domains": [
+              "corp.example",
+              "corp-it.example",
+              "corp-it.internal",
+              "erp.example",
+              "short.example",
+              "corp-sec.example",
+              "branch.example"
+            ],
+            "bypass_suffixes": [
+              "vpn-gw2.corp.example",
+              "bypass.corp.example"
+            ]
+          }
+        },
+        "Public Corp": {
+          "mode": "full"
+        }
+      }
+    }
   },
   "auth": {
     "username_keychain_account": "corp-vpn/username",
@@ -138,7 +175,26 @@ Example `openconnect-tun` config:
 }
 ```
 
-`split_include.vpn_domains` accepts a list of suffix masks. `corp.example` covers `*.corp.example`; for known Corp `/outside` profiles `openconnect-tun` also augments split DNS with the extra official Cisco suffix set (`inside.corp.example`, `region.corp.example`, `branch.example`, `workspace.example`, and related domains) so the config can stay minimal. `split_include.nameservers` lets you force the scoped resolver IPs when the ASA/OpenConnect environment only yields incomplete DNS like `10.96.60.x`.
+Field reference:
+
+- `cache_dir`: local runtime/state directory for `openconnect-tun`. This is where the CLI keeps its own ephemeral artifacts, not user-authored config.
+- `cache_dir` session logs: `~/.cache/openconnect-tun/sessions/openconnect-session-<UTC timestamp>.log`
+- `cache_dir` runtime metadata: `~/.cache/openconnect-tun/runtime/current-session.json`
+- `cache_dir` helper/runtime logs: files under `~/.cache/openconnect-tun/runtime/`, such as orphan-cleanup logs
+- `cache_dir` separation: intentionally separate from `~/.cache/vless-tun`, so the two tunnel stacks do not overwrite each other's runtime state
+- `default.server_url`: the default OpenConnect target when `start|reconnect` runs without an explicit `--server`
+- `default.profile`: the default user-facing profile selector when `start|reconnect` runs without an explicit `--profile`
+- `default` pairing: these two fields are meant to point at the same configured VPN choice, so the config reads as one default selection instead of separate root-level knobs
+- `servers.<url>`: configuration bucket for one concrete ASA endpoint such as `vpn-gw2.corp.example/outside`
+- `servers.<url>.profiles.<profile>`: one user-facing profile variant under that server; this is where `mode` and `split_include` live
+- `servers.<url>.profiles.<profile>.mode`: default connect mode for that profile. Use `split-include` for coexistence-safe split routing or `full` for stock full-tunnel behavior
+- `servers.<url>.profiles.<profile>.split_include.routes`: included CIDRs, hosts, or aliases passed to `vpn-slice` in split-include mode
+- `servers.<url>.profiles.<profile>.split_include.nameservers`: scoped VPN DNS servers to use for that profile
+- `servers.<url>.profiles.<profile>.split_include.vpn_domains`: suffix masks, not exact-only hostnames. `corp.example` already covers `*.corp.example`, so do not also list covered entries like `inside.corp.example` or `region.corp.example`
+- `servers.<url>.profiles.<profile>.split_include.vpn_domains` normalization: the CLI now collapses covered suffixes automatically during option resolution, but the config should still stay clean and minimal
+- `servers.<url>.profiles.<profile>.split_include.bypass_suffixes`: suffixes that must stay on the public resolver path even when a broader VPN suffix also matches
+- `split_include.bypass_suffixes` semantics: on macOS `openconnect-tun` implements bypasses by writing a more specific public `/etc/resolver/<suffix>` entry over the broader VPN-scoped resolver, so `bypass.corp.example` can stay public while `corp.example` still uses VPN DNS
+- known Corp augmentation: for known Corp `/outside` targets `openconnect-tun` still augments split DNS with the extra official Cisco suffix set (`inside.corp.example`, `region.corp.example`, `branch.example`, `workspace.example`, and related domains), so the config can stay minimal without manually restating every covered subdomain
 
 ### `vless-tun init`
 
@@ -283,6 +339,7 @@ go fmt ./...
 go test ./...
 go build -o vless-tun ./cmd/vless-tun
 go build -o openconnect-tun ./cmd/openconnect-tun
+go build -o dump ./cmd/dump
 go build -o cisco-dump ./cmd/cisco-dump
 ```
 

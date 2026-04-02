@@ -8,7 +8,7 @@ codex
 2026-03-28T19:49:26Z
 
 ## Last Update
-2026-03-31T10:07:26Z
+2026-04-02T11:04:57Z
 
 ## Blocked By
 - (none)
@@ -39,6 +39,9 @@ codex
 2026-03-31 saved live manual-vs-app baseline snapshot to /tmp/multi-tun-baselines-2026-03-31.md for later comparison.
 2026-03-31: manual AnyConnect+v2raytun baseline showed the remaining delta was resolver ownership, not just route excludes. The working manual stack publishes primary DNS on the utun interface, while vless-tun was only overriding Wi-Fi DNS servers via networksetup. Reworked vless overlay handoff to publish a synthetic scutil State:/Network/Service/<id> DNS+IPv4 record on the sing-box utun using vpn-core, with overlay domains as SearchDomains and proxy DNS servers as ServerAddresses. Networksetup DNS override remains only as fallback if scutil handoff cannot be applied. Added session metadata/status output for scutil handoff and unit coverage around apply/restore commands. go test ./... is green. Live retest still pending.
 2026-03-31 startup readiness follow-up: live retest showed the remaining coexistence issue had narrowed to a startup race. With openconnect+tun overlay active, browser / Apple Music / git traffic could already work while curl still intermittently timed out resolving public domains immediately after vless-tun start. Implemented a post-start readiness gate in internal/session/session.go after dns_handoff_apply_ok: overlay tun starts on macOS now wait for scutil handoff visibility plus consecutive successful public system-resolver lookups (github.com + yandex.ru) before reporting start success. On timeout, start fails and tears the session down instead of returning early. Added coverage in internal/session/session_test.go, updated README.md, ran go test ./..., and rebuilt vless-tun.
+2026-04-01 user live matrix refined the remaining coexistence bug. Order now matters concretely: when vless starts first and openconnect comes up on top, Corp domains resolve but unrelated external domains fail to resolve; when openconnect starts first and vless starts second, general resolution works again (except the separate portal case). This narrows the overlay issue to startup-order-sensitive DNS ownership / resolver merge behavior rather than a universal two-tunnel data-plane failure.
+2026-04-02 coexistence follow-up: live host had vless-tun active with broad bypasses (.ru/.рф), but openconnect bootstrap to vpn-gw2.corp.example still got trapped by overlay DNS because sing-box overlay mode routes matching corporate suffixes to dns-overlay before evaluating generic bypass suffixes. Fix in progress: make bypass DNS rules precede overlay DNS rules so explicit/public bypass wins over broader overlay domain routing.
+2026-04-02 fix: internal/singbox overlay render now gives bypass DNS higher priority than broader overlay domain routing, but only in tun mode. When bypass suffixes exist, render adds dns-direct under overlay and orders DNS rules as proxy-exceptions -> ru-direct -> dns-overlay -> final proxy, so vpn-gw2.corp.example and other explicit/public bypasses stop getting trapped by corp.example overlay DNS during openconnect bootstrap. Verified with go test ./... and rebuilt ./vless-tun.
 
 ## Precondition Resources
 (none)
