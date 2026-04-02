@@ -31,18 +31,18 @@ func (a *App) runStatus(args []string) int {
 	}
 
 	snapshot, snapshotErr := a.loadSnapshot(cfg, *refresh)
-	launchCfg := cfg.Render.PrivilegedLaunchOrDefault()
+	launchCfg := cfg.LaunchOrDefault()
 	current, currentState, sessionAlive, sessionErr := currentSessionState(cfg.CacheDir, launchCfg)
-	mode := cfg.Render.ModeOrDefault()
+	mode := cfg.NetworkMode()
 	interfacePresent := false
 	var interfaceAddrs []string
 	var interfaceErr error
 	if mode == config.RenderModeTun {
-		interfacePresent, interfaceAddrs, interfaceErr = interfaceState(cfg.Render.InterfaceName)
+		interfacePresent, interfaceAddrs, interfaceErr = interfaceState(cfg.TunInterfaceName())
 	}
 
 	connection := deriveConnectionStatus(mode, sessionAlive, interfacePresent)
-	renderedPresent := fileExists(cfg.Render.OutputPath)
+	renderedPresent := fileExists(cfg.SingboxConfigPath())
 
 	fmt.Fprintf(a.stdout, "connection: %s\n", connection)
 	fmt.Fprintf(a.stdout, "mode: %s\n", mode)
@@ -83,7 +83,7 @@ func (a *App) runStatus(args []string) int {
 	}
 	switch mode {
 	case config.RenderModeTun:
-		fmt.Fprintf(a.stdout, "interface: %s (%s)\n", cfg.Render.InterfaceName, stateLabel(interfacePresent))
+		fmt.Fprintf(a.stdout, "interface: %s (%s)\n", cfg.TunInterfaceName(), stateLabel(interfacePresent))
 		if interfaceErr == nil && len(interfaceAddrs) > 0 {
 			fmt.Fprintf(a.stdout, "interface_addrs: %s\n", strings.Join(interfaceAddrs, ", "))
 		}
@@ -91,10 +91,10 @@ func (a *App) runStatus(args []string) int {
 			fmt.Fprintf(a.stdout, "interface_error: %v\n", interfaceErr)
 		}
 	case config.RenderModeSystemProxy:
-		fmt.Fprintf(a.stdout, "proxy_listener: %s:%d\n", cfg.Render.ProxyListenAddress, cfg.Render.ProxyListenPort)
+		fmt.Fprintf(a.stdout, "proxy_listener: %s:%d\n", cfg.SystemProxyListenAddress(), cfg.SystemProxyListenPort())
 	}
-	fmt.Fprintf(a.stdout, "rendered_config: %s (%s)\n", cfg.Render.OutputPath, stateLabel(renderedPresent))
-	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.Render.BypassSuffixes))
+	fmt.Fprintf(a.stdout, "rendered_config: %s (%s)\n", cfg.SingboxConfigPath(), stateLabel(renderedPresent))
+	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.BypassSuffixes()))
 	if currentState == "stale" && current != nil {
 		if last := session.LastRelevantLogLine(current.LogPath); last != "" {
 			fmt.Fprintf(a.stdout, "last_log_line: %s\n", last)
@@ -106,7 +106,7 @@ func (a *App) runStatus(args []string) int {
 		return 0
 	}
 
-	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.SelectedProfile)
+	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.DefaultProfileSelector())
 	if err != nil {
 		fmt.Fprintf(a.stdout, "selected_profile: unresolved (%v)\n", err)
 	} else {

@@ -24,8 +24,8 @@ func (a *App) runDiagnose(args []string) int {
 		return 1
 	}
 
-	launchCfg := cfg.Render.PrivilegedLaunchOrDefault()
-	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.Render.ModeOrDefault())
+	launchCfg := cfg.LaunchOrDefault()
+	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.NetworkMode())
 	fmt.Fprintf(a.stdout, "configured_launch_mode: %s\n", launchCfg.Mode)
 	if launchCfg.Mode == config.LaunchModeHelper || launchCfg.Mode == config.LaunchModeLaunchd {
 		coreCfg := vpncore.DefaultServiceConfig()

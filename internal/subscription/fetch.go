@@ -20,6 +20,7 @@ const (
 
 type CacheSnapshot struct {
 	SourceURL     string          `json:"source_url"`
+	SourceMode    string          `json:"source_mode,omitempty"`
 	FetchedAt     time.Time       `json:"fetched_at"`
 	PayloadFormat string          `json:"payload_format"`
 	Raw           string          `json:"raw"`
@@ -51,13 +52,8 @@ func Fetch(ctx context.Context, subscriptionURL string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 }
 
-func Refresh(ctx context.Context, subscriptionURL, cacheDir string) (CacheSnapshot, error) {
-	body, err := Fetch(ctx, subscriptionURL)
-	if err != nil {
-		return CacheSnapshot{}, err
-	}
-
-	normalized, payloadFormat, err := NormalizePayload(body)
+func Refresh(ctx context.Context, sourceMode, sourceURL, cacheDir string) (CacheSnapshot, error) {
+	normalized, payloadFormat, err := resolveSourcePayload(ctx, sourceMode, sourceURL)
 	if err != nil {
 		return CacheSnapshot{}, err
 	}
@@ -68,7 +64,8 @@ func Refresh(ctx context.Context, subscriptionURL, cacheDir string) (CacheSnapsh
 	}
 
 	snapshot := CacheSnapshot{
-		SourceURL:     subscriptionURL,
+		SourceURL:     sourceURL,
+		SourceMode:    sourceMode,
 		FetchedAt:     time.Now().UTC(),
 		PayloadFormat: payloadFormat,
 		Raw:           normalized,
@@ -80,6 +77,25 @@ func Refresh(ctx context.Context, subscriptionURL, cacheDir string) (CacheSnapsh
 	}
 
 	return snapshot, nil
+}
+
+func resolveSourcePayload(ctx context.Context, sourceMode, sourceURL string) (string, string, error) {
+	switch sourceMode {
+	case "direct":
+		normalized, _, err := NormalizePayload([]byte(sourceURL))
+		if err != nil {
+			return "", "", err
+		}
+		return normalized, "direct", nil
+	case "", "proxy":
+		body, err := Fetch(ctx, sourceURL)
+		if err != nil {
+			return "", "", err
+		}
+		return NormalizePayload(body)
+	default:
+		return "", "", fmt.Errorf("unsupported source mode %q", sourceMode)
+	}
 }
 
 func SaveCache(cacheDir string, snapshot CacheSnapshot) error {
