@@ -48,14 +48,15 @@ Build local CLIs and agent guidance that can:
     - `.ru` and `.xn--p1ai` use direct DNS and direct outbound
     - everything else uses proxy DNS and proxy outbound
 - Support two transport styles:
-  - `tun` when the host can create a TUN interface
-  - `system_proxy` on macOS when unprivileged TUN bring-up is not available
+  - `tun` as the default happy-path transport
+  - `system_proxy` as an explicit alternative when a non-TUN macOS session is preferred
 - For `tun` mode on macOS, support privileged launch strategies:
   - `sudo` / direct process execution
   - shared `vpn-core` daemon management for persistent real-TUN sessions
 
 ### CLI
 
+- `setup`: scaffold `~/.config/vless-tun/config.json` by default using the preferred config schema
 - `init`: create `~/.config/vless-tun/config.json` by default
 - `refresh`: fetch and cache subscription
 - `list`: inspect cached profiles
@@ -64,7 +65,8 @@ Build local CLIs and agent guidance that can:
 - `status`: show local runtime state, launch backend, cached selection, and configured bypasses
 - `stop`: stop the recorded `sing-box` session
 - `render`: emit sing-box config
-- in `render.mode=tun` on macOS, startup must reject nested-tunnel bring-up when the upstream VLESS server route already points at another VPN interface (`utun*`, `tun*`, `ppp*`, `ipsec*`)
+- in `network.mode=tun` on macOS, startup must reject nested-tunnel bring-up when the upstream VLESS server route already points at another VPN interface (`utun*`, `tun*`, `ppp*`, `ipsec*`)
+- `openconnect-tun setup`: scaffold `~/.config/openconnect-tun/config.json` plus placeholder keychain entries from one user-facing VPN profile name
 - `openconnect-tun status`: inspect AnyConnect CLI state and active connection metadata
 - `openconnect-tun profiles`: list ASA profiles surfaced by `vpn hosts`
 - `openconnect-tun inspect-profiles`: parse local AnyConnect XML profiles and expose server entries plus bypass-relevant flags

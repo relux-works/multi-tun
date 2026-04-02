@@ -25,11 +25,13 @@ This repo also keeps live notes from previous VPN investigations:
 
 ```bash
 ./scripts/setup.sh
+./scripts/deinit.sh --dry-run
 
 # edit ~/.config/vless-tun/config.json and set source.url
 
 vless-tun refresh
 vless-tun list
+vless-tun setup --source-url "vless://..."
 vless-tun start
 vless-tun reconnect
 vless-tun status
@@ -37,12 +39,15 @@ vless-tun diagnose
 vless-tun stop
 vless-tun render
 openconnect-tun status
+openconnect-tun setup --vpn-name "Corp VPN"
 openconnect-tun profiles
 openconnect-tun inspect-profiles
 dump status
 ```
 
 `./scripts/setup.sh` now also refreshes the repo-local `agents-infra` runtime when `agents-infra` is installed, layers project-specific local instructions into `.agents/.instructions/`, and exposes the repo `vpn-config` skill plus `project-management` in local `.claude/skills` and `.codex/skills`.
+
+`./scripts/deinit.sh` removes the managed `multi-tun` global/local skill links and `~/.local/bin` symlinks. Config, cache, keychain secrets, and repo build artifacts stay intact unless you pass the explicit `--purge-*` flags.
 
 Generated artifacts:
 
@@ -52,6 +57,7 @@ Generated artifacts:
 ## Commands
 
 ```bash
+vless-tun setup
 vless-tun init
 vless-tun refresh
 vless-tun list
@@ -75,6 +81,7 @@ openconnect-tun helper install
 openconnect-tun profiles
 openconnect-tun inspect-profiles
 openconnect-tun inspect-profiles --dir ~/Downloads/cisco-anyconnect-profiles/profiles
+openconnect-tun setup --vpn-name 'Corp VPN'
 openconnect-tun start --profile 'Ural Outside extended' --mode full --dry-run
 openconnect-tun start --profile 'Ural Outside extended' --mode split-include \
   --route 198.51.100.0/24 \
@@ -115,6 +122,12 @@ Operational notes:
 - live `start` now resolves the privileged backend automatically: shared `vpn-core` first when it is installed, otherwise the old `sudo -v` + `sudo -n` path so the privileged password prompt still does not compete with the cookie being piped into `--cookie-on-stdin`.
 - `--mode full` uses the stock `vpnc-script`, so OpenConnect will own default route and global DNS. Treat it as a smoke-test path, not a coexistence-safe mode.
 - `--mode split-include` uses `vpn-slice`. On macOS that means scoped `/etc/resolver/<domain>` files for VPN DNS instead of replacing the global resolver stack, which is the direction we want for Corp coexistence next to `vless-tun`.
+
+### `openconnect-tun setup`
+
+Scaffolds a default `openconnect-tun` config and the matching keychain account names for one VPN profile.
+
+Pass `--vpn-name` with the user-facing AnyConnect profile name. `setup` resolves the matching `server_url` from local AnyConnect XML, writes a default full-mode config with no bypasses, seeds placeholder keychain entries for username/password/TOTP, and prints the resulting config path so the caller can review it.
 
 #### `openconnect-tun` configuration
 
@@ -196,11 +209,17 @@ Field reference:
 - `split_include.bypass_suffixes` semantics: on macOS `openconnect-tun` implements bypasses by writing a more specific public `/etc/resolver/<suffix>` entry over the broader VPN-scoped resolver, so `bypass.corp.example` can stay public while `corp.example` still uses VPN DNS
 - known Corp augmentation: for known Corp `/outside` targets `openconnect-tun` still augments split DNS with the extra official Cisco suffix set (`inside.corp.example`, `region.corp.example`, `branch.example`, `workspace.example`, and related domains), so the config can stay minimal without manually restating every covered subdomain
 
+### `vless-tun setup`
+
+Creates `~/.config/vless-tun/config.json` by default using the preferred schema.
+
+Use `--source-url` for either an HTTP subscription endpoint or a literal `vless://...` URI. `setup` prints the resulting config path so the caller can review it immediately.
+
 ### `vless-tun init`
 
 Creates `~/.config/vless-tun/config.json` by default.
 
-`--subscription-url` remains the compatibility flag name, but the preferred config shape now writes it into `source.url`.
+`init` remains as the compatibility entrypoint. `--subscription-url` remains the compatibility flag name, but the preferred config shape now writes it into `source.url`.
 
 ### `vless-tun refresh`
 
@@ -406,7 +425,7 @@ go build -o cisco-dump ./cmd/cisco-dump
 - `reconnect` is the "apply latest config" path: it rereads local config, refreshes the subscription by default, rerenders, and replaces the current session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
-- On macOS the default network mode is still `system_proxy` for low-friction bring-up, but `tun` now works through the shared `vpn-core` backend by default, with `launch` kept as an explicit override only when you need it.
+- `vless-tun setup` now scaffolds `network.mode=tun` by default, with `system_proxy` still available as an explicit opt-in when you want a lighter non-TUN session.
 - Generated config now includes `route.default_domain_resolver`, which `sing-box 1.13.x` expects as part of the DNS resolver migration path.
 - Every `start` gets its own timestamped log file so later debugging has a stable artifact even if the next session behaves differently.
 - The bypass rule is intentionally domain-suffix based because the original user requirement was `*.ru`. If later you want IP or community rulesets, extend the renderer rather than hardcoding provider-specific blobs.

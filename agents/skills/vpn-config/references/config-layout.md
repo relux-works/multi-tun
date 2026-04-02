@@ -1,41 +1,96 @@
 # Config Layout
 
-`~/.config/vless-tun/config.json` uses this shape:
+## `vless-tun`
+
+`~/.config/vless-tun/config.json` uses this preferred shape:
 
 ```json
 {
-  "subscription_url": "https://key.vpn.dance/connect?key=REPLACE_ME",
-  "selected_profile": "",
   "cache_dir": "~/.cache/vless-tun",
-  "render": {
-    "mode": "system_proxy",
-    "output_path": "~/.config/vless-tun/generated/dancevpn-sing-box.json",
-    "interface_name": "utun233",
-    "tun_addresses": [
-      "172.19.0.1/30",
-      "fdfe:dcba:9876::1/126"
-    ],
-    "proxy_listen_address": "127.0.0.1",
-    "proxy_listen_port": 2080,
-    "log_level": "info",
+  "source": {
+    "mode": "proxy",
+    "url": "https://key.vpn.dance/connect?key=REPLACE_ME"
+  },
+  "default": {
+    "profile_selector": ""
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {
+      "interface_name": "utun233",
+      "addresses": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ]
+    },
+    "system_proxy": {
+      "listen_address": "127.0.0.1",
+      "listen_port": 2080
+    }
+  },
+  "routing": {
     "bypass_suffixes": [
       ".ru",
       ".xn--p1ai"
-    ],
-    "proxy_dns": {
+    ]
+  },
+  "dns": {
+    "proxy_resolver": {
       "address": "1.1.1.1",
       "port": 853,
       "tls_server_name": "cloudflare-dns.com"
     }
+  },
+  "logging": {
+    "level": "info"
+  },
+  "artifacts": {
+    "singbox_config_path": "~/.config/vless-tun/generated/sing-box.json"
   }
 }
 ```
 
 Notes:
 
-- `selected_profile` is optional. Empty means "first profile in cache".
-- `render.mode=system_proxy` is the current macOS-safe default for unprivileged bring-up.
-- `reconnect` should be used after changing `render.mode`, `selected_profile`, or `bypass_suffixes`.
-- `bypass_suffixes` is intentionally explicit and small; start there before adding heavier rule-set logic.
-- `cache_dir` also stores per-session logs in `sessions/` and the current runtime pointer in `runtime/current-session.json`.
-- `render.output_path` should normally stay under `~/.config/vless-tun/generated/`.
+- `source.mode=proxy` means `source.url` is fetched over HTTP and should resolve to one or more `vless://` entries.
+- `source.mode=direct` means `source.url` is already a literal `vless://...` URI.
+- `default.profile_selector` is optional. Empty means "first matching profile".
+- `network.mode=tun` is the default scaffolded mode; switch to `system_proxy` only when you explicitly want a lighter non-TUN macOS session.
+- `reconnect` should be used after changing `network.mode`, `default.profile_selector`, `routing.bypass_suffixes`, `dns.proxy_resolver`, or other render-time settings.
+- `cache_dir` stores refresh snapshots, session logs, and the current runtime pointer.
+- `artifacts.singbox_config_path` should normally stay under `~/.config/vless-tun/generated/`.
+- Omit `launch` in the happy path. `vless-tun` now resolves to the shared `vpn-core` backend automatically when it is available.
+
+## `openconnect-tun`
+
+`~/.config/openconnect-tun/config.json` uses this preferred shape:
+
+```json
+{
+  "cache_dir": "~/.cache/openconnect-tun",
+  "default": {
+    "server_url": "vpn.example.com/engineering",
+    "profile": "Corp VPN"
+  },
+  "servers": {
+    "vpn.example.com/engineering": {
+      "profiles": {
+        "Corp VPN": {
+          "mode": "full"
+        }
+      }
+    }
+  },
+  "auth": {
+    "username_keychain_account": "corp-vpn/username",
+    "password_keychain_account": "corp-vpn/password",
+    "totp_secret_keychain_account": "corp-vpn/totp_secret"
+  }
+}
+```
+
+Notes:
+
+- `openconnect-tun setup --vpn-name ...` scaffolds this config in `full` mode with no bypasses.
+- `setup` also seeds placeholder keychain entries for username, password, and TOTP secret so the user can review and replace them later.
+- Split-routing policy lives under `servers.<url>.profiles.<profile>.split_include` when the profile is moved from `full` to `split-include`.
