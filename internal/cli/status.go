@@ -31,7 +31,8 @@ func (a *App) runStatus(args []string) int {
 	}
 
 	snapshot, snapshotErr := a.loadSnapshot(cfg, *refresh)
-	current, currentState, sessionAlive, sessionErr := currentSessionState(cfg.CacheDir)
+	launchCfg := cfg.Render.PrivilegedLaunchOrDefault()
+	current, currentState, sessionAlive, sessionErr := currentSessionState(cfg.CacheDir, launchCfg)
 	mode := cfg.Render.ModeOrDefault()
 	interfacePresent := false
 	var interfaceAddrs []string
@@ -50,11 +51,17 @@ func (a *App) runStatus(args []string) int {
 		fmt.Fprintf(a.stdout, "session_error: %v\n", sessionErr)
 	}
 	if current != nil {
-		fmt.Fprintf(a.stdout, "session_id: %s\n", current.ID)
+		if current.ID != "" {
+			fmt.Fprintf(a.stdout, "session_id: %s\n", current.ID)
+		}
 		fmt.Fprintf(a.stdout, "pid: %d\n", current.PID)
 		fmt.Fprintf(a.stdout, "launch_mode: %s\n", current.LaunchMode)
-		fmt.Fprintf(a.stdout, "started_at: %s\n", current.StartedAt.Format("2006-01-02T15:04:05Z07:00"))
-		fmt.Fprintf(a.stdout, "log_file: %s\n", current.LogPath)
+		if !current.StartedAt.IsZero() {
+			fmt.Fprintf(a.stdout, "started_at: %s\n", current.StartedAt.Format("2006-01-02T15:04:05Z07:00"))
+		}
+		if current.LogPath != "" {
+			fmt.Fprintf(a.stdout, "log_file: %s\n", current.LogPath)
+		}
 		if current.LaunchMode == config.LaunchModeLaunchd {
 			fmt.Fprintf(a.stdout, "launch_label: %s\n", current.LaunchLabel)
 		}
@@ -114,8 +121,8 @@ func (a *App) runStatus(args []string) int {
 	return 0
 }
 
-func currentSessionState(cacheDir string) (*session.CurrentSession, string, bool, error) {
-	current, err := session.LoadCurrent(cacheDir)
+func currentSessionState(cacheDir string, launch config.PrivilegedLaunchConfig) (*session.CurrentSession, string, bool, error) {
+	current, err := session.ResolveCurrent(cacheDir, launch)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, "none", false, nil
 	}

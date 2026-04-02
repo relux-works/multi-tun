@@ -102,15 +102,7 @@ func launchdPID(label string) (int, error) {
 		return 0, nil
 	}
 
-	var (
-		out []byte
-		err error
-	)
-	if os.Geteuid() == 0 {
-		out, err = execCombinedOutput("launchctl", "print", launchctlTarget(label))
-	} else {
-		out, err = execCombinedOutput("sudo", "-n", "launchctl", "print", launchctlTarget(label))
-	}
+	out, err := launchdPrint(label)
 	if err != nil {
 		return 0, nil
 	}
@@ -123,9 +115,9 @@ func InspectLaunchd(label string) (LaunchdServiceStatus, error) {
 		return status, nil
 	}
 
-	out, err := runPrivilegedCommand("launchctl", "print", launchctlTarget(label))
+	out, err := launchdPrint(label)
 	if err != nil {
-		if strings.Contains(err.Error(), "Could not find service") {
+		if strings.Contains(err.Error(), "Could not find service") || strings.Contains(string(out), "Could not find service") {
 			return status, nil
 		}
 		return status, err
@@ -185,6 +177,24 @@ func parseLaunchdState(output string) string {
 
 func launchctlTarget(label string) string {
 	return "system/" + label
+}
+
+func launchdPrint(label string) ([]byte, error) {
+	if label == "" {
+		return nil, nil
+	}
+
+	target := launchctlTarget(label)
+	out, err := execCombinedOutput("launchctl", "print", target)
+	if err == nil || os.Geteuid() == 0 {
+		return out, err
+	}
+
+	sudoOut, sudoErr := execCombinedOutput("sudo", "-n", "launchctl", "print", target)
+	if sudoErr == nil {
+		return sudoOut, nil
+	}
+	return out, err
 }
 
 func xmlEscape(value string) string {

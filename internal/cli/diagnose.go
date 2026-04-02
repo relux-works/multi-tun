@@ -37,16 +37,20 @@ func (a *App) runDiagnose(args []string) int {
 		fmt.Fprintf(a.stdout, "launch_plist: %s\n", launchCfg.PlistPath)
 	}
 
-	current, currentState, alive, currentErr := currentSessionState(cfg.CacheDir)
+	current, currentState, alive, currentErr := currentSessionState(cfg.CacheDir, launchCfg)
 	fmt.Fprintf(a.stdout, "session: %s\n", currentState)
 	if currentErr != nil {
 		fmt.Fprintf(a.stdout, "session_error: %v\n", currentErr)
 	}
 	if current != nil {
-		fmt.Fprintf(a.stdout, "session_id: %s\n", current.ID)
+		if current.ID != "" {
+			fmt.Fprintf(a.stdout, "session_id: %s\n", current.ID)
+		}
 		fmt.Fprintf(a.stdout, "session_launch_mode: %s\n", current.LaunchMode)
 		fmt.Fprintf(a.stdout, "pid: %d\n", current.PID)
-		fmt.Fprintf(a.stdout, "log_file: %s\n", current.LogPath)
+		if current.LogPath != "" {
+			fmt.Fprintf(a.stdout, "log_file: %s\n", current.LogPath)
+		}
 	}
 
 	if launchCfg.Mode != config.LaunchModeLaunchd && launchCfg.Mode != config.LaunchModeHelper {

@@ -32,10 +32,16 @@ const (
 )
 
 var (
-	execLookPath            = exec.LookPath
-	execCommand             = exec.Command
-	launchdPIDSession       = launchdPID
-	stopLaunchdSessionFunc  = stopLaunchdSession
+	execLookPath           = exec.LookPath
+	execCommand            = exec.Command
+	launchdPIDSession      = launchdPID
+	stopLaunchdSessionFunc = stopLaunchdSession
+	routeGetHostSession    = func(host string) ([]byte, error) {
+		return execCommand(routePath, "-n", "get", host).CombinedOutput()
+	}
+	networkConnectionListSession = func() ([]byte, error) {
+		return execCommand(scutilPath, "--nc", "list").CombinedOutput()
+	}
 	vpnCoreAvailableSession = func() bool {
 		return vpncore.Available(vpncore.DefaultServiceConfig())
 	}
@@ -160,6 +166,11 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		return CurrentSession{}, err
 	}
 	writeLogHeader(logFile, session, profile)
+	if err := guardNestedTunnelStartup(profile, options.Mode); err != nil {
+		_, _ = fmt.Fprintf(logFile, "startup_guard_failed: %v\n", err)
+		_ = logFile.Close()
+		return CurrentSession{}, err
+	}
 
 	var release func() error
 	switch launchMode {
@@ -230,8 +241,8 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	return session, nil
 }
 
-func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, string, error) {
-	current, err := LoadCurrent(cacheDir)
+func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (CurrentSession, string, error) {
+	current, err := ResolveCurrent(cacheDir, launch)
 	if err != nil {
 		return CurrentSession{}, "", err
 	}
@@ -279,6 +290,98 @@ func Stop(cacheDir string, force bool, timeout time.Duration) (CurrentSession, s
 	default:
 		return stopProcessSession(cacheDir, current, force, timeout)
 	}
+}
+
+func ResolveCurrent(cacheDir string, launch config.PrivilegedLaunchConfig) (CurrentSession, error) {
+	current, err := LoadCurrent(cacheDir)
+	if err == nil {
+		return current, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return CurrentSession{}, err
+	}
+
+	current, found, err := resolveLegacyLaunchdCurrent(cacheDir, launch)
+	if err != nil {
+		return CurrentSession{}, err
+	}
+	if found {
+		return current, nil
+	}
+
+	return CurrentSession{}, os.ErrNotExist
+}
+
+func resolveLegacyLaunchdCurrent(cacheDir string, launch config.PrivilegedLaunchConfig) (CurrentSession, bool, error) {
+	label := strings.TrimSpace(launch.Label)
+	if label == "" {
+		return CurrentSession{}, false, nil
+	}
+
+	pid, err := launchdPIDSession(label)
+	if err != nil {
+		return CurrentSession{}, false, err
+	}
+	if pid <= 0 {
+		return CurrentSession{}, false, nil
+	}
+
+	current, found, err := latestLaunchdSessionMetadata(cacheDir, label)
+	if err != nil {
+		return CurrentSession{}, false, err
+	}
+	if !found {
+		current = CurrentSession{
+			ID: "legacy-launchd-" + strings.ReplaceAll(label, ".", "-"),
+		}
+	}
+
+	current.PID = pid
+	current.LaunchMode = config.LaunchModeLaunchd
+	if current.LaunchLabel == "" {
+		current.LaunchLabel = label
+	}
+	if current.LaunchPlistPath == "" {
+		current.LaunchPlistPath = launch.PlistPath
+	}
+	return current, true, nil
+}
+
+func latestLaunchdSessionMetadata(cacheDir string, label string) (CurrentSession, bool, error) {
+	entries, err := os.ReadDir(SessionsDir(cacheDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return CurrentSession{}, false, nil
+	}
+	if err != nil {
+		return CurrentSession{}, false, err
+	}
+
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, metadataFilePrefix) || filepath.Ext(name) != ".json" {
+			continue
+		}
+
+		raw, err := os.ReadFile(filepath.Join(SessionsDir(cacheDir), name))
+		if err != nil {
+			continue
+		}
+
+		var current CurrentSession
+		if err := json.Unmarshal(raw, &current); err != nil {
+			continue
+		}
+		if current.LaunchMode != config.LaunchModeLaunchd || current.LaunchLabel != label {
+			continue
+		}
+		return current, true, nil
+	}
+
+	return CurrentSession{}, false, nil
 }
 
 func LoadCurrent(cacheDir string) (CurrentSession, error) {
@@ -547,6 +650,88 @@ func writeLogHeader(file *os.File, current CurrentSession, profile model.Profile
 	_, _ = fmt.Fprintf(file, "bypasses: %s\n", joinOrNone(current.BypassSuffixes))
 	_, _ = fmt.Fprintf(file, "command: %s\n", joinOrNone(current.Command))
 	_, _ = fmt.Fprintf(file, "--- sing-box output follows ---\n")
+}
+
+func guardNestedTunnelStartup(profile model.Profile, mode string) error {
+	if runtime.GOOS != "darwin" || mode != config.RenderModeTun {
+		return nil
+	}
+
+	upstreamHost := strings.TrimSpace(profile.Host)
+	if upstreamHost == "" {
+		return nil
+	}
+
+	iface, err := routeInterfaceForHost(upstreamHost)
+	if err != nil {
+		return fmt.Errorf("inspect upstream route for %s: %w", upstreamHost, err)
+	}
+	if !isVPNInterfaceName(iface) {
+		return nil
+	}
+
+	services, servicesErr := connectedVPNServiceNames()
+	if servicesErr != nil {
+		return fmt.Errorf("upstream VLESS route %s currently goes via %s; refusing nested tun startup", profile.Endpoint(), iface)
+	}
+
+	if len(services) == 0 {
+		return fmt.Errorf("upstream VLESS route %s currently goes via %s; refusing nested tun startup", profile.Endpoint(), iface)
+	}
+
+	return fmt.Errorf("upstream VLESS route %s currently goes via %s; refusing nested tun startup while active VPN services are connected: %s", profile.Endpoint(), iface, strings.Join(services, ", "))
+}
+
+func routeInterfaceForHost(host string) (string, error) {
+	out, err := routeGetHostSession(host)
+	if err != nil {
+		return "", err
+	}
+	return parseDefaultInterface(string(out))
+}
+
+func isVPNInterfaceName(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case strings.HasPrefix(value, "utun"),
+		strings.HasPrefix(value, "tun"),
+		strings.HasPrefix(value, "ppp"),
+		strings.HasPrefix(value, "ipsec"):
+		return true
+	default:
+		return false
+	}
+}
+
+func connectedVPNServiceNames() ([]string, error) {
+	out, err := networkConnectionListSession()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []string
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "(Connected)") {
+			continue
+		}
+		start := strings.Index(line, "\"")
+		end := strings.LastIndex(line, "\"")
+		if start < 0 || end <= start {
+			continue
+		}
+		name := strings.TrimSpace(line[start+1 : end])
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return result, nil
 }
 
 func saveJSON(path string, value any) error {

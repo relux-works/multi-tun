@@ -41,8 +41,9 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
 	}
+	launchCfg := cfg.Render.PrivilegedLaunchOrDefault()
 
-	if current, state, alive, err := currentSessionState(cfg.CacheDir); err == nil && current != nil && alive {
+	if current, state, alive, err := currentSessionState(cfg.CacheDir, launchCfg); err == nil && current != nil && alive {
 		fmt.Fprintf(a.stderr, "%s failed: sing-box session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
 		return 1
 	}
@@ -53,7 +54,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		return 1
 	}
 
-	if current, state, alive, err := currentSessionState(cfg.CacheDir); err == nil && current != nil && !alive {
+	if current, state, alive, err := currentSessionState(cfg.CacheDir, launchCfg); err == nil && current != nil && !alive {
 		_ = session.ClearCurrent(cfg.CacheDir)
 	} else if err == nil && current != nil && alive {
 		fmt.Fprintf(a.stderr, "%s failed: sing-box session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
@@ -117,7 +118,7 @@ func (a *App) runReconnect(args []string) int {
 		return 1
 	}
 
-	stopped, state, err := stopCurrentSession(cfg.CacheDir, *force, *timeout)
+	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.Render.PrivilegedLaunchOrDefault(), *force, *timeout)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		if stopped != nil && stopped.LogPath != "" {
@@ -174,7 +175,7 @@ func (a *App) runStop(args []string) int {
 		return 1
 	}
 
-	stopped, state, err := stopCurrentSession(cfg.CacheDir, *force, *timeout)
+	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.Render.PrivilegedLaunchOrDefault(), *force, *timeout)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "stop failed: %v\n", err)
 		if stopped != nil && stopped.LogPath != "" {
@@ -195,7 +196,9 @@ func (a *App) runStop(args []string) int {
 	default:
 		fmt.Fprintf(a.stdout, "stop result=%s for session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
 	}
-	fmt.Fprintf(a.stdout, "log=%s\n", stopped.LogPath)
+	if stopped.LogPath != "" {
+		fmt.Fprintf(a.stdout, "log=%s\n", stopped.LogPath)
+	}
 	return 0
 }
 
@@ -262,8 +265,8 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	}, nil
 }
 
-func stopCurrentSession(cacheDir string, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
-	stopped, state, err := session.Stop(cacheDir, force, timeout)
+func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
+	stopped, state, err := session.Stop(cacheDir, launch, force, timeout)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, "none", nil
 	}
