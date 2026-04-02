@@ -147,3 +147,42 @@ func TestLoadPreferredSchemaUsesPreferredFields(t *testing.T) {
 		t.Fatalf("TunInterfaceName() = %q, want %q", got, want)
 	}
 }
+
+func TestSetupWritesPreferredFields(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := Setup(path, SetupOptions{
+		SourceURL:       "vless://uuid@example.com:443?security=reality#demo",
+		ProfileSelector: "demo",
+	}, false)
+	if err != nil {
+		t.Fatalf("Setup() error = %v", err)
+	}
+	if got, want := cfg.SourceMode(), SourceModeDirect; got != want {
+		t.Fatalf("SourceMode() = %q, want %q", got, want)
+	}
+	if got, want := cfg.NetworkMode(), RenderModeTun; got != want {
+		t.Fatalf("NetworkMode() = %q, want %q", got, want)
+	}
+	if cfg.Default == nil {
+		t.Fatal("Default = nil, want profile selector")
+	}
+	if got, want := cfg.Default.ProfileSelector, "demo"; got != want {
+		t.Fatalf("Default.ProfileSelector = %q, want %q", got, want)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got, want := loaded.SourceURL(), "vless://uuid@example.com:443?security=reality#demo"; got != want {
+		t.Fatalf("SourceURL() = %q, want %q", got, want)
+	}
+	if got, want := loaded.DefaultProfileSelector(), "demo"; got != want {
+		t.Fatalf("DefaultProfileSelector() = %q, want %q", got, want)
+	}
+	if got, want := loaded.NetworkMode(), RenderModeTun; got != want {
+		t.Fatalf("NetworkMode() = %q, want %q", got, want)
+	}
+}

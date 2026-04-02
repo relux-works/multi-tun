@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"multi-tun/internal/keychain"
 	"multi-tun/internal/openconnect"
 	"multi-tun/internal/openconnectcfg"
 )
@@ -48,6 +49,154 @@ func TestResolveCredentials_UsesKeychainBackedUsernamePasswordAndTOTP(t *testing
 	}
 	if totp != "totp-secret" {
 		t.Fatalf("totp = %q, want %q", totp, "totp-secret")
+	}
+}
+
+func TestRunSetupWritesConfigAndSeedsKeychainPlaceholders(t *testing.T) {
+	originalSet := keychainSetWithOptions
+	originalExists := keychainExists
+	originalGet := keychainGet
+	originalResolve := resolveSetupHostEntry
+	originalHome := userHomeDirOpenConnect
+	t.Cleanup(func() {
+		keychainSetWithOptions = originalSet
+		keychainExists = originalExists
+		keychainGet = originalGet
+		resolveSetupHostEntry = originalResolve
+		userHomeDirOpenConnect = originalHome
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+
+	type keychainWrite struct {
+		Value   string
+		Label   string
+		Kind    string
+		Comment string
+	}
+	writes := map[string]keychainWrite{}
+	keychainSetWithOptions = func(account, value string, options keychain.SetOptions) error {
+		writes[account] = keychainWrite{
+			Value:   value,
+			Label:   options.Label,
+			Kind:    options.Kind,
+			Comment: options.Comment,
+		}
+		return nil
+	}
+	keychainExists = func(account string) bool {
+		return false
+	}
+	keychainGet = func(account string) (string, error) {
+		return "", fmt.Errorf("unexpected get %s", account)
+	}
+	userHomeDirOpenConnect = func() (string, error) {
+		return t.TempDir(), nil
+	}
+	resolveSetupHostEntry = func(paths []string, selector string) (openconnect.HostEntry, error) {
+		if selector != "Corp VPN" {
+			t.Fatalf("selector = %q, want %q", selector, "Corp VPN")
+		}
+		return openconnect.HostEntry{
+			Name:    "Corp VPN",
+			Address: "vpn.example.com/engineering",
+		}, nil
+	}
+
+	exitCode := app.Run([]string{"setup", "--config", configPath, "--vpn-name", "Corp VPN"})
+	if exitCode != 0 {
+		t.Fatalf("Run(setup) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if got := writes["vpn-example-com-engineering/username"].Value; got != "REPLACE_ME_USERNAME" {
+		t.Fatalf("username placeholder = %q", got)
+	}
+	if got := writes["vpn-example-com-engineering/password"].Value; got != "REPLACE_ME_PASSWORD" {
+		t.Fatalf("password placeholder = %q", got)
+	}
+	if got := writes["vpn-example-com-engineering/totp_secret"].Value; got != "REPLACE_ME_TOTP_SECRET" {
+		t.Fatalf("totp placeholder = %q", got)
+	}
+	if got := writes["vpn-example-com-engineering/password"].Label; got != "multi-tun password (vpn.example.com/engineering)" {
+		t.Fatalf("password label = %q", got)
+	}
+	if got := writes["vpn-example-com-engineering/totp_secret"].Label; got != "multi-tun TOTP secret (vpn.example.com/engineering)" {
+		t.Fatalf("totp label = %q", got)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(configPath) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"server_url": "vpn.example.com/engineering"`) {
+		t.Fatalf("config missing server_url: %s", string(raw))
+	}
+	if !strings.Contains(stdout.String(), "config: "+configPath) {
+		t.Fatalf("stdout = %q, want config path", stdout.String())
+	}
+}
+
+func TestRunSetupPreservesExistingSecretsWhileRefreshingMetadata(t *testing.T) {
+	originalSet := keychainSetWithOptions
+	originalExists := keychainExists
+	originalGet := keychainGet
+	t.Cleanup(func() {
+		keychainSetWithOptions = originalSet
+		keychainExists = originalExists
+		keychainGet = originalGet
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+
+	type keychainWrite struct {
+		Value string
+		Label string
+	}
+	writes := map[string]keychainWrite{}
+	keychainExists = func(account string) bool {
+		return true
+	}
+	keychainGet = func(account string) (string, error) {
+		return "secret-for-" + account, nil
+	}
+	keychainSetWithOptions = func(account, value string, options keychain.SetOptions) error {
+		writes[account] = keychainWrite{Value: value, Label: options.Label}
+		return nil
+	}
+
+	exitCode := app.Run([]string{
+		"setup",
+		"--config", configPath,
+		"--vpn-name", "Corp VPN",
+		"--server-url", "vpn.example.com/engineering",
+	})
+	if exitCode != 0 {
+		t.Fatalf("Run(setup) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if got := writes["vpn-example-com-engineering/password"].Value; got != "secret-for-vpn-example-com-engineering/password" {
+		t.Fatalf("password value = %q", got)
+	}
+	if got := writes["vpn-example-com-engineering/password"].Label; got != "multi-tun password (vpn.example.com/engineering)" {
+		t.Fatalf("password label = %q", got)
+	}
+}
+
+func TestRunSetupRequiresVPNName(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	exitCode := app.Run([]string{"setup"})
+	if exitCode != 1 {
+		t.Fatalf("Run(setup) exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--vpn-name or --profile is required") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
