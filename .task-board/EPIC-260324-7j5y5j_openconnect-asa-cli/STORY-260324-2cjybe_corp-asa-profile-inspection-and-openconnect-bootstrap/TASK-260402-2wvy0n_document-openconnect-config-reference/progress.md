@@ -8,7 +8,7 @@ codex
 2026-04-02T12:06:25Z
 
 ## Last Update
-2026-04-02T13:21:50Z
+2026-04-02T19:55:08Z
 
 ## Blocked By
 - (none)
@@ -28,6 +28,8 @@ Added default_profile to the README field reference. Documented that it is the d
 This README task should be completed only after the server-centric config redesign lands. It must explicitly document default_server semantics in addition to default_profile and the rest of the final openconnect config layout.
 README follow-up aligned to the new openconnect config direction from 2026-04-02. This doc pass should happen only after TASK-260402-2serdk lands, and it should fully replace the interim notes that were written while we were still debating the schema shape. The final section should read from the user point of view of selecting a default server URL plus profile and configuring split_include per profile.
 README openconnect config section refreshed on 2026-04-02 to match the remastered schema. The example now uses default.server_url plus default.profile at the root and nested servers.<url>.profiles.<profile>.mode plus split_include. The field reference documents cache_dir, default selection semantics, profile-level mode and split_include ownership, vpn_domains as suffix masks, and the need to avoid redundant covered domain entries such as inside.corp.example under corp.example. No code changes were needed in this slice; docs only.
+Follow-up: add explicit TOTP setup guidance to the vpn-config skill so agents can explain how to seed/update openconnect username/password/TOTP secrets in Keychain and how to verify/generated TOTP codes with oathtool.
+Added explicit OpenConnect TOTP/keychain guidance to the vpn-config skill and references. Agents can now explain that auth values live in Keychain service multi-tun, show concrete security add/find commands for username/password/TOTP, and generate a current TOTP code with oathtool from the stored secret.
 
 ## Precondition Resources
 (none)

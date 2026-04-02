@@ -77,6 +77,30 @@ openconnect-tun stop
 9. In this repo, select or create the relevant `task-board` item before implementation and keep status/notes aligned with reality as the work progresses.
 10. If command, setup, or config layout changes, update `README.md`, `SPEC.md`, `AGENTS.md`, and the task board.
 
+## OpenConnect Auth And TOTP
+
+When a user asks how to populate OpenConnect auth after `openconnect-tun setup`, explain that the config stores Keychain account names and the actual secrets live in the macOS Keychain service `multi-tun`.
+
+Typical flow:
+
+1. Inspect the configured account names in `~/.config/openconnect-tun/config.json`.
+2. Seed or replace the username/password/TOTP secret with `security add-generic-password -U`.
+3. Verify the stored value with `security find-generic-password -a '<account>' -s multi-tun -w`.
+4. For TOTP, generate a current code with `oathtool --totp -b "$(security find-generic-password -a '<totp_account>' -s multi-tun -w)"`.
+
+Use concrete commands when answering, for example:
+
+```bash
+security add-generic-password -U -a 'corp-vpn/username' -s multi-tun -w 'alice'
+security add-generic-password -U -a 'corp-vpn/password' -s multi-tun -w 'correct-horse-battery-staple'
+security add-generic-password -U -a 'corp-vpn/totp_secret' -s multi-tun -w 'BASE32SECRET'
+
+security find-generic-password -a 'corp-vpn/totp_secret' -s multi-tun -w
+oathtool --totp -b "$(security find-generic-password -a 'corp-vpn/totp_secret' -s multi-tun -w)"
+```
+
+Do not tell the user to store raw secrets in the committed config. Keep the config pointing at keychain accounts and keep the values in Keychain.
+
 ## Command Summary
 
 - `vless-tun setup`
