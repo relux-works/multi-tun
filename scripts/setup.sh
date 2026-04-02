@@ -14,6 +14,7 @@ CISCO_DUMP_COMPAT_NAME="cisco-dump"
 VPN_CORE_CLI_NAME="vpn-core"
 
 AGENTS_DIR="$HOME/.agents/skills"
+GLOBAL_SKILL_DIR="$AGENTS_DIR/$SKILL_NAME"
 CLAUDE_DIR="$HOME/.claude/skills"
 CODEX_DIR="$HOME/.codex/skills"
 BIN_DIR="$HOME/.local/bin"
@@ -40,31 +41,51 @@ ensure_include() {
   fi
 }
 
-if ! command -v rg >/dev/null 2>&1; then
-  if command -v brew >/dev/null 2>&1; then
-    echo "Installing ripgrep..."
-    brew install ripgrep
-  else
-    echo "  WARNING: rg (ripgrep) is not installed and Homebrew was not found"
+ensure_brew_formula() {
+  local formula="$1"
+  local binary="${2:-$1}"
+  if command -v "$binary" >/dev/null 2>&1; then
+    return 0
   fi
-fi
-
-if ! command -v pipx >/dev/null 2>&1; then
   if command -v brew >/dev/null 2>&1; then
-    echo "Installing pipx..."
-    brew install pipx
+    echo "Installing $formula..."
+    brew install "$formula"
   else
-    echo "  WARNING: pipx is not installed and Homebrew was not found"
+    echo "  WARNING: $binary is not installed and Homebrew was not found"
   fi
-fi
+}
 
-if ! command -v vpn-slice >/dev/null 2>&1; then
+ensure_pipx_package() {
+  local package="$1"
+  local binary="${2:-$1}"
+  if command -v "$binary" >/dev/null 2>&1; then
+    return 0
+  fi
   if command -v pipx >/dev/null 2>&1; then
-    echo "Installing vpn-slice..."
-    pipx install vpn-slice || true
+    echo "Installing $package..."
+    pipx install "$package" || pipx upgrade "$package" || true
   else
-    echo "  WARNING: vpn-slice is not installed because pipx is unavailable"
+    echo "  WARNING: $binary is not installed because pipx is unavailable"
   fi
+}
+
+ensure_brew_formula ripgrep rg
+ensure_brew_formula pipx pipx
+ensure_brew_formula openconnect openconnect
+ensure_brew_formula oath-toolkit oathtool
+
+if ! command -v python3 >/dev/null 2>&1; then
+  ensure_brew_formula python python3
+fi
+
+ensure_pipx_package vpn-slice vpn-slice
+
+if ! command -v vpn-auth >/dev/null 2>&1; then
+  echo "  WARNING: vpn-auth is not installed; aggregate SSO auth setup will stay incomplete until it is available in PATH"
+fi
+
+if ! command -v security >/dev/null 2>&1; then
+  echo "  WARNING: macOS security CLI is not available; keychain-backed openconnect setup will not work"
 fi
 
 echo "Building $VLESS_CLI_NAME binary..."
@@ -95,21 +116,21 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
 fi
 
 echo "Installing skill payload: $SKILL_NAME"
-if [ -L "$AGENTS_DIR/$SKILL_NAME" ]; then
-  rm -f "$AGENTS_DIR/$SKILL_NAME"
+if [ -L "$GLOBAL_SKILL_DIR" ]; then
+  rm -f "$GLOBAL_SKILL_DIR"
 fi
-mkdir -p "$AGENTS_DIR/$SKILL_NAME"
-rsync -a --delete "$SKILL_CONTENT_DIR/" "$AGENTS_DIR/$SKILL_NAME/" --exclude='.git'
-echo "  Copied -> $AGENTS_DIR/$SKILL_NAME/"
+mkdir -p "$GLOBAL_SKILL_DIR"
+rsync -a --delete "$SKILL_CONTENT_DIR/" "$GLOBAL_SKILL_DIR/" --exclude='.git'
+echo "  Copied -> $GLOBAL_SKILL_DIR/"
 
 mkdir -p "$CLAUDE_DIR"
 rm -f "$CLAUDE_DIR/$SKILL_NAME"
-ln -s "$AGENTS_DIR/$SKILL_NAME" "$CLAUDE_DIR/$SKILL_NAME"
+ln -s "$GLOBAL_SKILL_DIR" "$CLAUDE_DIR/$SKILL_NAME"
 echo "  Symlink -> $CLAUDE_DIR/$SKILL_NAME"
 
 mkdir -p "$CODEX_DIR"
 rm -f "$CODEX_DIR/$SKILL_NAME"
-ln -s "$AGENTS_DIR/$SKILL_NAME" "$CODEX_DIR/$SKILL_NAME"
+ln -s "$GLOBAL_SKILL_DIR" "$CODEX_DIR/$SKILL_NAME"
 echo "  Symlink -> $CODEX_DIR/$SKILL_NAME"
 
 mkdir -p "$GLOBAL_CONFIG_DIR"
@@ -136,7 +157,8 @@ if command -v agents-infra >/dev/null 2>&1; then
   fi
 
   mkdir -p "$LOCAL_CLAUDE_DIR/skills" "$LOCAL_CODEX_DIR/skills"
-  ln -sfn "$SKILL_CONTENT_DIR" "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME"
+  rm -rf "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME"
+  ln -sfn "$GLOBAL_SKILL_DIR" "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME"
   ln -sfn "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME" "$LOCAL_CLAUDE_DIR/skills/$SKILL_NAME"
   ln -sfn "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME" "$LOCAL_CODEX_DIR/skills/$SKILL_NAME"
   echo "  Local skill -> $LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME"
@@ -156,8 +178,10 @@ echo "Done. Installed $(git -C "$PROJECT_ROOT" describe --tags --always 2>/dev/n
 echo
 echo "Next steps:"
 echo "  edit $GLOBAL_CONFIG_PATH"
+echo "  $VLESS_CLI_NAME setup --source-url 'vless://...'"
 echo "  $VLESS_CLI_NAME refresh"
 echo "  $VLESS_CLI_NAME render"
 echo "  $VPN_CORE_CLI_NAME install"
+echo "  $OPENCONNECT_CLI_NAME setup --vpn-name 'Corp VPN'"
 echo "  $OPENCONNECT_CLI_NAME inspect-profiles"
 echo "  $DUMP_CLI_NAME start"

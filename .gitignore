@@ -2,6 +2,7 @@
 /vpn-config
 /vless-tun
 /openconnect-tun
+/dump
 /cisco-dump
 /vpn-core
 *.exe
@@ -25,6 +26,7 @@ configs/generated/
 .claude/
 .codex/
 .local/
+.temp/
 
 # IDE and OS
 .idea/
