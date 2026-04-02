@@ -73,6 +73,10 @@ func helperConnect(cfg PrivilegedHelperConfig, command []string, cookie, logPath
 	return vpncore.Run(cfg, command, cookie+"\n", logPath)
 }
 
+func helperRun(cfg PrivilegedHelperConfig, command []string, stdinData, logPath string) error {
+	return vpncore.Run(cfg, command, stdinData, logPath)
+}
+
 func helperSignal(cfg PrivilegedHelperConfig, pid int, signal string) error {
 	return vpncore.Signal(cfg, pid, signal, false)
 }

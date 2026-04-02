@@ -180,6 +180,9 @@ func (a *App) runStatus(args []string) int {
 		if len(current.VPNDomains) > 0 {
 			fmt.Fprintf(a.stdout, "vpn_domains: %s\n", strings.Join(current.VPNDomains, ", "))
 		}
+		if len(current.BypassSuffixes) > 0 {
+			fmt.Fprintf(a.stdout, "bypass_suffixes: %s\n", strings.Join(current.BypassSuffixes, ", "))
+		}
 		if len(current.VPNNameservers) > 0 {
 			fmt.Fprintf(a.stdout, "vpn_nameservers: %s\n", strings.Join(current.VPNNameservers, ", "))
 		}
@@ -242,6 +245,7 @@ type runOptions struct {
 	password       string
 	totpSecret     string
 	vpnDomains     []string
+	bypassSuffixes []string
 	vpnNameservers []string
 	includeRoutes  []string
 	dryRun         bool
@@ -285,6 +289,7 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 	password := fs.String("password", "", "Optional password for browser-assisted SAML auto-login")
 	totpSecret := fs.String("totp-secret", "", "Optional TOTP secret for browser-assisted SAML auto-login")
 	domainList := fs.String("vpn-domains", "", "Comma-separated domains that should use VPN DNS in split-include mode")
+	bypassList := fs.String("bypass-suffixes", "", "Comma-separated suffixes that should stay on public DNS even when broader VPN suffixes match")
 	includeRoutes := multiValueFlag{}
 	fs.Var(&includeRoutes, "route", "Included route/host/alias for split-include mode; may be repeated")
 	dryRun := fs.Bool("dry-run", false, "Print resolved plan without starting openconnect")
@@ -303,27 +308,57 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		return runOptions{}, 1, err
 	}
 
-	resolvedMode := firstNonEmpty(*mode, cfg.DefaultMode, openconnect.ConnectModeFull)
+	defaultSelection := cfg.DefaultSelection()
+	resolvedServer := firstNonEmpty(*server, defaultSelection.ServerURL)
+	resolvedProfile := firstNonEmpty(*profile, defaultSelection.Profile)
+	effectiveServer := resolvedServer
+	if effectiveServer == "" && resolvedProfile != "" {
+		serverFromConfig, ok, resolveErr := cfg.ResolveServerURLForProfile(resolvedProfile)
+		if resolveErr != nil {
+			return runOptions{}, 1, resolveErr
+		}
+		if ok {
+			resolvedServer = serverFromConfig
+			effectiveServer = serverFromConfig
+		}
+	}
+	if effectiveServer == "" && resolvedProfile != "" && len(cfg.Servers) > 0 {
+		homeDir, _ := os.UserHomeDir()
+		host, resolveErr := openconnect.ResolveServerFromProfiles(openconnect.DefaultProfileSearchPaths(homeDir), resolvedProfile)
+		if resolveErr != nil {
+			return runOptions{}, 1, resolveErr
+		}
+		effectiveServer = host.Address
+	}
+	resolvedSplitInclude := cfg.EffectiveSplitInclude(effectiveServer, resolvedProfile)
+	resolvedMode := firstNonEmpty(*mode, cfg.EffectiveMode(effectiveServer, resolvedProfile), openconnect.ConnectModeFull)
+	resolvedBypassSuffixes := resolveSplitIncludeBypassSuffixes(
+		resolvedMode,
+		resolvedSplitInclude,
+		splitCSV(*bypassList),
+	)
 	resolvedRoutes, resolvedVPNDomains := resolveSplitIncludeTargets(
 		resolvedMode,
-		cfg.SplitInclude,
+		resolvedSplitInclude,
 		[]string(includeRoutes),
 		splitCSV(*domainList),
+		resolvedBypassSuffixes,
 	)
-	resolvedVPNNameservers := resolveSplitIncludeNameservers(resolvedMode, cfg.SplitInclude)
+	resolvedVPNNameservers := resolveSplitIncludeNameservers(resolvedMode, resolvedSplitInclude)
 
 	return runOptions{
 		configPath:     *configPath,
 		resolvedConfig: resolvedConfigPath,
 		cacheDir:       resolveCacheDir(*cacheDir, cfg),
-		server:         firstNonEmpty(*server, cfg.DefaultServer),
-		profile:        firstNonEmpty(*profile, cfg.DefaultProfile),
+		server:         resolvedServer,
+		profile:        resolvedProfile,
 		auth:           *auth,
 		mode:           resolvedMode,
 		username:       resolvedUsername,
 		password:       resolvedPassword,
 		totpSecret:     resolvedTOTP,
 		vpnDomains:     resolvedVPNDomains,
+		bypassSuffixes: resolvedBypassSuffixes,
 		vpnNameservers: resolvedVPNNameservers,
 		includeRoutes:  resolvedRoutes,
 		dryRun:         *dryRun,
@@ -359,6 +394,7 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 		Mode:           options.mode,
 		IncludeRoutes:  options.includeRoutes,
 		VPNDomains:     options.vpnDomains,
+		BypassSuffixes: options.bypassSuffixes,
 		VPNNameservers: options.vpnNameservers,
 		Credentials: openconnect.Credentials{
 			Username:   options.username,
@@ -386,6 +422,9 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 	}
 	if result.Script != "" {
 		fmt.Fprintf(a.stdout, "script: %s\n", result.Script)
+	}
+	if len(options.bypassSuffixes) > 0 {
+		fmt.Fprintf(a.stdout, "bypass_suffixes: %s\n", strings.Join(options.bypassSuffixes, ", "))
 	}
 	fmt.Fprintf(a.stdout, "command: %s\n", strings.Join(result.Command, " "))
 	if options.dryRun {
@@ -439,8 +478,14 @@ func (a *App) runStop(args []string) int {
 		fmt.Fprintf(a.stdout, "stopped untracked openconnect pid=%d\n", stopped.PID)
 	case "stale":
 		fmt.Fprintf(a.stdout, "cleared stale openconnect session %s (pid=%d)\n", stopped.ID, stopped.PID)
+	case "stale_cleaned":
+		fmt.Fprintf(a.stdout, "cleared stale openconnect session %s (pid=%d) and removed orphaned resolver state\n", stopped.ID, stopped.PID)
 	case "cleared_starting":
 		fmt.Fprintf(a.stdout, "cleared starting openconnect session %s\n", stopped.ID)
+	case "cleared_starting_cleaned":
+		fmt.Fprintf(a.stdout, "cleared starting openconnect session %s and removed orphaned resolver state\n", stopped.ID)
+	case "cleaned_orphaned":
+		fmt.Fprintln(a.stdout, "removed orphaned openconnect resolver state")
 	default:
 		fmt.Fprintf(a.stdout, "stop result=%s pid=%d\n", state, stopped.PID)
 	}
@@ -597,8 +642,8 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "openconnect-tun inspects Cisco AnyConnect / ASA profile state for bypass planning.")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
-	fmt.Fprintln(a.stdout, "  openconnect-tun start [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--dry-run]")
-	fmt.Fprintln(a.stdout, "  openconnect-tun reconnect [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--dry-run]")
+	fmt.Fprintln(a.stdout, "  openconnect-tun start [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
+	fmt.Fprintln(a.stdout, "  openconnect-tun reconnect [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
 	fmt.Fprintln(a.stdout, "  openconnect-tun stop")
 	fmt.Fprintln(a.stdout, "  openconnect-tun helper install|uninstall|status")
 	fmt.Fprintln(a.stdout, "  openconnect-tun routes")
@@ -638,11 +683,12 @@ func splitCSV(value string) []string {
 	return result
 }
 
-func resolveSplitIncludeTargets(mode string, cfg openconnectcfg.SplitIncludeConfig, cliRoutes []string, cliVPNDomains []string) ([]string, []string) {
+func resolveSplitIncludeTargets(mode string, cfg openconnectcfg.SplitIncludeConfig, cliRoutes []string, cliVPNDomains []string, bypassSuffixes []string) ([]string, []string) {
 	if mode != openconnect.ConnectModeSplitInclude {
 		return nil, nil
 	}
-	return mergeNormalizedList(cfg.Routes, cliRoutes), mergeNormalizedList(cfg.VPNDomains, cliVPNDomains)
+	vpnDomains := normalizeDomainSuffixList(mergeNormalizedList(cfg.VPNDomains, cliVPNDomains))
+	return mergeNormalizedList(cfg.Routes, cliRoutes), subtractBypassCoveredDomains(vpnDomains, bypassSuffixes)
 }
 
 func resolveSplitIncludeNameservers(mode string, cfg openconnectcfg.SplitIncludeConfig) []string {
@@ -650,6 +696,13 @@ func resolveSplitIncludeNameservers(mode string, cfg openconnectcfg.SplitInclude
 		return nil
 	}
 	return mergeNormalizedList(cfg.Nameservers, nil)
+}
+
+func resolveSplitIncludeBypassSuffixes(mode string, cfg openconnectcfg.SplitIncludeConfig, cliBypassSuffixes []string) []string {
+	if mode != openconnect.ConnectModeSplitInclude {
+		return nil
+	}
+	return normalizeDomainSuffixList(mergeNormalizedList(cfg.BypassSuffixes, cliBypassSuffixes))
 }
 
 func mergeNormalizedList(base []string, extra []string) []string {
@@ -675,6 +728,94 @@ func mergeNormalizedList(base []string, extra []string) []string {
 		return nil
 	}
 	return result
+}
+
+func normalizeDomainSuffixList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		value = strings.TrimLeft(value, ".")
+		if value == "" {
+			continue
+		}
+		normalized = append(normalized, value)
+	}
+	return collapseCoveredDomainSuffixes(mergeNormalizedList(normalized, nil))
+}
+
+func collapseCoveredDomainSuffixes(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(values))
+	for i, value := range values {
+		if value == "" {
+			continue
+		}
+		covered := false
+		for j, candidate := range values {
+			if i == j || candidate == "" {
+				continue
+			}
+			if value == candidate {
+				continue
+			}
+			if value == candidate || strings.HasSuffix(value, "."+candidate) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func subtractBypassCoveredDomains(vpnDomains []string, bypassSuffixes []string) []string {
+	if len(vpnDomains) == 0 {
+		return nil
+	}
+	if len(bypassSuffixes) == 0 {
+		return vpnDomains
+	}
+	filtered := make([]string, 0, len(vpnDomains))
+	for _, domain := range vpnDomains {
+		if domainCoveredByBypass(domain, bypassSuffixes) {
+			continue
+		}
+		filtered = append(filtered, domain)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func domainCoveredByBypass(domain string, bypassSuffixes []string) bool {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = strings.TrimLeft(domain, ".")
+	if domain == "" {
+		return false
+	}
+	for _, bypass := range bypassSuffixes {
+		bypass = strings.TrimSpace(strings.ToLower(bypass))
+		bypass = strings.TrimLeft(bypass, ".")
+		if bypass == "" {
+			continue
+		}
+		if domain == bypass || strings.HasSuffix(domain, "."+bypass) {
+			return true
+		}
+	}
+	return false
 }
 
 func currentSessionState(cacheDir string) (*openconnect.CurrentSession, string, bool, error) {
