@@ -28,10 +28,15 @@ type CurrentSession struct {
 	MetadataPath              string     `json:"metadata_path"`
 	ArtifactDir               string     `json:"artifact_dir"`
 	PcapPath                  string     `json:"pcap_path,omitempty"`
+	OCSCPcapPath              string     `json:"ocsc_pcap_path,omitempty"`
 	Interface                 string     `json:"interface"`
 	Filter                    string     `json:"filter"`
 	TcpdumpEnabled            bool       `json:"tcpdump_enabled"`
+	TcpdumpBackend            string     `json:"tcpdump_backend,omitempty"`
 	TcpdumpPID                int        `json:"tcpdump_pid,omitempty"`
+	OCSCTcpdumpPID            int        `json:"ocsc_tcpdump_pid,omitempty"`
+	ProbeHosts                []string   `json:"probe_hosts,omitempty"`
+	ProbeNameservers          []string   `json:"probe_nameservers,omitempty"`
 	SnapshotCount             int        `json:"snapshot_count,omitempty"`
 	OCSCFrameCount            int        `json:"ocsc_frame_count,omitempty"`
 	OCSCInterestingFrameCount int        `json:"ocsc_interesting_frame_count,omitempty"`
@@ -142,7 +147,7 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 }
 
 func writeLogHeader(file *os.File, current CurrentSession) {
-	_, _ = fmt.Fprintf(file, "=== cisco-dump session start ===\n")
+	_, _ = fmt.Fprintf(file, "=== dump session start ===\n")
 	_, _ = fmt.Fprintf(file, "session_id: %s\n", current.ID)
 	_, _ = fmt.Fprintf(file, "started_at: %s\n", current.StartedAt.Format(time.RFC3339))
 	_, _ = fmt.Fprintf(file, "interface: %s\n", current.Interface)
@@ -151,8 +156,20 @@ func writeLogHeader(file *os.File, current CurrentSession) {
 	if current.PcapPath != "" {
 		_, _ = fmt.Fprintf(file, "pcap_file: %s\n", current.PcapPath)
 	}
+	if current.OCSCPcapPath != "" {
+		_, _ = fmt.Fprintf(file, "ocsc_pcap_file: %s\n", current.OCSCPcapPath)
+	}
 	_, _ = fmt.Fprintf(file, "tcpdump_enabled: %t\n", current.TcpdumpEnabled)
-	_, _ = fmt.Fprintf(file, "--- cisco-dump output follows ---\n")
+	if current.TcpdumpBackend != "" {
+		_, _ = fmt.Fprintf(file, "tcpdump_backend: %s\n", current.TcpdumpBackend)
+	}
+	if len(current.ProbeHosts) > 0 {
+		_, _ = fmt.Fprintf(file, "probe_hosts: %s\n", strings.Join(current.ProbeHosts, ", "))
+	}
+	if len(current.ProbeNameservers) > 0 {
+		_, _ = fmt.Fprintf(file, "probe_nameservers: %s\n", strings.Join(current.ProbeNameservers, ", "))
+	}
+	_, _ = fmt.Fprintf(file, "--- dump output follows ---\n")
 }
 
 func saveJSON(path string, value any) error {
@@ -185,7 +202,11 @@ func LastRelevantLogLine(path string) string {
 			strings.HasPrefix(line, "filter:"),
 			strings.HasPrefix(line, "artifact_dir:"),
 			strings.HasPrefix(line, "pcap_file:"),
+			strings.HasPrefix(line, "ocsc_pcap_file:"),
 			strings.HasPrefix(line, "tcpdump_enabled:"),
+			strings.HasPrefix(line, "tcpdump_backend:"),
+			strings.HasPrefix(line, "probe_hosts:"),
+			strings.HasPrefix(line, "probe_nameservers:"),
 			strings.HasPrefix(line, "---"):
 			continue
 		}

@@ -6,18 +6,25 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"multi-tun/internal/ciscodump"
 )
 
 type App struct {
-	stdout io.Writer
-	stderr io.Writer
+	commandName string
+	stdout      io.Writer
+	stderr      io.Writer
 }
 
-func New(stdout, stderr io.Writer) *App {
-	return &App{stdout: stdout, stderr: stderr}
+func New(stdout, stderr io.Writer, argv0 string) *App {
+	return &App{
+		commandName: resolveCommandName(argv0),
+		stdout:      stdout,
+		stderr:      stderr,
+	}
 }
 
 func (a *App) Run(args []string) int {
@@ -52,19 +59,27 @@ func (a *App) runStart(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	cacheDir := fs.String("cache-dir", "", "Override cache dir for session metadata and logs")
-	interfaceName := fs.String("interface", "", "Loopback interface to capture, default lo0")
-	filter := fs.String("filter", "", "tcpdump capture filter, default all localhost TCP traffic")
+	interfaceName := fs.String("interface", "", "Capture interface expression, default pktap,all")
+	filter := fs.String("filter", "", "tcpdump capture filter, default tcp or udp")
 	tcpdumpBinary := fs.String("tcpdump-binary", "", "Explicit tcpdump binary path")
-	noTcpdump := fs.Bool("no-tcpdump", false, "Disable loopback pcap capture and only snapshot Cisco logs/processes")
+	noTcpdump := fs.Bool("no-tcpdump", false, "Disable packet capture and only snapshot Cisco logs/processes")
+	noHostProbes := fs.Bool("no-host-probes", false, "Disable target host DNS/route/TCP/HTTPS probes")
+	var probeHosts stringListFlag
+	var probeNameservers stringListFlag
+	fs.Var(&probeHosts, "probe-host", "Host to probe for DNS/route/TCP/HTTPS diagnostics (repeatable)")
+	fs.Var(&probeNameservers, "probe-ns", "Nameserver to use for explicit dig probes (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	started, err := ciscodump.Start(*cacheDir, ciscodump.StartOptions{
-		Interface:     *interfaceName,
-		Filter:        *filter,
-		TcpdumpBinary: *tcpdumpBinary,
-		NoTcpdump:     *noTcpdump,
+		Interface:        *interfaceName,
+		Filter:           *filter,
+		TcpdumpBinary:    *tcpdumpBinary,
+		NoTcpdump:        *noTcpdump,
+		NoHostProbes:     *noHostProbes,
+		ProbeHosts:       probeHosts.Values(),
+		ProbeNameservers: probeNameservers.Values(),
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "start failed: %v\n", err)
@@ -79,12 +94,24 @@ func (a *App) runStart(args []string) int {
 	fmt.Fprintf(a.stdout, "interface: %s\n", started.Interface)
 	fmt.Fprintf(a.stdout, "filter: %s\n", started.Filter)
 	fmt.Fprintf(a.stdout, "tcpdump: %s\n", enabledLabel(started.TcpdumpEnabled))
+	if started.TcpdumpBackend != "" {
+		fmt.Fprintf(a.stdout, "tcpdump_backend: %s\n", started.TcpdumpBackend)
+	}
+	if len(started.ProbeHosts) > 0 {
+		fmt.Fprintf(a.stdout, "probe_hosts: %s\n", strings.Join(started.ProbeHosts, ", "))
+	}
+	if len(started.ProbeNameservers) > 0 {
+		fmt.Fprintf(a.stdout, "probe_nameservers: %s\n", strings.Join(started.ProbeNameservers, ", "))
+	}
 	fmt.Fprintf(a.stdout, "log_file: %s\n", started.LogPath)
 	fmt.Fprintf(a.stdout, "artifact_dir: %s\n", started.ArtifactDir)
 	if started.PcapPath != "" {
 		fmt.Fprintf(a.stdout, "pcap_file: %s\n", started.PcapPath)
 	}
-	fmt.Fprintln(a.stdout, "use `cisco-dump status` to inspect state and `cisco-dump stop` to stop it")
+	if started.OCSCPcapPath != "" {
+		fmt.Fprintf(a.stdout, "ocsc_pcap_file: %s\n", started.OCSCPcapPath)
+	}
+	fmt.Fprintf(a.stdout, "use `%s status` to inspect state and `%s stop` to stop it\n", a.commandName, a.commandName)
 	return 0
 }
 
@@ -93,7 +120,7 @@ func (a *App) runStop(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	cacheDir := fs.String("cache-dir", "", "Override cache dir for session metadata and logs")
-	timeout := fs.Duration("timeout", 5*time.Second, "How long to wait after SIGTERM before failing or forcing")
+	timeout := fs.Duration("timeout", 10*time.Second, "How long to wait after SIGTERM before failing or forcing")
 	force := fs.Bool("force", false, "Escalate from SIGTERM to SIGKILL if the dumper does not stop in time")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -101,7 +128,7 @@ func (a *App) runStop(args []string) int {
 
 	stopped, state, err := ciscodump.Stop(*cacheDir, *force, *timeout)
 	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintln(a.stdout, "no current cisco-dump session file found")
+		fmt.Fprintf(a.stdout, "no current %s session file found\n", a.commandName)
 		return 0
 	}
 	if err != nil {
@@ -114,16 +141,19 @@ func (a *App) runStop(args []string) int {
 
 	switch state {
 	case "stopped", "killed":
-		fmt.Fprintf(a.stdout, "%s cisco-dump session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
+		fmt.Fprintf(a.stdout, "%s %s session %s (pid=%d)\n", state, a.commandName, stopped.ID, stopped.PID)
 	case "stale":
-		fmt.Fprintf(a.stdout, "cleared stale cisco-dump session %s (pid=%d)\n", stopped.ID, stopped.PID)
+		fmt.Fprintf(a.stdout, "cleared stale %s session %s (pid=%d)\n", a.commandName, stopped.ID, stopped.PID)
 	default:
-		fmt.Fprintf(a.stdout, "stop result=%s for session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
+		fmt.Fprintf(a.stdout, "%s stop result=%s for session %s (pid=%d)\n", a.commandName, state, stopped.ID, stopped.PID)
 	}
 	fmt.Fprintf(a.stdout, "log=%s\n", stopped.LogPath)
 	fmt.Fprintf(a.stdout, "artifact_dir=%s\n", stopped.ArtifactDir)
 	if stopped.PcapPath != "" {
 		fmt.Fprintf(a.stdout, "pcap_file=%s\n", stopped.PcapPath)
+	}
+	if stopped.OCSCPcapPath != "" {
+		fmt.Fprintf(a.stdout, "ocsc_pcap_file=%s\n", stopped.OCSCPcapPath)
 	}
 	if stopped.OCSCFrameCount > 0 {
 		fmt.Fprintf(a.stdout, "ocsc_frames=%d\n", stopped.OCSCFrameCount)
@@ -161,13 +191,28 @@ func (a *App) runStatus(args []string) int {
 	fmt.Fprintf(a.stdout, "interface: %s\n", current.Interface)
 	fmt.Fprintf(a.stdout, "filter: %s\n", current.Filter)
 	fmt.Fprintf(a.stdout, "tcpdump: %s\n", enabledLabel(current.TcpdumpEnabled))
+	if current.TcpdumpBackend != "" {
+		fmt.Fprintf(a.stdout, "tcpdump_backend: %s\n", current.TcpdumpBackend)
+	}
+	if len(current.ProbeHosts) > 0 {
+		fmt.Fprintf(a.stdout, "probe_hosts: %s\n", strings.Join(current.ProbeHosts, ", "))
+	}
+	if len(current.ProbeNameservers) > 0 {
+		fmt.Fprintf(a.stdout, "probe_nameservers: %s\n", strings.Join(current.ProbeNameservers, ", "))
+	}
 	if current.TcpdumpPID > 0 {
 		fmt.Fprintf(a.stdout, "tcpdump_pid: %d\n", current.TcpdumpPID)
+	}
+	if current.OCSCTcpdumpPID > 0 {
+		fmt.Fprintf(a.stdout, "ocsc_tcpdump_pid: %d\n", current.OCSCTcpdumpPID)
 	}
 	fmt.Fprintf(a.stdout, "log_file: %s\n", current.LogPath)
 	fmt.Fprintf(a.stdout, "artifact_dir: %s\n", current.ArtifactDir)
 	if current.PcapPath != "" {
 		fmt.Fprintf(a.stdout, "pcap_file: %s\n", current.PcapPath)
+	}
+	if current.OCSCPcapPath != "" {
+		fmt.Fprintf(a.stdout, "ocsc_pcap_file: %s\n", current.OCSCPcapPath)
 	}
 	if current.OCSCFrameCount > 0 {
 		fmt.Fprintf(a.stdout, "ocsc_frames: %d\n", current.OCSCFrameCount)
@@ -234,6 +279,7 @@ func (a *App) runDaemon(args []string) int {
 	metadataPath := fs.String("metadata-path", "", "Metadata JSON path")
 	artifactDir := fs.String("artifact-dir", "", "Artifact directory")
 	pcapPath := fs.String("pcap-path", "", "PCAP output path")
+	ocscPcapPath := fs.String("ocsc-pcap-path", "", "Loopback OCSC PCAP output path")
 	interfaceName := fs.String("interface", "", "Capture interface")
 	filter := fs.String("filter", "", "Capture filter")
 	tcpdumpBinary := fs.String("tcpdump-binary", "", "tcpdump binary")
@@ -248,6 +294,7 @@ func (a *App) runDaemon(args []string) int {
 		MetadataPath:  *metadataPath,
 		ArtifactDir:   *artifactDir,
 		PcapPath:      *pcapPath,
+		OCSCPcapPath:  *ocscPcapPath,
 		Interface:     *interfaceName,
 		Filter:        *filter,
 		TcpdumpBinary: *tcpdumpBinary,
@@ -261,13 +308,13 @@ func (a *App) runDaemon(args []string) int {
 }
 
 func (a *App) printUsage() {
-	fmt.Fprintln(a.stdout, "cisco-dump captures local AnyConnect/CSD artifacts around a manual Cisco connect flow.")
+	fmt.Fprintf(a.stdout, "%s captures tunnel-aware VPN diagnostics and packet artifacts around manual connect flows.\n", a.commandName)
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
-	fmt.Fprintln(a.stdout, "  cisco-dump start [--cache-dir path] [--interface lo0] [--filter expr] [--tcpdump-binary path] [--no-tcpdump]")
-	fmt.Fprintln(a.stdout, "  cisco-dump status [--cache-dir path]")
-	fmt.Fprintln(a.stdout, "  cisco-dump stop [--cache-dir path] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  cisco-dump inspect [--cache-dir path] [--session-id id | --artifact-dir path] [--pcap path]")
+	fmt.Fprintf(a.stdout, "  %s start [--cache-dir path] [--interface pktap,all] [--filter expr] [--tcpdump-binary path] [--no-tcpdump] [--no-host-probes] [--probe-host host] [--probe-ns ip]\n", a.commandName)
+	fmt.Fprintf(a.stdout, "  %s status [--cache-dir path]\n", a.commandName)
+	fmt.Fprintf(a.stdout, "  %s stop [--cache-dir path] [--timeout duration] [--force]\n", a.commandName)
+	fmt.Fprintf(a.stdout, "  %s inspect [--cache-dir path] [--session-id id | --artifact-dir path] [--pcap path]\n", a.commandName)
 }
 
 func currentSessionState(cacheDir string) (*ciscodump.CurrentSession, string, bool, error) {
@@ -297,4 +344,34 @@ func enabledLabel(enabled bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+func resolveCommandName(argv0 string) string {
+	name := strings.TrimSpace(filepath.Base(argv0))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "dump"
+	}
+	return name
+}
+
+type stringListFlag []string
+
+func (s *stringListFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringListFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("value cannot be empty")
+	}
+	*s = append(*s, value)
+	return nil
+}
+
+func (s *stringListFlag) Values() []string {
+	if len(*s) == 0 {
+		return nil
+	}
+	return append([]string(nil), (*s)...)
 }

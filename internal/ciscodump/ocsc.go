@@ -75,7 +75,7 @@ func AnalyzeOCSCArtifactDir(artifactDir, pcapPath string) (OCSCArtifacts, error)
 		return OCSCArtifacts{}, errors.New("artifact dir is required")
 	}
 	if pcapPath == "" {
-		pcapPath = filepath.Join(artifactDir, defaultPcapFileName)
+		pcapPath = filepath.Join(artifactDir, defaultOCSCPcapFileName)
 	}
 
 	frames, err := analyzeOCSCPcap(pcapPath)
