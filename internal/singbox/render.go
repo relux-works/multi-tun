@@ -55,7 +55,8 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 
 	useBypassRules := len(bypassSuffixes) > 0
 	useBypassExcludes := len(bypassExcludes) > 0
-	useDirectDNSBypass := useBypassRules && mode == config.RenderModeTun && !useOverlayDNS
+	useBypassDNSRules := mode == config.RenderModeTun && useBypassRules
+	useBypassExcludeDNSRules := mode == config.RenderModeTun && useBypassExcludes
 	directDomainResolver := "dns-direct"
 	if useOverlayDNS {
 		directDomainResolver = "dns-proxy"
@@ -74,7 +75,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 			},
 		},
 	}
-	if !useOverlayDNS {
+	if !useOverlayDNS || useBypassDNSRules {
 		dnsServers = append([]any{
 			map[string]any{
 				"type":   "local",
@@ -110,21 +111,21 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 	routeRuleSet := []any{}
 	routeRules := baseRouteRules(mode)
 
-	if useDirectDNSBypass {
-		if useBypassExcludes {
-			dnsRules = append([]any{
-				map[string]any{
-					"rule_set": []string{"proxy-exceptions"},
-					"action":   "route",
-					"server":   "dns-proxy",
-				},
-			}, dnsRules...)
-		}
+	if useBypassDNSRules {
 		dnsRules = append([]any{
 			map[string]any{
 				"rule_set": []string{"ru-direct"},
 				"action":   "route",
 				"server":   "dns-direct",
+			},
+		}, dnsRules...)
+	}
+	if useBypassExcludeDNSRules {
+		dnsRules = append([]any{
+			map[string]any{
+				"rule_set": []string{"proxy-exceptions"},
+				"action":   "route",
+				"server":   "dns-proxy",
 			},
 		}, dnsRules...)
 	}

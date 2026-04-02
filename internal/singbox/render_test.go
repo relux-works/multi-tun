@@ -67,7 +67,7 @@ func TestRender(t *testing.T) {
 	}
 }
 
-func TestRenderWithOverlayDNSUsesProxyForGenericBypasses(t *testing.T) {
+func TestRenderWithOverlayDNSMakesBypassesWinBeforeOverlayDNS(t *testing.T) {
 	t.Parallel()
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "dancevpn.subscription.plain.txt"))
@@ -100,14 +100,18 @@ func TestRenderWithOverlayDNSUsesProxyForGenericBypasses(t *testing.T) {
 
 	dns := root["dns"].(map[string]any)
 	dnsServers := dns["servers"].([]any)
-	if len(dnsServers) != 2 {
-		t.Fatalf("expected proxy + overlay dns servers, got %#v", dnsServers)
+	if len(dnsServers) != 3 {
+		t.Fatalf("expected direct + proxy + overlay dns servers, got %#v", dnsServers)
 	}
 	firstServer := dnsServers[0].(map[string]any)
-	if got, want := firstServer["tag"], "dns-proxy"; got != want {
-		t.Fatalf("proxy dns tag = %#v, want %q", got, want)
+	if got, want := firstServer["tag"], "dns-direct"; got != want {
+		t.Fatalf("first dns tag = %#v, want %q", got, want)
 	}
-	overlayServer := dnsServers[1].(map[string]any)
+	secondServer := dnsServers[1].(map[string]any)
+	if got, want := secondServer["tag"], "dns-proxy"; got != want {
+		t.Fatalf("second dns tag = %#v, want %q", got, want)
+	}
+	overlayServer := dnsServers[2].(map[string]any)
 	if got, want := overlayServer["tag"], "dns-overlay"; got != want {
 		t.Fatalf("overlay dns tag = %#v, want %q", got, want)
 	}
@@ -119,25 +123,32 @@ func TestRenderWithOverlayDNSUsesProxyForGenericBypasses(t *testing.T) {
 	}
 
 	dnsRules := dns["rules"].([]any)
+	if len(dnsRules) != 4 {
+		t.Fatalf("dns rules = %#v, want 4 entries", dnsRules)
+	}
 	firstRule := dnsRules[0].(map[string]any)
-	if got, want := firstRule["server"], "dns-overlay"; got != want {
+	if got, want := firstRule["server"], "dns-proxy"; got != want {
 		t.Fatalf("first dns rule server = %#v, want %q", got, want)
 	}
-	domainSuffixes := firstRule["domain_suffix"].([]any)
+	if got := firstRule["rule_set"]; !containsAnyString(got.([]any), "proxy-exceptions") {
+		t.Fatalf("first dns rule_set = %#v, want proxy-exceptions", got)
+	}
+
+	secondRule := dnsRules[1].(map[string]any)
+	if got, want := secondRule["server"], "dns-direct"; got != want {
+		t.Fatalf("second dns rule server = %#v, want %q", got, want)
+	}
+	if got := secondRule["rule_set"]; !containsAnyString(got.([]any), "ru-direct") {
+		t.Fatalf("second dns rule_set = %#v, want ru-direct", got)
+	}
+
+	overlayRule := dnsRules[2].(map[string]any)
+	if got, want := overlayRule["server"], "dns-overlay"; got != want {
+		t.Fatalf("overlay dns rule server = %#v, want %q", got, want)
+	}
+	domainSuffixes := overlayRule["domain_suffix"].([]any)
 	if len(domainSuffixes) != 2 {
 		t.Fatalf("overlay domain_suffix = %#v, want two values", domainSuffixes)
-	}
-	for _, rawRule := range dnsRules {
-		rule := rawRule.(map[string]any)
-		if got, ok := rule["server"]; ok && got == "dns-direct" {
-			t.Fatalf("unexpected dns-direct rule under overlay: %#v", rule)
-		}
-	}
-	for _, rawServer := range dnsServers {
-		server := rawServer.(map[string]any)
-		if got, ok := server["tag"]; ok && got == "dns-direct" {
-			t.Fatalf("unexpected dns-direct server under overlay: %#v", server)
-		}
 	}
 
 	outbounds := root["outbounds"].([]any)
