@@ -2,6 +2,8 @@
 
 ## Scaffold local config
 
+`./scripts/setup.sh` is also the supported install path for aggregate OpenConnect auth now: it installs `totp-cli`, builds the bundled `cmd/vpn-auth` Swift package, and exposes the resulting `vpn-auth` binary in `~/.local/bin`.
+
 ```bash
 vless-tun setup --source-url "https://key.vpn.dance/connect?key=..."
 vless-tun setup --source-url "vless://uuid@example.com:443?security=reality#demo"
@@ -22,60 +24,8 @@ security add-generic-password -U -a 'corp-vpn/totp_secret' -s multi-tun -w 'BASE
 For Google Authenticator export QR, do not store the `data=` blob directly. The QR usually contains an `otpauth-migration://offline?...` URL where `data=` is URL-encoded base64 protobuf. Decode it, extract the raw secret bytes, then base32-encode those bytes and store that final base32 value in Keychain.
 
 ```bash
-python3 - <<'PY'
-import base64
-import sys
-import urllib.parse
-from urllib.parse import parse_qs, urlparse
-
-url = sys.stdin.read().strip()
-data = parse_qs(urlparse(url).query)["data"][0]
-raw = base64.b64decode(urllib.parse.unquote(data))
-
-def read_varint(buf, i):
-    value = 0
-    shift = 0
-    while True:
-        b = buf[i]
-        i += 1
-        value |= (b & 0x7F) << shift
-        if not (b & 0x80):
-            return value, i
-        shift += 7
-
-def read_len(buf, i):
-    size, i = read_varint(buf, i)
-    return buf[i:i + size], i + size
-
-i = 0
-while i < len(raw):
-    tag = raw[i]
-    i += 1
-    field = tag >> 3
-    wire = tag & 0x07
-    if wire == 2:
-        value, i = read_len(raw, i)
-        if field == 1:
-            j = 0
-            while j < len(value):
-                inner_tag = value[j]
-                j += 1
-                inner_field = inner_tag >> 3
-                inner_wire = inner_tag & 0x07
-                if inner_wire == 2:
-                    inner_value, j = read_len(value, j)
-                    if inner_field == 1:
-                        print(base64.b32encode(inner_value).decode())
-                        raise SystemExit(0)
-                elif inner_wire == 0:
-                    _, j = read_varint(value, j)
-                else:
-                    raise SystemExit(f"unsupported protobuf wire type: {inner_wire}")
-    elif wire == 0:
-        _, i = read_varint(raw, i)
-    else:
-        raise SystemExit(f"unsupported protobuf wire type: {wire}")
-PY
+./scripts/google-auth-export-secret.sh 'otpauth-migration://offline?...'
+./scripts/google-auth-export-secret.sh --list 'otpauth-migration://offline?...'
 ```
 
 ## Read stored OpenConnect auth

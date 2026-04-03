@@ -5,6 +5,7 @@
 /dump
 /cisco-dump
 /vpn-core
+/vpn-auth
 *.exe
 *.exe~
 *.dll
@@ -27,6 +28,10 @@ configs/generated/
 .codex/
 .local/
 .temp/
+
+# Swift package build state
+/cmd/vpn-auth/.build/
+/cmd/vpn-auth/.swiftpm/
 
 # IDE and OS
 .idea/
