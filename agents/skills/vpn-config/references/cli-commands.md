@@ -2,7 +2,7 @@
 
 ## Scaffold local config
 
-`./scripts/setup.sh` is also the supported install path for aggregate OpenConnect auth now: it installs `totp-cli`, builds the bundled `cmd/vpn-auth` Swift package, and exposes the resulting `vpn-auth` binary in `~/.local/bin`.
+`./scripts/setup.sh` is also the supported install path for the shipped runtime now: it installs `sing-box`, installs `totp-cli`, builds the bundled `cmd/vpn-auth` Swift package, and exposes the resulting `vpn-auth` binary in `~/.local/bin`.
 
 ```bash
 vless-tun setup --source-url "https://key.vpn.dance/connect?key=..."

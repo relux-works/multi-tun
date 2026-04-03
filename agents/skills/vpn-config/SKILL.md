@@ -73,7 +73,7 @@ openconnect-tun stop
 5. Use `reconnect` after changing bypasses, profile selection, or other render-time config so the live VLESS session picks up the new state.
 6. For `vless-tun`, prefer `network.mode=tun` as the default happy path; use `network.mode=system_proxy` only when you explicitly want a lighter non-TUN macOS session.
 7. `openconnect-tun setup` seeds full-mode config with no bypasses plus placeholder keychain accounts; the caller should review the generated config path before first connect.
-8. `./scripts/setup.sh` is the supported install path for the full `multi-tun` toolchain. It now builds and installs the bundled `vpn-auth` helper plus `totp-cli`, so aggregate OpenConnect auth should be treated as a shipped capability, not a manual prerequisite.
+8. `./scripts/setup.sh` is the supported install path for the full `multi-tun` toolchain. It ensures `sing-box` for `vless-tun`, builds and installs the bundled `vpn-auth` helper, and installs its `totp-cli` prerequisite, so both VLESS runtime and aggregate OpenConnect auth should be treated as shipped capabilities, not manual prerequisites.
 9. Use `status`, `diagnose`, and the per-session log file to debug behavior.
 10. In this repo, select or create the relevant `task-board` item before implementation and keep status/notes aligned with reality as the work progresses.
 11. If command, setup, or config layout changes, update `README.md`, `SPEC.md`, `AGENTS.md`, and the task board.
