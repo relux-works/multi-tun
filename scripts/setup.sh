@@ -99,6 +99,7 @@ resolve_swift_release_binary() {
 
 ensure_brew_formula ripgrep rg
 ensure_brew_formula pipx pipx
+ensure_brew_formula sing-box sing-box
 ensure_brew_formula openconnect openconnect
 ensure_brew_formula oath-toolkit oathtool
 ensure_brew_formula totp-cli totp-cli

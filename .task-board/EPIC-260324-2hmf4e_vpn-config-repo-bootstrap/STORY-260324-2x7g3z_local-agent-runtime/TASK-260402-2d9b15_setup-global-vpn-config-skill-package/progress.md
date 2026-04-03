@@ -8,7 +8,7 @@ codex
 2026-04-02T14:24:15Z
 
 ## Last Update
-2026-04-03T14:38:16Z
+2026-04-03T15:22:50Z
 
 ## Blocked By
 - (none)
@@ -31,6 +31,8 @@ Added shell helper script for Google Auth export TOTP extraction and now updatin
 Updated vpn-config skill with a concrete shell example and expected output for google-auth-export-secret.sh so agents can answer with an exact command/result instead of only describing the decode steps.
 Follow-up: vpn-auth cannot stay a mere warning because openconnect-tun start defaults to --auth aggregate, which currently depends on vpn-auth. Audit the old vpn-auth source and wire a supported build/install path into setup.
 Bundled the legacy Swift WebKit helper as cmd/vpn-auth, taught scripts/setup.sh to install its TOTP prerequisite totp-cli, build the package, stage the repo-local vpn-auth binary, and link it into ~/.local/bin as a managed multi-tun product binary. scripts/deinit.sh now tears down the managed vpn-auth link and build artifact alongside the rest of the toolchain. Verification: swift build -c release --package-path cmd/vpn-auth, go test ./..., ./scripts/setup.sh, vpn-auth --version, and ./scripts/deinit.sh --dry-run all passed.
+Follow-up from live install review: setup still misses sing-box even though vless-tun start depends on it. Add Homebrew check/install for sing-box to the shipped setup flow and re-verify end-to-end prerequisites.
+Closed the remaining live gap in shipped prerequisites: scripts/setup.sh now also ensures sing-box, because vless-tun start depends on it. Re-verified with command -v sing-box, sing-box version, and a fresh ./scripts/setup.sh run after the change.
 
 ## Precondition Resources
 (none)
