@@ -88,6 +88,94 @@ Typical flow:
 3. Verify the stored value with `security find-generic-password -a '<account>' -s multi-tun -w`.
 4. For TOTP, generate a current code with `oathtool --totp -b "$(security find-generic-password -a '<totp_account>' -s multi-tun -w)"`.
 
+If the user only has a Google Authenticator export QR, explain the format clearly:
+
+- the export QR usually contains an `otpauth-migration://offline?...` URL
+- the `data=` query param is a URL-encoded base64 protobuf payload
+- that payload is not the final TOTP secret
+- decode flow is: `URL decode -> base64 decode -> protobuf parse -> raw secret bytes -> base32 encode`
+- the value to store in Keychain and pass to `oathtool --totp -b` is the final base32 secret
+
+Use a dependency-free extractor when needed:
+
+```bash
+python3 - <<'PY'
+import base64
+import sys
+import urllib.parse
+from urllib.parse import parse_qs, urlparse
+
+url = sys.stdin.read().strip()
+data = parse_qs(urlparse(url).query)["data"][0]
+raw = base64.b64decode(urllib.parse.unquote(data))
+
+def read_varint(buf, i):
+    value = 0
+    shift = 0
+    while True:
+        b = buf[i]
+        i += 1
+        value |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return value, i
+        shift += 7
+
+def read_len(buf, i):
+    size, i = read_varint(buf, i)
+    return buf[i:i + size], i + size
+
+def parse_otp_parameters(buf):
+    i = 0
+    item = {}
+    while i < len(buf):
+        tag = buf[i]
+        i += 1
+        field = tag >> 3
+        wire = tag & 0x07
+        if wire == 2:
+            value, i = read_len(buf, i)
+            if field == 1:
+                item["secret_base32"] = base64.b32encode(value).decode()
+            elif field == 2:
+                item["account"] = value.decode()
+            elif field == 3:
+                item["issuer"] = value.decode()
+        elif wire == 0:
+            value, i = read_varint(buf, i)
+            if field == 4:
+                item["algorithm"] = value
+            elif field == 5:
+                item["digits"] = value
+            elif field == 6:
+                item["type"] = value
+        else:
+            raise SystemExit(f"unsupported protobuf wire type: {wire}")
+    return item
+
+i = 0
+while i < len(raw):
+    tag = raw[i]
+    i += 1
+    field = tag >> 3
+    wire = tag & 0x07
+    if wire == 2:
+        value, i = read_len(raw, i)
+        if field == 1:
+            item = parse_otp_parameters(value)
+            print(
+                f"{item.get('issuer', '')}\t"
+                f"{item.get('account', '')}\t"
+                f"{item.get('secret_base32', '')}"
+            )
+    elif wire == 0:
+        _, i = read_varint(raw, i)
+    else:
+        raise SystemExit(f"unsupported protobuf wire type: {wire}")
+PY
+```
+
+Tell the user to paste the full `otpauth-migration://...` URL into stdin. The script prints one line per exported account as `issuer<TAB>account<TAB>base32secret`.
+
 Use concrete commands when answering, for example:
 
 ```bash

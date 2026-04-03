@@ -104,6 +104,14 @@ security add-generic-password -U -a 'corp-vpn/password' -s multi-tun -w 'correct
 security add-generic-password -U -a 'corp-vpn/totp_secret' -s multi-tun -w 'BASE32SECRET'
 ```
 
+If the user starts from a Google Authenticator export QR, the important distinction is:
+
+- the QR export payload is usually an `otpauth-migration://offline?...` URL
+- `data=` inside that URL is URL-encoded base64 protobuf
+- the final TOTP secret for Keychain, `oathtool`, and `vpn-auth --totp-secret` is base32
+
+In other words: decode `data=` as URL-encoded base64, parse the protobuf, extract the raw secret bytes, then base32-encode those bytes before storing them.
+
 Verify them like this:
 
 ```bash
