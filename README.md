@@ -45,7 +45,7 @@ openconnect-tun inspect-profiles
 dump status
 ```
 
-`./scripts/setup.sh` now also refreshes the repo-local `agents-infra` runtime when `agents-infra` is installed, layers project-specific local instructions into `.agents/.instructions/`, and exposes the repo `vpn-config` skill plus `project-management` in local `.claude/skills` and `.codex/skills`.
+`./scripts/setup.sh` now also refreshes the repo-local `agents-infra` runtime when `agents-infra` is installed, layers project-specific local instructions into `.agents/.instructions/`, exposes the repo `vpn-config` skill plus `project-management` in local `.claude/skills` and `.codex/skills`, and builds the bundled `cmd/vpn-auth` Swift helper into the normal `~/.local/bin` install set.
 
 `./scripts/deinit.sh` removes the managed `multi-tun` global/local skill links and `~/.local/bin` symlinks. Config, cache, keychain secrets, and repo build artifacts stay intact unless you pass the explicit `--purge-*` flags.
 
@@ -111,6 +111,7 @@ Operational notes:
 - the canonical lifecycle commands are now `start`, `reconnect`, `status`, and `stop`; `run`, `connect`, and `disconnect` remain as compatibility aliases.
 - `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. Current Corp bootstrap convention is fully keychain-backed: `auth.username_keychain_account=corp-vpn/username` and `auth.password_keychain_account=corp-vpn/password`. Plain `auth.username` remains as a compatibility fallback. `totp_secret_keychain_account` stays optional and is intentionally not wired by default.
 - live auth now defaults to `--auth aggregate`, which is the only path that currently completes Corp SSO+CSD on this machine; `--auth openconnect` remains available as the direct `openconnect --authenticate` path for debugging. `vpn-auth` is used for the browser-assisted SAML steps in aggregate mode, with preset-cookie support for follow-up pages.
+- `./scripts/setup.sh` now treats `vpn-auth` as part of the shipped toolchain instead of an external manual prerequisite: it ensures `totp-cli` is present, builds `cmd/vpn-auth`, installs the resulting binary into `~/.local/bin`, and `./scripts/deinit.sh` removes that managed binary link again.
 - the CSD helper is resolved from the active OpenConnect install, preferring native Cisco `libcsd.dylib` when it is available under `~/.cisco/...`; otherwise it falls back to Homebrew's stable `opt/openconnect/libexec/openconnect/csd-post.sh` path instead of versioned `Cellar/...` paths. The fallback `csd-post.sh` path is still wrapped with tiny macOS shims for `pidof` and GNU-style `stat -c %Y`.
 - `dump` is now the canonical activity-oriented name for packet diagnostics. `cisco-dump` remains installed as a compatibility alias, while runtime state stays under `~/.cache/cisco-dump` for continuity.
 - `dump` keeps its own runtime state under `~/.cache/cisco-dump`, with session logs in `~/.cache/cisco-dump/sessions`, the current session pointer in `~/.cache/cisco-dump/runtime/current-session.json`, mirrored Cisco logs and cache artifacts under each session directory, tracked Cisco per-pid `lsof` snapshots, all-loopback TCP snapshots from `lsof`/`netstat`, a default tunnel-aware traffic capture pcap, a separate loopback OCSC pcap, and host-level DNS/route/TCP/HTTPS probe snapshots for Corp targets.
@@ -128,6 +129,13 @@ Operational notes:
 Scaffolds a default `openconnect-tun` config and the matching keychain account names for one VPN profile.
 
 Pass `--vpn-name` with the user-facing AnyConnect profile name. `setup` resolves the matching `server_url` from local AnyConnect XML, writes a default full-mode config with no bypasses, seeds placeholder keychain entries for username/password/TOTP, and prints the resulting config path so the caller can review it.
+
+If TOTP starts from a Google Authenticator export QR, use `./scripts/google-auth-export-secret.sh`. The export URL contains a URL-encoded base64 protobuf payload, but the final Keychain value for `totp_secret` must be the derived base32 secret:
+
+```bash
+./scripts/google-auth-export-secret.sh 'otpauth-migration://offline?...'
+./scripts/google-auth-export-secret.sh --list 'otpauth-migration://offline?...'
+```
 
 #### `openconnect-tun` configuration
 

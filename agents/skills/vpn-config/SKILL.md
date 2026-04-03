@@ -73,9 +73,10 @@ openconnect-tun stop
 5. Use `reconnect` after changing bypasses, profile selection, or other render-time config so the live VLESS session picks up the new state.
 6. For `vless-tun`, prefer `network.mode=tun` as the default happy path; use `network.mode=system_proxy` only when you explicitly want a lighter non-TUN macOS session.
 7. `openconnect-tun setup` seeds full-mode config with no bypasses plus placeholder keychain accounts; the caller should review the generated config path before first connect.
-8. Use `status`, `diagnose`, and the per-session log file to debug behavior.
-9. In this repo, select or create the relevant `task-board` item before implementation and keep status/notes aligned with reality as the work progresses.
-10. If command, setup, or config layout changes, update `README.md`, `SPEC.md`, `AGENTS.md`, and the task board.
+8. `./scripts/setup.sh` is the supported install path for the full `multi-tun` toolchain. It now builds and installs the bundled `vpn-auth` helper plus `totp-cli`, so aggregate OpenConnect auth should be treated as a shipped capability, not a manual prerequisite.
+9. Use `status`, `diagnose`, and the per-session log file to debug behavior.
+10. In this repo, select or create the relevant `task-board` item before implementation and keep status/notes aligned with reality as the work progresses.
+11. If command, setup, or config layout changes, update `README.md`, `SPEC.md`, `AGENTS.md`, and the task board.
 
 ## OpenConnect Auth And TOTP
 
@@ -96,85 +97,38 @@ If the user only has a Google Authenticator export QR, explain the format clearl
 - decode flow is: `URL decode -> base64 decode -> protobuf parse -> raw secret bytes -> base32 encode`
 - the value to store in Keychain and pass to `oathtool --totp -b` is the final base32 secret
 
-Use a dependency-free extractor when needed:
+Prefer the repo helper script when needed:
 
 ```bash
-python3 - <<'PY'
-import base64
-import sys
-import urllib.parse
-from urllib.parse import parse_qs, urlparse
-
-url = sys.stdin.read().strip()
-data = parse_qs(urlparse(url).query)["data"][0]
-raw = base64.b64decode(urllib.parse.unquote(data))
-
-def read_varint(buf, i):
-    value = 0
-    shift = 0
-    while True:
-        b = buf[i]
-        i += 1
-        value |= (b & 0x7F) << shift
-        if not (b & 0x80):
-            return value, i
-        shift += 7
-
-def read_len(buf, i):
-    size, i = read_varint(buf, i)
-    return buf[i:i + size], i + size
-
-def parse_otp_parameters(buf):
-    i = 0
-    item = {}
-    while i < len(buf):
-        tag = buf[i]
-        i += 1
-        field = tag >> 3
-        wire = tag & 0x07
-        if wire == 2:
-            value, i = read_len(buf, i)
-            if field == 1:
-                item["secret_base32"] = base64.b32encode(value).decode()
-            elif field == 2:
-                item["account"] = value.decode()
-            elif field == 3:
-                item["issuer"] = value.decode()
-        elif wire == 0:
-            value, i = read_varint(buf, i)
-            if field == 4:
-                item["algorithm"] = value
-            elif field == 5:
-                item["digits"] = value
-            elif field == 6:
-                item["type"] = value
-        else:
-            raise SystemExit(f"unsupported protobuf wire type: {wire}")
-    return item
-
-i = 0
-while i < len(raw):
-    tag = raw[i]
-    i += 1
-    field = tag >> 3
-    wire = tag & 0x07
-    if wire == 2:
-        value, i = read_len(raw, i)
-        if field == 1:
-            item = parse_otp_parameters(value)
-            print(
-                f"{item.get('issuer', '')}\t"
-                f"{item.get('account', '')}\t"
-                f"{item.get('secret_base32', '')}"
-            )
-    elif wire == 0:
-        _, i = read_varint(raw, i)
-    else:
-        raise SystemExit(f"unsupported protobuf wire type: {wire}")
-PY
+./scripts/google-auth-export-secret.sh 'otpauth-migration://offline?...'
+./scripts/google-auth-export-secret.sh --list 'otpauth-migration://offline?...'
 ```
 
-Tell the user to paste the full `otpauth-migration://...` URL into stdin. The script prints one line per exported account as `issuer<TAB>account<TAB>base32secret`.
+The helper accepts the full `otpauth-migration://...` URL, a raw `data=...` fragment, or the raw URL-encoded base64 payload itself. Default output is just the base32 secret when exactly one entry matches. Use `--list` for `index<TAB>issuer<TAB>account<TAB>base32secret`.
+
+When the user explicitly asks how to convert a Google Auth export URL or asks for a ready command, answer with a concrete example command and example output, not just the abstract decode flow. A good template is:
+
+```bash
+./scripts/google-auth-export-secret.sh 'otpauth-migration://offline?data=REDACTED_URLENCODED_BASE64_PAYLOAD'
+```
+
+Expected output:
+
+```text
+JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP
+```
+
+If the user wants to inspect which account is inside the export, also show:
+
+```bash
+./scripts/google-auth-export-secret.sh --list 'otpauth-migration://offline?data=REDACTED_URLENCODED_BASE64_PAYLOAD'
+```
+
+Expected output:
+
+```text
+1	ExampleIssuer	alice@example.com	JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP
+```
 
 Use concrete commands when answering, for example:
 

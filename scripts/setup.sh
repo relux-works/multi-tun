@@ -12,6 +12,8 @@ OPENCONNECT_CLI_NAME="openconnect-tun"
 DUMP_CLI_NAME="dump"
 CISCO_DUMP_COMPAT_NAME="cisco-dump"
 VPN_CORE_CLI_NAME="vpn-core"
+VPN_AUTH_CLI_NAME="vpn-auth"
+VPN_AUTH_PACKAGE_DIR="$PROJECT_ROOT/cmd/vpn-auth"
 
 AGENTS_DIR="$HOME/.agents/skills"
 GLOBAL_SKILL_DIR="$AGENTS_DIR/$SKILL_NAME"
@@ -69,20 +71,45 @@ ensure_pipx_package() {
   fi
 }
 
+require_swift() {
+  if command -v swift >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "  ERROR: swift is not installed; install Xcode Command Line Tools before running setup so vpn-auth can be built"
+  exit 1
+}
+
+resolve_swift_release_binary() {
+  local package_dir="$1"
+  local binary_name="$2"
+  local release_path="$package_dir/.build/release/$binary_name"
+  if [[ -x "$release_path" ]]; then
+    printf '%s\n' "$release_path"
+    return 0
+  fi
+
+  release_path="$(find "$package_dir/.build" -path "*/release/$binary_name" -type f -perm -111 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$release_path" ]]; then
+    printf '%s\n' "$release_path"
+    return 0
+  fi
+
+  return 1
+}
+
 ensure_brew_formula ripgrep rg
 ensure_brew_formula pipx pipx
 ensure_brew_formula openconnect openconnect
 ensure_brew_formula oath-toolkit oathtool
+ensure_brew_formula totp-cli totp-cli
+
+require_swift
 
 if ! command -v python3 >/dev/null 2>&1; then
   ensure_brew_formula python python3
 fi
 
 ensure_pipx_package vpn-slice vpn-slice
-
-if ! command -v vpn-auth >/dev/null 2>&1; then
-  echo "  WARNING: vpn-auth is not installed; aggregate SSO auth setup will stay incomplete until it is available in PATH"
-fi
 
 if ! command -v security >/dev/null 2>&1; then
   echo "  WARNING: macOS security CLI is not available; keychain-backed openconnect setup will not work"
@@ -97,6 +124,14 @@ echo "Building $DUMP_CLI_NAME binary..."
 go build -o "$DUMP_CLI_NAME" ./cmd/dump/
 echo "Building $VPN_CORE_CLI_NAME binary..."
 go build -o "$VPN_CORE_CLI_NAME" ./cmd/vpn-core/
+echo "Building $VPN_AUTH_CLI_NAME binary..."
+swift build -c release --package-path "$VPN_AUTH_PACKAGE_DIR"
+VPN_AUTH_RELEASE_BIN="$(resolve_swift_release_binary "$VPN_AUTH_PACKAGE_DIR" "$VPN_AUTH_CLI_NAME")" || {
+  echo "  ERROR: built $VPN_AUTH_CLI_NAME binary was not found under $VPN_AUTH_PACKAGE_DIR/.build"
+  exit 1
+}
+cp "$VPN_AUTH_RELEASE_BIN" "$PROJECT_ROOT/$VPN_AUTH_CLI_NAME"
+chmod +x "$PROJECT_ROOT/$VPN_AUTH_CLI_NAME"
 
 mkdir -p "$BIN_DIR"
 ln -sf "$PROJECT_ROOT/$VLESS_CLI_NAME" "$BIN_DIR/$VLESS_CLI_NAME"
@@ -104,12 +139,14 @@ ln -sf "$PROJECT_ROOT/$OPENCONNECT_CLI_NAME" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
 ln -sf "$PROJECT_ROOT/$DUMP_CLI_NAME" "$BIN_DIR/$DUMP_CLI_NAME"
 ln -sf "$PROJECT_ROOT/$DUMP_CLI_NAME" "$BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
 ln -sf "$PROJECT_ROOT/$VPN_CORE_CLI_NAME" "$BIN_DIR/$VPN_CORE_CLI_NAME"
+ln -sf "$PROJECT_ROOT/$VPN_AUTH_CLI_NAME" "$BIN_DIR/$VPN_AUTH_CLI_NAME"
 rm -f "$BIN_DIR/vpn-config"
 echo "  Binary -> $BIN_DIR/$VLESS_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$OPENCONNECT_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$DUMP_CLI_NAME"
 echo "  Alias  -> $BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
 echo "  Binary -> $BIN_DIR/$VPN_CORE_CLI_NAME"
+echo "  Binary -> $BIN_DIR/$VPN_AUTH_CLI_NAME"
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo "  WARNING: $BIN_DIR is not in your PATH"

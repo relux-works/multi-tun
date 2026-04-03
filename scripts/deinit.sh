@@ -22,6 +22,7 @@ BIN_NAMES=(
   "dump"
   "cisco-dump"
   "vpn-core"
+  "vpn-auth"
 )
 
 CONFIG_DIRS=(
@@ -41,6 +42,7 @@ BUILD_ARTIFACTS=(
   "$PROJECT_ROOT/dump"
   "$PROJECT_ROOT/cisco-dump"
   "$PROJECT_ROOT/vpn-core"
+  "$PROJECT_ROOT/vpn-auth"
 )
 
 PURGE_CONFIG=false
@@ -60,7 +62,7 @@ Options:
   --purge-config    Remove ~/.config/vless-tun and ~/.config/openconnect-tun
   --purge-cache     Remove ~/.cache/vless-tun, ~/.cache/openconnect-tun, ~/.cache/cisco-dump
   --purge-keychain  Delete openconnect auth accounts referenced by the current config
-  --purge-builds    Remove repo-local built binaries (./vless-tun, ./openconnect-tun, ./dump, ./cisco-dump, ./vpn-core)
+  --purge-builds    Remove repo-local built binaries (./vless-tun, ./openconnect-tun, ./dump, ./cisco-dump, ./vpn-core, ./vpn-auth)
   --dry-run         Print actions without deleting anything
   -h, --help        Show this help
 EOF

@@ -77,6 +77,7 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
 - `openconnect-tun stop`: stop the active OpenConnect process cleanly
 - `dump start|status|stop|inspect`: canonical packet-dump workflow for tunnel-aware VPN diagnostics; `cisco-dump` remains as a compatibility alias
+- `scripts/setup.sh`: install the shipped toolchain end-to-end, including `vpn-auth` and its TOTP prerequisite path for aggregate OpenConnect auth
 
 ## Non-Goals For This Iteration
 
