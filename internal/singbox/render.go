@@ -296,34 +296,23 @@ func baseRouteRules(mode string) []any {
 }
 
 func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS) ([]any, error) {
-	switch cfg.NetworkMode() {
-	case config.RenderModeTun:
-		inbound := map[string]any{
-			"type":           "tun",
-			"tag":            "tun-in",
-			"interface_name": cfg.TunInterfaceName(),
-			"address":        cfg.TunAddresses(),
-			"auto_route":     true,
-			"strict_route":   true,
-			"mtu":            1400,
-		}
-		if overlayDNS != nil && len(overlayDNS.RouteExcludes) > 0 {
-			inbound["route_exclude_address"] = overlayDNS.RouteExcludes
-		}
-		return []any{inbound}, nil
-	case config.RenderModeSystemProxy:
-		return []any{
-			map[string]any{
-				"type":             "mixed",
-				"tag":              "mixed-in",
-				"listen":           cfg.SystemProxyListenAddress(),
-				"listen_port":      cfg.SystemProxyListenPort(),
-				"set_system_proxy": true,
-			},
-		}, nil
-	default:
+	if cfg.NetworkMode() != config.RenderModeTun {
 		return nil, fmt.Errorf("unsupported render mode %q", cfg.NetworkMode())
 	}
+
+	inbound := map[string]any{
+		"type":           "tun",
+		"tag":            "tun-in",
+		"interface_name": cfg.TunInterfaceName(),
+		"address":        cfg.TunAddresses(),
+		"auto_route":     true,
+		"strict_route":   true,
+		"mtu":            1400,
+	}
+	if overlayDNS != nil && len(overlayDNS.RouteExcludes) > 0 {
+		inbound["route_exclude_address"] = overlayDNS.RouteExcludes
+	}
+	return []any{inbound}, nil
 }
 
 func Write(path string, data []byte) error {

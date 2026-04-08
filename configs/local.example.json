@@ -1,31 +1,39 @@
 {
-  "subscription_url": "https://key.vpn.dance/connect?key=REPLACE_ME",
-  "selected_profile": "",
   "cache_dir": ".cache/vpn-config",
-  "render": {
-    "mode": "system_proxy",
-    "output_path": "configs/generated/dancevpn-sing-box.json",
-    "interface_name": "utun233",
-    "tun_addresses": [
-      "172.19.0.1/30",
-      "fdfe:dcba:9876::1/126"
-    ],
-    "proxy_listen_address": "127.0.0.1",
-    "proxy_listen_port": 2080,
-    "log_level": "info",
-    "privileged_launch": {
-      "mode": "auto",
-      "label": "works.relux.vless-tun",
-      "plist_path": "/Library/LaunchDaemons/works.relux.vless-tun.plist"
-    },
+  "source": {
+    "mode": "proxy",
+    "url": "https://key.vpn.dance/connect?key=REPLACE_ME"
+  },
+  "default": {
+    "profile_selector": ""
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {
+      "interface_name": "utun233",
+      "addresses": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ]
+    }
+  },
+  "routing": {
     "bypass_suffixes": [
       ".ru",
-      ".xn--p1ai"
-    ],
-    "proxy_dns": {
+      ".рф"
+    ]
+  },
+  "dns": {
+    "proxy_resolver": {
       "address": "1.1.1.1",
       "port": 853,
       "tls_server_name": "cloudflare-dns.com"
     }
+  },
+  "logging": {
+    "level": "info"
+  },
+  "artifacts": {
+    "singbox_config_path": "configs/generated/dancevpn-sing-box.json"
   }
 }

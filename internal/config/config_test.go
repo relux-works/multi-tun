@@ -107,10 +107,6 @@ func TestLoadPreferredSchemaUsesPreferredFields(t *testing.T) {
     "tun": {
       "interface_name": "utun233",
       "addresses": ["172.19.0.1/30"]
-    },
-    "system_proxy": {
-      "listen_address": "127.0.0.1",
-      "listen_port": 2080
     }
   },
   "routing": {
@@ -184,5 +180,16 @@ func TestSetupWritesPreferredFields(t *testing.T) {
 	}
 	if got, want := loaded.NetworkMode(), RenderModeTun; got != want {
 		t.Fatalf("NetworkMode() = %q, want %q", got, want)
+	}
+}
+
+func TestValidateRejectsLegacySystemProxyMode(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Network.Mode = "system_proxy"
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() returned nil error")
 	}
 }

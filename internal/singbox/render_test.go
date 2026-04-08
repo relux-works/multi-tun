@@ -65,6 +65,19 @@ func TestRender(t *testing.T) {
 	if _, ok := route["default_domain_resolver"]; !ok {
 		t.Fatalf("route.default_domain_resolver missing from %#v", route)
 	}
+
+	inbounds, ok := root["inbounds"].([]any)
+	if !ok || len(inbounds) != 1 {
+		t.Fatalf("inbounds = %#v, want 1 entry", root["inbounds"])
+	}
+
+	tunInbound, ok := inbounds[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tun inbound shape = %#v", inbounds[0])
+	}
+	if got, want := tunInbound["type"], "tun"; got != want {
+		t.Fatalf("tun inbound type = %#v, want %q", got, want)
+	}
 }
 
 func TestRenderWithOverlayDNSMakesBypassesWinBeforeOverlayDNS(t *testing.T) {
@@ -218,105 +231,4 @@ func containsAnyString(items []any, want string) bool {
 		}
 	}
 	return false
-}
-
-func TestRenderSystemProxyMode(t *testing.T) {
-	t.Parallel()
-
-	raw, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "dancevpn.subscription.plain.txt"))
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-
-	profiles, err := subscription.ParseProfiles(string(raw))
-	if err != nil {
-		t.Fatalf("ParseProfiles returned error: %v", err)
-	}
-
-	cfg := config.Default()
-	cfg.Network.Mode = config.RenderModeSystemProxy
-	cfg.Routing.BypassSuffixes = nil
-
-	data, err := Render(cfg, profiles[0])
-	if err != nil {
-		t.Fatalf("Render returned error: %v", err)
-	}
-
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		t.Fatalf("json.Unmarshal returned error: %v", err)
-	}
-
-	inbounds := root["inbounds"].([]any)
-	inbound := inbounds[0].(map[string]any)
-	if got, want := inbound["type"], "mixed"; got != want {
-		t.Fatalf("inbound.type = %#v, want %q", got, want)
-	}
-	if got, want := inbound["set_system_proxy"], true; got != want {
-		t.Fatalf("inbound.set_system_proxy = %#v, want %v", got, want)
-	}
-
-	route := root["route"].(map[string]any)
-	rules := route["rules"].([]any)
-	for _, rawRule := range rules {
-		rule := rawRule.(map[string]any)
-		if _, ok := rule["protocol"]; ok {
-			t.Fatalf("unexpected protocol rule in system proxy mode: %#v", rule)
-		}
-	}
-}
-
-func TestRenderSystemProxyModeWithBypasses(t *testing.T) {
-	t.Parallel()
-
-	raw, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "dancevpn.subscription.plain.txt"))
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-
-	profiles, err := subscription.ParseProfiles(string(raw))
-	if err != nil {
-		t.Fatalf("ParseProfiles returned error: %v", err)
-	}
-
-	cfg := config.Default()
-	cfg.Network.Mode = config.RenderModeSystemProxy
-	cfg.Routing.BypassSuffixes = []string{".ru", ".xn--p1ai"}
-
-	data, err := Render(cfg, profiles[0])
-	if err != nil {
-		t.Fatalf("Render returned error: %v", err)
-	}
-
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		t.Fatalf("json.Unmarshal returned error: %v", err)
-	}
-
-	dns := root["dns"].(map[string]any)
-	dnsRules := dns["rules"].([]any)
-	if len(dnsRules) != 1 {
-		t.Fatalf("expected only proxy dns rule in system proxy mode, got %#v", dnsRules)
-	}
-
-	dnsServers := dns["servers"].([]any)
-	if len(dnsServers) != 2 {
-		t.Fatalf("expected local + proxy dns servers in system proxy mode, got %#v", dnsServers)
-	}
-
-	route := root["route"].(map[string]any)
-	ruleSet := route["rule_set"].([]any)
-	if len(ruleSet) != 2 {
-		t.Fatalf("expected proxy-exceptions + direct bypass rule_set, got %#v", ruleSet)
-	}
-
-	firstRuleSet := ruleSet[0].(map[string]any)
-	if got, want := firstRuleSet["tag"], "proxy-exceptions"; got != want {
-		t.Fatalf("rule_set[0].tag = %#v, want %q", got, want)
-	}
-
-	secondRuleSet := ruleSet[1].(map[string]any)
-	if got, want := secondRuleSet["tag"], "ru-direct"; got != want {
-		t.Fatalf("rule_set[1].tag = %#v, want %q", got, want)
-	}
 }

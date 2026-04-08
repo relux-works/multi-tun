@@ -99,7 +99,6 @@ func TestResolveLaunchMode(t *testing.T) {
 		launchMode string
 		want       string
 	}{
-		{name: "system proxy defaults direct", renderMode: config.RenderModeSystemProxy, launchMode: config.LaunchModeAuto, want: config.LaunchModeDirect},
 		{name: "tun explicit launchd maps to helper", renderMode: config.RenderModeTun, launchMode: config.LaunchModeLaunchd, want: config.LaunchModeHelper},
 		{name: "tun explicit sudo", renderMode: config.RenderModeTun, launchMode: config.LaunchModeSudo, want: config.LaunchModeSudo},
 	}
@@ -117,6 +116,14 @@ func TestResolveLaunchMode(t *testing.T) {
 				t.Fatalf("resolveLaunchMode() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResolveLaunchModeRejectsUnsupportedRenderMode(t *testing.T) {
+	t.Parallel()
+
+	if _, err := resolveLaunchMode("system_proxy", config.PrivilegedLaunchConfig{Mode: config.LaunchModeAuto}); err == nil {
+		t.Fatal("resolveLaunchMode() error = nil, want non-nil")
 	}
 }
 

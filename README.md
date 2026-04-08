@@ -14,7 +14,7 @@ Current scope:
 - decode plaintext or base64 subscription payloads
 - parse `vless://` profiles, including Reality + gRPC variants
 - cache the latest subscription snapshot locally
-- render a `sing-box` config either as a TUN session or as a macOS-friendly system-proxy session, with optional suffix-based direct bypasses
+- render a `sing-box` TUN config with optional suffix-based direct bypasses
 
 This repo also keeps live notes from previous VPN investigations:
 
@@ -256,8 +256,6 @@ The currently active session pointer is stored at:
 
 `start` is the command that should actually bring the tunnel up. `status` does not connect anything by itself.
 
-In `network.mode=system_proxy`, `start` starts a local `mixed` inbound and lets `sing-box` manage macOS system proxy settings instead of creating `utun`.
-
 In `network.mode=tun`, `start` resolves the launch backend automatically. If the shared `vpn-core` daemon is installed, that is the preferred happy-path backend. An explicit `launch` block is only needed as an override for fallback or debugging:
 
 - `auto`: resolve to shared `vpn-core` when it is installed, otherwise `sudo` for TUN as a regular user and `direct` when already root
@@ -273,7 +271,6 @@ Reloads the local config, refreshes the subscription cache by default, rerenders
 This is the command to use after changing:
 
 - `default.profile_selector`
-- `network.mode`
 - `routing.bypass_suffixes`
 - `dns.proxy_resolver`
 - `artifacts.singbox_config_path`
@@ -285,7 +282,7 @@ Shows the current local view of the tunnel state:
 
 - whether a recorded `sing-box` session is active, stale, or absent
 - the current session ID, PID, launch mode, start timestamp, and log file path
-- whether the configured TUN interface exists, or which proxy listener is active in `system_proxy` mode
+- whether the configured TUN interface exists
 - whether the rendered config file exists
 - which profile is selected from cache
 - which bypass suffixes are configured
@@ -305,13 +302,11 @@ Stops the currently recorded `sing-box` session using `SIGTERM` by default. Use 
 
 Selects a cached profile and writes a sing-box JSON config with:
 
-- either a TUN inbound or a `mixed` inbound with `set_system_proxy`
+- a TUN inbound
 - proxy detour for the rest of the traffic
 - optional direct DNS and direct outbound for configured suffix bypasses
 
 If `routing.bypass_suffixes` is empty, the renderer produces a simple full-tunnel config with no suffix-based bypasses.
-
-If `network.mode=system_proxy`, the renderer produces a non-TUN config intended for macOS bring-up without root or Network Extension privileges.
 
 ## Local Config
 
@@ -342,10 +337,6 @@ Example config:
         "172.19.0.1/30",
         "fdfe:dcba:9876::1/126"
       ]
-    },
-    "system_proxy": {
-      "listen_address": "127.0.0.1",
-      "listen_port": 2080
     }
   },
   "routing": {
@@ -376,11 +367,9 @@ Field reference:
 - `source.mode`: `proxy` or `direct`
 - `source.url`: the actual source address; in `proxy` mode this is an HTTP endpoint that resolves to one or more `vless://` entries, and in `direct` mode this is a literal `vless://...` URI
 - `default.profile_selector`: optional selector by exact id, exact name, or substring when the source resolves to multiple profiles
-- `network.mode`: `system_proxy` or `tun`
+- `network.mode`: currently `tun`
 - `network.tun.interface_name`: TUN interface name for `tun` mode
 - `network.tun.addresses`: TUN addresses for `tun` mode
-- `network.system_proxy.listen_address`: local listen address for `system_proxy` mode
-- `network.system_proxy.listen_port`: local listen port for `system_proxy` mode
 - `routing.bypass_suffixes`: domains that should go `direct`; set `[]` for full-tunnel bring-up
 - `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists
 - `dns.proxy_resolver`: upstream DNS endpoint for proxied traffic
@@ -433,7 +422,7 @@ go build -o cisco-dump ./cmd/cisco-dump
 - `reconnect` is the "apply latest config" path: it rereads local config, refreshes the subscription by default, rerenders, and replaces the current session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
-- `vless-tun setup` now scaffolds `network.mode=tun` by default, with `system_proxy` still available as an explicit opt-in when you want a lighter non-TUN session.
+- `system_proxy` render mode has been removed; legacy configs should use `network.mode=tun` and drop any old `network.system_proxy` block.
 - Generated config now includes `route.default_domain_resolver`, which `sing-box 1.13.x` expects as part of the DNS resolver migration path.
 - Every `start` gets its own timestamped log file so later debugging has a stable artifact even if the next session behaves differently.
 - The bypass rule is intentionally domain-suffix based because the original user requirement was `*.ru`. If later you want IP or community rulesets, extend the renderer rather than hardcoding provider-specific blobs.

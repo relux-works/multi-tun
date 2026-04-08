@@ -12,7 +12,7 @@ Build local CLIs and agent guidance that can:
 
 1. manage a live DenseVPN subscription URL
 2. refresh and parse `vless://` profiles from that URL
-3. render a `sing-box` client config either as a simple full tunnel, a macOS system-proxy session, or a deterministic `.ru` bypass
+3. render a `sing-box` client config either as a simple full tunnel or a deterministic `.ru` bypass
 4. inspect Cisco AnyConnect / ASA profile metadata and CLI-visible profile lists for future OpenConnect automation
 5. fit the usual skill-style repo layout with board, setup script, docs, and agent guidance
 
@@ -38,7 +38,7 @@ Build local CLIs and agent guidance that can:
 ### sing-box Rendering
 
 - Produce JSON config compatible with the current sing-box docs.
-- Generate either a TUN inbound or a non-TUN macOS system-proxy inbound.
+- Generate a TUN inbound.
 - Generate a proxy outbound from the parsed VLESS profile.
 - Generate `direct` and `block` outbounds.
 - Enable DNS hijack.
@@ -47,9 +47,7 @@ Build local CLIs and agent guidance that can:
   - split DNS/direct routing when suffix bypasses are configured
     - `.ru` and `.xn--p1ai` use direct DNS and direct outbound
     - everything else uses proxy DNS and proxy outbound
-- Support two transport styles:
-  - `tun` as the default happy-path transport
-  - `system_proxy` as an explicit alternative when a non-TUN macOS session is preferred
+- Support `tun` as the only transport style.
 - For `tun` mode on macOS, support privileged launch strategies:
   - `sudo` / direct process execution
   - shared `vpn-core` daemon management for persistent real-TUN sessions
