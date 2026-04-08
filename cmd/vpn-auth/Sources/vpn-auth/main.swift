@@ -213,7 +213,7 @@ func generateTOTP(secret: String) -> String? {
 
 /// Keycloak login form: fill username when visible, always fill password, submit.
 func loginFormScript(username: String, password: String) -> String {
-    // Keycloak Corp uses Vue.js corp-input components.
+    // Some Keycloak SSO pages use Vue.js custom input components.
     // We need to set the underlying <input> values and dispatch events for Vue reactivity.
     return """
     (function() {

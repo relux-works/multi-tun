@@ -4,6 +4,8 @@ Updated: 2026-04-08
 
 This note documents a concrete macOS case study from `v2RayTun` and explains why this repository now treats direct TUN as the only supported path for `vless-tun`.
 
+Research trigger: this local audit was started after reading [runetfreedom's Habr article on localhost proxy exposure in VLESS clients](https://habr.com/ru/articles/1020080/). The findings here are independent repo-local follow-up work, not a repost of the original article.
+
 Related material:
 
 - [Desktop audit of `v2RayTun` Apple runtime](../v2raytun-apple-audit/README.md)

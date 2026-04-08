@@ -1,8 +1,10 @@
-# Corp AnyConnect VPN — Split Tunnel Bypass
+# Example AnyConnect VPN — Split Tunnel Bypass
+
+All hostnames, domains, profile names, account names, and IPs in this note are anonymized placeholders.
 
 ## Problem
 
-Corp corporate VPN uses Cisco AnyConnect (Secure Client 5.x) with server-pushed profiles from ASA (Adaptive Security Appliance). The "Outside extended" profile enforces **full tunnel** — all traffic, including personal browsing, streaming, and non-work services, is routed through the corporate VPN.
+This example corporate VPN uses Cisco AnyConnect (Secure Client 5.x) with server-pushed profiles from ASA (Adaptive Security Appliance). The "Outside extended" profile enforces **full tunnel** — all traffic, including personal browsing, streaming, and non-work services, is routed through the corporate VPN.
 
 ### Why it can't be fixed on the client side (with AnyConnect)
 
@@ -50,7 +52,7 @@ Replace the official Cisco AnyConnect client with **openconnect** + **vpn-slice*
 **Traffic flow after connect:**
 
 ```
-*.corp.example, 10.x.x.x, 198.51.100.x.x  ──→  utun (VPN tunnel)  ──→  Corp corporate
+*.corp.example, 10.x.x.x, 198.51.100.x  ──→  utun (VPN tunnel)  ──→  corporate network
 everything else                    ──→  en0 (Wi-Fi/LAN)    ──→  internet direct
 ```
 
@@ -73,7 +75,7 @@ Resolved IPs (as of 2026-03-23):
 
 Inside servers (`*.region.corp.example`) don't resolve from external DNS — they require VPN to be already connected. Not used in this setup.
 
-### Corp network ranges (routed through VPN)
+### Example network ranges (routed through VPN)
 
 #### RFC1918 — corporate internal
 
@@ -83,15 +85,13 @@ Inside servers (`*.region.corp.example`) don't resolve from external DNS — the
 | `172.16.0.0/12` | Secondary internal ranges |
 | `192.168.0.0/16` | Lab/dev networks (may overlap with home LAN — see caveats) |
 
-#### Corp public ranges
+#### Public ranges
 
 | Range | WHOIS netname | Known services |
 |-------|---------------|----------------|
-| `198.51.100.0/24` | CORPNET / CORPNET2 | Jira (`198.51.100.127`), Confluence (`198.51.100.128`), GitLab |
-| `192.0.2.0/24` | RU-MTU-20081003 | VPN infrastructure |
-| `203.0.113.0/24` | — | `corp.example` frontend (`203.0.113.27`) |
-| `198.18.0.0/15` | — | Corp services |
-| `203.0.113.128/25` | — | Corp datacenter |
+| `198.51.100.0/24` | EXAMPLE-CORP-EDGE | Jira (`198.51.100.127`), Confluence (`198.51.100.128`), GitLab |
+| `192.0.2.0/24` | EXAMPLE-CORP-VPN | VPN infrastructure |
+| `203.0.113.0/24` | EXAMPLE-CORP-WEB | `corp.example` frontend (`203.0.113.27`) |
 
 #### DNS domains (resolved via VPN DNS)
 
@@ -114,7 +114,7 @@ corp-vpn msk          # connect via MSK Outside
 corp-vpn dv           # connect via DV Outside
 corp-vpn disconnect   # disconnect
 corp-vpn status       # show connection status & routes
-corp-vpn routes       # show configured Corp subnets
+corp-vpn routes       # show configured corporate subnets
 corp-vpn help         # usage info
 ```
 
@@ -149,7 +149,7 @@ corp-vpn
 
 1. `openconnect` establishes tunnel to `vpn-gw2.corp.example/outside` (Ural)
 2. `vpn-slice` is called instead of default vpnc-script
-3. vpn-slice adds routes **only** for Corp subnets listed above
+3. vpn-slice adds routes **only** for the example corporate subnets listed above
 4. vpn-slice configures DNS for `*.corp.example` domains to use VPN DNS server
 5. Default route stays on `en0` (Wi-Fi) — internet goes direct
 
@@ -185,10 +185,10 @@ sudo launchctl load /Library/LaunchDaemons/com.cisco.secureclient.vpnagentd.plis
 
 If your home network uses `192.168.x.x` (most do), routing this range through VPN will break local network access. Options:
 
-- **Remove `192.168.0.0/16`** from `CORP_ROUTES` in the script — unless you need access to Corp resources in this range
-- Or use a more specific route like `192.168.100.0/24` if you know the exact Corp subnet
+- **Remove `192.168.0.0/16`** from `CORP_ROUTES` in the script — unless you need access to corporate resources in this range
+- Or use a more specific route like `192.168.100.0/24` if you know the exact corporate subnet
 
-### 3. Missing Corp service after connect
+### 3. Missing corporate service after connect
 
 If a corporate service doesn't load:
 
@@ -236,7 +236,7 @@ Source files: `~/Downloads/cisco-anyconnect-profiles/`
 
 | File | Description |
 |------|-------------|
-| `profiles/cp_corp_inside_3.xml` | Main profile, 9 server entries (MSK/Ural/DV × Base/Outside/Inside), cert matching (Corp VPN CA) |
+| `profiles/cp_corp_inside_3.xml` | Main profile, 9 server entries (MSK/Ural/DV × Base/Outside/Inside), cert matching (example VPN CA) |
 | `profiles/cp_corp_outside.xml` | Outside-only profile, no server list, just client settings |
 | `AnyConnectLocalPolicy.xml` | Local policy for AnyConnect 4.x (`BypassDownloader=false`) |
 | `AnyConnectLocalPolicy_secureclient.xml` | Local policy for Secure Client 5.x |
