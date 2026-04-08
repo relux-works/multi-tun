@@ -14,8 +14,7 @@ const (
 	SourceModeProxy  = "proxy"
 	SourceModeDirect = "direct"
 
-	RenderModeTun         = "tun"
-	RenderModeSystemProxy = "system_proxy"
+	RenderModeTun = "tun"
 
 	LaunchModeAuto    = "auto"
 	LaunchModeSudo    = "sudo"
@@ -59,19 +58,13 @@ type DefaultConfig struct {
 }
 
 type NetworkConfig struct {
-	Mode        string            `json:"mode,omitempty"`
-	TUN         TUNConfig         `json:"tun,omitempty"`
-	SystemProxy SystemProxyConfig `json:"system_proxy,omitempty"`
+	Mode string    `json:"mode,omitempty"`
+	TUN  TUNConfig `json:"tun,omitempty"`
 }
 
 type TUNConfig struct {
 	InterfaceName string   `json:"interface_name,omitempty"`
 	Addresses     []string `json:"addresses,omitempty"`
-}
-
-type SystemProxyConfig struct {
-	ListenAddress string `json:"listen_address,omitempty"`
-	ListenPort    int    `json:"listen_port,omitempty"`
 }
 
 type RoutingConfig struct {
@@ -98,17 +91,15 @@ type LaunchConfig struct {
 }
 
 type RenderConfig struct {
-	Mode               string                  `json:"mode,omitempty"`
-	OutputPath         string                  `json:"output_path,omitempty"`
-	InterfaceName      string                  `json:"interface_name,omitempty"`
-	TunAddresses       []string                `json:"tun_addresses,omitempty"`
-	ProxyListenAddress string                  `json:"proxy_listen_address,omitempty"`
-	ProxyListenPort    int                     `json:"proxy_listen_port,omitempty"`
-	LogLevel           string                  `json:"log_level,omitempty"`
-	BypassSuffixes     []string                `json:"bypass_suffixes,omitempty"`
-	BypassExcludes     []string                `json:"bypass_exclude_suffixes,omitempty"`
-	ProxyDNS           ProxyDNSConfig          `json:"proxy_dns,omitempty"`
-	PrivilegedLaunch   *PrivilegedLaunchConfig `json:"privileged_launch,omitempty"`
+	Mode             string                  `json:"mode,omitempty"`
+	OutputPath       string                  `json:"output_path,omitempty"`
+	InterfaceName    string                  `json:"interface_name,omitempty"`
+	TunAddresses     []string                `json:"tun_addresses,omitempty"`
+	LogLevel         string                  `json:"log_level,omitempty"`
+	BypassSuffixes   []string                `json:"bypass_suffixes,omitempty"`
+	BypassExcludes   []string                `json:"bypass_exclude_suffixes,omitempty"`
+	ProxyDNS         ProxyDNSConfig          `json:"proxy_dns,omitempty"`
+	PrivilegedLaunch *PrivilegedLaunchConfig `json:"privileged_launch,omitempty"`
 }
 
 type ProxyDNSConfig struct {
@@ -149,10 +140,6 @@ func DefaultForPath(path string) ProjectConfig {
 					"172.19.0.1/30",
 					"fdfe:dcba:9876::1/126",
 				},
-			},
-			SystemProxy: SystemProxyConfig{
-				ListenAddress: "127.0.0.1",
-				ListenPort:    2080,
 			},
 		},
 		Routing: RoutingConfig{
@@ -326,15 +313,8 @@ func (c ProjectConfig) Validate() error {
 		if len(c.TunAddresses()) == 0 {
 			return errors.New("network.tun.addresses is required in tun mode")
 		}
-	case RenderModeSystemProxy:
-		if c.SystemProxyListenAddress() == "" {
-			return errors.New("network.system_proxy.listen_address is required in system_proxy mode")
-		}
-		if c.SystemProxyListenPort() <= 0 {
-			return errors.New("network.system_proxy.listen_port must be positive in system_proxy mode")
-		}
 	default:
-		return errors.New("network.mode must be one of: tun, system_proxy")
+		return errors.New("network.mode must be tun")
 	}
 
 	switch c.LaunchOrDefault().Mode {
@@ -406,20 +386,6 @@ func (c ProjectConfig) TunAddresses() []string {
 		return cloneStrings(c.Render.TunAddresses)
 	}
 	return nil
-}
-
-func (c ProjectConfig) SystemProxyListenAddress() string {
-	return firstNonEmpty(strings.TrimSpace(c.Network.SystemProxy.ListenAddress), c.legacyRenderProxyListenAddress())
-}
-
-func (c ProjectConfig) SystemProxyListenPort() int {
-	if c.Network.SystemProxy.ListenPort > 0 {
-		return c.Network.SystemProxy.ListenPort
-	}
-	if c.Render != nil {
-		return c.Render.ProxyListenPort
-	}
-	return 0
 }
 
 func (c ProjectConfig) LogLevel() string {
@@ -617,13 +583,6 @@ func (c ProjectConfig) legacyRenderInterfaceName() string {
 		return ""
 	}
 	return strings.TrimSpace(c.Render.InterfaceName)
-}
-
-func (c ProjectConfig) legacyRenderProxyListenAddress() string {
-	if c.Render == nil {
-		return ""
-	}
-	return strings.TrimSpace(c.Render.ProxyListenAddress)
 }
 
 func (c ProjectConfig) legacyRenderLogLevel() string {

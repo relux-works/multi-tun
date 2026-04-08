@@ -41,7 +41,7 @@ func (a *App) runStatus(args []string) int {
 		interfacePresent, interfaceAddrs, interfaceErr = interfaceState(cfg.TunInterfaceName())
 	}
 
-	connection := deriveConnectionStatus(mode, sessionAlive, interfacePresent)
+	connection := deriveConnectionStatus(sessionAlive, interfacePresent)
 	renderedPresent := fileExists(cfg.SingboxConfigPath())
 
 	fmt.Fprintf(a.stdout, "connection: %s\n", connection)
@@ -81,8 +81,7 @@ func (a *App) runStatus(args []string) int {
 			}
 		}
 	}
-	switch mode {
-	case config.RenderModeTun:
+	if mode == config.RenderModeTun {
 		fmt.Fprintf(a.stdout, "interface: %s (%s)\n", cfg.TunInterfaceName(), stateLabel(interfacePresent))
 		if interfaceErr == nil && len(interfaceAddrs) > 0 {
 			fmt.Fprintf(a.stdout, "interface_addrs: %s\n", strings.Join(interfaceAddrs, ", "))
@@ -90,8 +89,6 @@ func (a *App) runStatus(args []string) int {
 		if interfaceErr != nil && !errors.Is(interfaceErr, errInterfaceNotFound) {
 			fmt.Fprintf(a.stdout, "interface_error: %v\n", interfaceErr)
 		}
-	case config.RenderModeSystemProxy:
-		fmt.Fprintf(a.stdout, "proxy_listener: %s:%d\n", cfg.SystemProxyListenAddress(), cfg.SystemProxyListenPort())
 	}
 	fmt.Fprintf(a.stdout, "rendered_config: %s (%s)\n", cfg.SingboxConfigPath(), stateLabel(renderedPresent))
 	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.BypassSuffixes()))
@@ -143,13 +140,7 @@ func currentSessionState(cacheDir string, launch config.PrivilegedLaunchConfig) 
 	return &current, "stale", false, nil
 }
 
-func deriveConnectionStatus(mode string, sessionAlive bool, interfacePresent bool) string {
-	if mode == config.RenderModeSystemProxy {
-		if sessionAlive {
-			return "up"
-		}
-		return "down"
-	}
+func deriveConnectionStatus(sessionAlive bool, interfacePresent bool) string {
 	switch {
 	case sessionAlive && interfacePresent:
 		return "up"

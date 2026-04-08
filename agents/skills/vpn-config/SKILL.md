@@ -3,8 +3,8 @@ name: vpn-config
 description: >
   Manage DenseVPN / DanceVPN VLESS subscriptions, scaffold tunnel configs, render sing-box
   configs, and control local macOS VPN sessions through `vless-tun` and `openconnect-tun`.
-  Supports setup/refresh/list/render flows, real TUN or system-proxy mode, shared `vpn-core`
-  bring-up, suffix bypasses, and runtime diagnostics.
+  Supports setup/refresh/list/render flows, real TUN mode, shared `vpn-core` bring-up,
+  suffix bypasses, and runtime diagnostics.
 triggers:
   - vpn-config
   - dancevpn
@@ -38,7 +38,7 @@ When the repo board is involved, pair this skill with `project-management`: `mul
 - initialize local config and keep the live subscription URL in `~/.config/vless-tun/config.json`
 - scaffold `vless-tun` and `openconnect-tun` configs through dedicated `setup` commands
 - refresh, parse, and inspect cached `vless://` profiles from DenseVPN / DanceVPN subscriptions
-- render `sing-box` configs for `system_proxy` or real `tun` mode
+- render `sing-box` configs for real `tun` mode
 - manage privileged macOS TUN bring-up with the shared `vpn-core` helper backend by default, keeping `launch` as an override
 - control session lifecycle with `run`, `reconnect`, `status`, `diagnose`, and `stop`
 - apply suffix-based direct bypasses such as `.ru` / `.рф`
@@ -71,7 +71,7 @@ openconnect-tun stop
 3. Inspect available profiles if the subscription contains more than one endpoint.
 4. Use `run` when you need an actual background VLESS session.
 5. Use `reconnect` after changing bypasses, profile selection, or other render-time config so the live VLESS session picks up the new state.
-6. For `vless-tun`, prefer `network.mode=tun` as the default happy path; use `network.mode=system_proxy` only when you explicitly want a lighter non-TUN macOS session.
+6. For `vless-tun`, use `network.mode=tun`; `system_proxy` is no longer a supported render mode in this repo.
 7. `openconnect-tun setup` seeds full-mode config with no bypasses plus placeholder keychain accounts; the caller should review the generated config path before first connect.
 8. `./scripts/setup.sh` is the supported install path for the full `multi-tun` toolchain. It ensures `sing-box` for `vless-tun`, builds and installs the bundled `vpn-auth` helper, and installs its `totp-cli` prerequisite, so both VLESS runtime and aggregate OpenConnect auth should be treated as shipped capabilities, not manual prerequisites.
 9. Use `status`, `diagnose`, and the per-session log file to debug behavior.

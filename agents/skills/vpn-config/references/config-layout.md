@@ -22,10 +22,6 @@
         "172.19.0.1/30",
         "fdfe:dcba:9876::1/126"
       ]
-    },
-    "system_proxy": {
-      "listen_address": "127.0.0.1",
-      "listen_port": 2080
     }
   },
   "routing": {
@@ -55,7 +51,7 @@ Notes:
 - `source.mode=proxy` means `source.url` is fetched over HTTP and should resolve to one or more `vless://` entries.
 - `source.mode=direct` means `source.url` is already a literal `vless://...` URI.
 - `default.profile_selector` is optional. Empty means "first matching profile".
-- `network.mode=tun` is the default scaffolded mode; switch to `system_proxy` only when you explicitly want a lighter non-TUN macOS session.
+- `network.mode=tun` is the supported scaffolded mode.
 - `reconnect` should be used after changing `network.mode`, `default.profile_selector`, `routing.bypass_suffixes`, `dns.proxy_resolver`, or other render-time settings.
 - `cache_dir` stores refresh snapshots, session logs, and the current runtime pointer.
 - `artifacts.singbox_config_path` should normally stay under `~/.config/vless-tun/generated/`.

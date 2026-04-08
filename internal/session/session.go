@@ -554,22 +554,13 @@ func stopStartedSession(current CurrentSession) error {
 }
 
 func resolveLaunchMode(renderMode string, launch config.PrivilegedLaunchConfig) (string, error) {
+	if renderMode != config.RenderModeTun {
+		return "", fmt.Errorf("unsupported render mode %q", renderMode)
+	}
+
 	mode := strings.TrimSpace(launch.Mode)
 	if mode == "" {
 		mode = config.LaunchModeAuto
-	}
-
-	if renderMode != config.RenderModeTun {
-		switch mode {
-		case config.LaunchModeAuto:
-			return config.LaunchModeDirect, nil
-		case config.LaunchModeDirect, config.LaunchModeSudo, config.LaunchModeHelper:
-			return mode, nil
-		case config.LaunchModeLaunchd:
-			return "", fmt.Errorf("render.privileged_launch.mode=launchd is only supported in tun mode")
-		default:
-			return "", fmt.Errorf("unsupported launch mode %q", mode)
-		}
 	}
 
 	switch mode {
@@ -585,7 +576,7 @@ func resolveLaunchMode(renderMode string, launch config.PrivilegedLaunchConfig) 
 		return mode, nil
 	case config.LaunchModeLaunchd:
 		if runtime.GOOS != "darwin" {
-			return "", fmt.Errorf("render.privileged_launch.mode=launchd is only supported on macOS")
+			return "", fmt.Errorf("launch.mode=launchd is only supported on macOS")
 		}
 		return config.LaunchModeHelper, nil
 	default:
