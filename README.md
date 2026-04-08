@@ -423,6 +423,7 @@ go build -o cisco-dump ./cmd/cisco-dump
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
 - `system_proxy` render mode has been removed; legacy configs should use `network.mode=tun` and drop any old `network.system_proxy` block.
+- Design note: [Why `vless-tun` stays TUN-only](artifacts/v2raytun-localhost-vs-vless-tun/README.md)
 - Generated config now includes `route.default_domain_resolver`, which `sing-box 1.13.x` expects as part of the DNS resolver migration path.
 - Every `start` gets its own timestamped log file so later debugging has a stable artifact even if the next session behaves differently.
 - The bypass rule is intentionally domain-suffix based because the original user requirement was `*.ru`. If later you want IP or community rulesets, extend the renderer rather than hardcoding provider-specific blobs.
