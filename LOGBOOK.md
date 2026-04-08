@@ -3,6 +3,16 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-04-08
+
+### 1736 — `v2RayTun` macOS Accepts Unauthenticated Local SOCKS Clients
+- FINDING: installed `v2RayTun` macOS runtime persists a localhost SOCKS inbound on `[::1]:1080` in [current-config.json](/Users/alexis/Library/Group%20Containers/2XZUN9L63Z.com.databridges.privacy.v2RayTun/Configs/current-config.json#L5) and a tun-to-SOCKS bridge to `::1:1080` in [socks-config.yml](/Users/alexis/Library/Group%20Containers/2XZUN9L63Z.com.databridges.privacy.v2RayTun/Configs/socks-config.yml#L1).
+- FINDING: during a live session on 2026-04-08, [logs.txt](/Users/alexis/Library/Group%20Containers/2XZUN9L63Z.com.databridges.privacy.v2RayTun/logs.txt#L1650) recorded `Primary inbound (DEFAULT) -> ::1:1080` and `Starting SOCKS5 tunnel on ::1:1080…`; `lsof` showed `packet-extension-mac` listening on `[::1]:1080`.
+- FINDING: raw SOCKS5 greeting `printf '\x05\x01\x00' | nc -6 -w 2 ::1 1080 | xxd -p` returned `0500`, proving the listener accepted `NO AUTHENTICATION REQUIRED` from an unrelated local shell process.
+- FINDING: `curl --socks5-hostname '[::1]:1080' https://api.ipify.org` returned HTTP `200` and body `144.31.90.46`, proving a second local process could use the active tunnel through the listener without credentials.
+- DECISION: treat `v2RayTun` macOS as a concrete example of the localhost-proxy attack surface discussed in the April 2026 Habr article; this is now a positive contrast case for `vless-tun` after removal of `system_proxy`.
+- SCOPE: full audit captured in [artifacts/v2raytun-apple-audit/README.md](/Users/alexis/src/multi-tun/artifacts/v2raytun-apple-audit/README.md).
+
 ## 2026-04-02
 
 ### 1720 — `vless-tun` Config Remastered Around `source`, `network`, And Provider-Neutral Artifacts
