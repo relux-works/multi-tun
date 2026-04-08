@@ -75,7 +75,7 @@ func TestParseAuthenticateOutput(t *testing.T) {
 }
 
 func TestDestToCIDR(t *testing.T) {
-	if got := destToCIDR("213.87"); got != "198.51.100.0/24" {
+	if got := destToCIDR("198.51.100"); got != "198.51.100.0/24" {
 		t.Fatalf("destToCIDR = %q", got)
 	}
 	if got := destToCIDR("198.51.100.128"); got != "198.51.100.128/32" {

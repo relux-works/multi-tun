@@ -651,6 +651,9 @@ func TestParseRunOptionsUsesServerOverridesResolvedFromDefaultProfile(t *testing
   },
   "servers": {
     "vpn-gw2.corp.example/outside": {
+      "profiles": {
+        "Ural Outside extended": {}
+      },
       "split_include": {
         "vpn_domains": ["server.corp.example"],
         "bypass_suffixes": ["bypass.corp.example"],
@@ -790,7 +793,7 @@ func TestNormalizeDomainSuffixListCollapsesCoveredSuffixes(t *testing.T) {
 	got := normalizeDomainSuffixList([]string{
 		"inside.corp.example",
 		"corp.example",
-		"MSK.Corp.RU",
+		"REGION.CORP.EXAMPLE",
 		"branch.example",
 		".inside.corp.example",
 	})
