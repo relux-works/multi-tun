@@ -12,6 +12,7 @@ OPENCONNECT_CLI_NAME="openconnect-tun"
 DUMP_CLI_NAME="dump"
 CISCO_DUMP_COMPAT_NAME="cisco-dump"
 VPN_CORE_CLI_NAME="vpn-core"
+ANDROID_RELEASE_CLI_NAME="android-release"
 VPN_AUTH_CLI_NAME="vpn-auth"
 VPN_AUTH_PACKAGE_DIR="$PROJECT_ROOT/desktop/cmd/vpn-auth"
 
@@ -234,6 +235,7 @@ VLESS_OUTPUT_PATH="$(build_output_path "$VLESS_CLI_NAME")"
 OPENCONNECT_OUTPUT_PATH="$(build_output_path "$OPENCONNECT_CLI_NAME")"
 DUMP_OUTPUT_PATH="$(build_output_path "$DUMP_CLI_NAME")"
 VPN_CORE_OUTPUT_PATH="$(build_output_path "$VPN_CORE_CLI_NAME")"
+ANDROID_RELEASE_OUTPUT_PATH="$(build_output_path "$ANDROID_RELEASE_CLI_NAME")"
 VPN_AUTH_OUTPUT_PATH="$(build_output_path "$VPN_AUTH_CLI_NAME")"
 if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
   mkdir -p "$RELEASES_DIR"
@@ -246,6 +248,8 @@ echo "Building $DUMP_CLI_NAME binary..."
 go_build_desktop_binary "$DUMP_OUTPUT_PATH" ./desktop/cmd/dump/
 echo "Building $VPN_CORE_CLI_NAME binary..."
 go_build_desktop_binary "$VPN_CORE_OUTPUT_PATH" ./desktop/cmd/vpn-core/
+echo "Building $ANDROID_RELEASE_CLI_NAME binary..."
+go_build_desktop_binary "$ANDROID_RELEASE_OUTPUT_PATH" ./android/ops/cmd/android-release/
 
 if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
   cp "$DUMP_OUTPUT_PATH" "$(build_output_path "$CISCO_DUMP_COMPAT_NAME")"
@@ -255,6 +259,7 @@ if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
   echo "  $DUMP_OUTPUT_PATH"
   echo "  $(build_output_path "$CISCO_DUMP_COMPAT_NAME")"
   echo "  $VPN_CORE_OUTPUT_PATH"
+  echo "  $ANDROID_RELEASE_OUTPUT_PATH"
   echo
   echo "Cross-arch mode intentionally skips:"
   echo "  ~/.local/bin installation"
@@ -280,12 +285,14 @@ ln -sf "$OPENCONNECT_OUTPUT_PATH" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
 ln -sf "$DUMP_OUTPUT_PATH" "$BIN_DIR/$DUMP_CLI_NAME"
 ln -sf "$DUMP_OUTPUT_PATH" "$BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
 ln -sf "$VPN_CORE_OUTPUT_PATH" "$BIN_DIR/$VPN_CORE_CLI_NAME"
+ln -sf "$ANDROID_RELEASE_OUTPUT_PATH" "$BIN_DIR/$ANDROID_RELEASE_CLI_NAME"
 ln -sf "$VPN_AUTH_OUTPUT_PATH" "$BIN_DIR/$VPN_AUTH_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$VLESS_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$OPENCONNECT_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$DUMP_CLI_NAME"
 echo "  Alias  -> $BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
 echo "  Binary -> $BIN_DIR/$VPN_CORE_CLI_NAME"
+echo "  Binary -> $BIN_DIR/$ANDROID_RELEASE_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$VPN_AUTH_CLI_NAME"
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
@@ -312,6 +319,7 @@ echo "  $VLESS_CLI_NAME setup --source-url 'vless://...'"
 echo "  $VLESS_CLI_NAME refresh"
 echo "  $VLESS_CLI_NAME render"
 echo "  $VPN_CORE_CLI_NAME install"
+echo "  $ANDROID_RELEASE_CLI_NAME setup"
 echo "  $OPENCONNECT_CLI_NAME setup --vpn-name 'Corp VPN'"
 echo "  $OPENCONNECT_CLI_NAME inspect-profiles"
 echo "  $DUMP_CLI_NAME start"

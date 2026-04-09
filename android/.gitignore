@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+/keystore.properties
+/keystore/
+/**/*.jks
+/**/*.keystore
+play-service-account.json
+play-service-account.*.json
+*publisher-credentials*.json
+/.scripts/.local/

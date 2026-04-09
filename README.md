@@ -37,12 +37,25 @@ Android real-device smoke currently lives behind the dedicated runner:
 ./scripts/android/run-device-smoke.sh --serial 535a1632
 ./scripts/android/run-device-smoke.sh \
   --serial 535a1632 \
+  --test-class works.relux.vless_tun_app.TunnelHomeEditorStateTest
+./scripts/android/run-device-smoke.sh \
+  --serial 535a1632 \
   --test-class works.relux.vless_tun_app.TunnelEgressSmokeTest \
+  --source-inline-vless-from-desktop-config
+./scripts/android/run-device-suite.sh \
+  --serial 535a1632 \
   --source-inline-vless-from-desktop-config
 ```
 
 That path uses preinstall + direct `adb shell am instrument` instead of `connectedDebugAndroidTest`, which is more reliable on MIUI/Xiaomi devices.
-The live egress loop is now verified on a real Xiaomi device with a separate observer app: direct observer egress was `91.77.167.22 · Russia (RU)`, and after connect it switched to `144.31.90.46 · Finland (FI)`.
+The stable split is:
+
+- `TunnelHomeSmokeTest#tunnelHomeLoads` for cold app launch via `UiAutomator`
+- `TunnelHomeEditorStateTest` for source-url editor/save regression via Compose instrumentation
+- `TunnelConnectSmokeTest` for `VpnService`/TUN bring-up
+- `TunnelEgressSmokeTest` for real cross-UID egress change through the observer app
+
+The live egress loop is verified on a real Xiaomi device with a separate observer app: direct observer egress was `91.77.167.22 · Russia (RU)`, and after connect it switched to `144.31.90.46 · Finland (FI)`.
 
 ## Quick Start
 
@@ -70,6 +83,14 @@ dump status
 ```
 
 `./scripts/setup.sh` installs the shipped desktop toolchain end-to-end: it ensures the runtime prerequisites such as `sing-box`, builds the bundled `desktop/cmd/vpn-auth` Swift helper, and links the resulting binaries into `~/.local/bin`.
+
+That installed toolchain now also includes `android-release`, the local Go helper for:
+
+- seeding Android release-signing metadata
+- generating the Play upload keystore
+- building a signed `app-release.aab` for Play test tracks
+- emitting `native-debug-symbols.zip` and ProGuard mapping artifacts for Play symbolication
+- manually publishing the signed bundle to a chosen Google Play track via Gradle Play Publisher
 
 On macOS the default `./scripts/setup.sh` path is host-native: on Apple Silicon it builds/install `arm64` binaries, and on Intel Macs it builds/install `amd64` binaries with the normal toolchain prerequisites for that machine. If you explicitly pass `--mac-arch arm64|amd64` for the non-host architecture, setup switches into artifact-only cross-build mode and writes desktop binaries into `artifacts/releases/` without touching `~/.local/bin`, configs, or skill wiring.
 

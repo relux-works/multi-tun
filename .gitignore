@@ -51,6 +51,13 @@ Thumbs.db
 /android/.kotlin/
 /android/**/build/
 /android/local.properties
+/android/keystore.properties
+/android/keystore/
+/android/**/*.jks
+/android/**/*.keystore
+/android/play-service-account.json
+/android/play-service-account.*.json
+/android/*publisher-credentials*.json
 
 # Task board runtime
 .task-board/
