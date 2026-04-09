@@ -28,10 +28,13 @@ configs/generated/
 .codex/
 .local/
 .temp/
+agents/
+AGENTS.md
+LOGBOOK.md
 
 # Swift package build state
-/cmd/vpn-auth/.build/
-/cmd/vpn-auth/.swiftpm/
+/desktop/cmd/vpn-auth/.build/
+/desktop/cmd/vpn-auth/.swiftpm/
 
 # IDE and OS
 .idea/
@@ -42,5 +45,16 @@ configs/generated/
 .DS_Store
 Thumbs.db
 
+# Android local state
+/android/.gradle/
+/android/.idea/
+/android/.kotlin/
+/android/**/build/
+/android/local.properties
+
 # Task board runtime
-.task-board/logs
+.task-board/
+task-board.config.json
+
+# Release artifacts
+/artifacts/releases/
