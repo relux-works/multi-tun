@@ -25,7 +25,8 @@ class TunnelHomeStoreTest {
         assertEquals("Lab Tunnel", state.profileName)
         assertEquals(2, state.profiles.size)
         assertFalse(state.editor.isVisible)
-        assertEquals("Resolver: Source URL configured", state.profileSourceSummary)
+        assertEquals("Subscription URL: lab.vpn.example", state.profileSourceSummary)
+        assertEquals("Resolved on connect", state.profileEndpoint)
     }
 
     @Test
@@ -38,18 +39,6 @@ class TunnelHomeStoreTest {
         assertTrue(editor.isVisible)
         assertEquals("https://subscription.example/path", editor.sourceUrl)
         assertFalse(editor.showManualEndpointFields)
-    }
-
-    @Test
-    fun manualOverride_canBeShownForSourceDrivenTunnel() {
-        val store = buildStore()
-
-        store.dispatch(TunnelHomeAction.AddTunnelClicked)
-        store.dispatch(TunnelHomeAction.EditorManualOverrideToggled)
-        assertTrue(store.state.value.editor.showManualEndpointFields)
-
-        store.dispatch(TunnelHomeAction.EditorManualOverrideToggled)
-        assertFalse(store.state.value.editor.showManualEndpointFields)
     }
 
     @Test
@@ -116,7 +105,28 @@ class TunnelHomeStoreTest {
         val state = store.state.value
         assertFalse(state.editor.isVisible)
         assertEquals("Source Driven", state.profileName)
-        assertEquals("Resolver: Source URL configured", state.profileSourceSummary)
+        assertEquals("Subscription URL: subscription.example", state.profileSourceSummary)
+        assertEquals("Resolved on connect", state.profileEndpoint)
+    }
+
+    @Test
+    fun saveTunnel_withSourceUrl_clearsSampleManualFields() {
+        var persistedProfiles: List<TunnelProfile> = emptyList()
+        val store = buildStore(
+            onCatalogChanged = { profiles, _ ->
+                persistedProfiles = profiles
+            },
+        )
+
+        store.dispatch(TunnelHomeAction.EditTunnelClicked(DefaultTunnelCatalog.defaultProfile.id))
+        store.dispatch(TunnelHomeAction.EditorSourceUrlChanged("https://vpn.example.com/subscription"))
+        store.dispatch(TunnelHomeAction.SaveTunnelClicked)
+
+        val persisted = persistedProfiles.single()
+        assertEquals("", persisted.host)
+        assertEquals("", persisted.serverName)
+        assertEquals("", persisted.uuid)
+        assertEquals("", persisted.transport)
     }
 
     @Test

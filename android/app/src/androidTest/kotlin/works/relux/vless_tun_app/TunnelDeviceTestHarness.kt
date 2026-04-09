@@ -46,6 +46,10 @@ internal object TunnelDeviceTestHarness {
         return bootstrapIp
     }
 
+    fun sourceUrlOrDefault(default: String): String {
+        return runCatching { requiredSourceUrl() }.getOrDefault(default)
+    }
+
     fun seedCatalog(sourceUrl: String) {
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
         val catalogStore = TunnelCatalogStore(
@@ -77,8 +81,11 @@ internal object TunnelDeviceTestHarness {
         device.waitForIdle()
 
         if (freshProcess) {
-            device.executeShellCommand("am force-stop $packageName")
-            Thread.sleep(500)
+            val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
+            if (packageName != targetContext.packageName) {
+                device.executeShellCommand("am force-stop $packageName")
+                Thread.sleep(500)
+            }
         }
 
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext

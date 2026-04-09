@@ -10,7 +10,7 @@ import works.relux.vless_tun_app.pages.TunnelHomePage
 
 @RunWith(AndroidJUnit4::class)
 class TunnelConnectSmokeTest : BaseUiTestSuite() {
-    override val packageName = "works.relux.vless_tun_app"
+    override val packageName = "works.relux.android.vlesstun.app"
 
     @Before
     override fun setUp() {

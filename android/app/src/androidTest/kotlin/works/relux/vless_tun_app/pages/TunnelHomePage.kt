@@ -59,6 +59,33 @@ class TunnelHomePage(
     val detail: UiObject2?
         get() = device.findObject(By.res(TunnelHomeTags.STATUS_DETAIL))
 
+    val selectedTunnel: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.STATUS_SELECTED_TUNNEL))
+
+    val endpoint: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.STATUS_ENDPOINT))
+
+    val sourceSummary: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.STATUS_SOURCE_SUMMARY))
+
+    val addButton: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.ADD_BUTTON))
+            ?: device.findObject(By.text("Add Tunnel"))
+
+    val editorNameField: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.EDITOR_NAME_INPUT))
+
+    val editorSourceUrlField: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.EDITOR_SOURCE_URL_INPUT))
+
+    val editorSaveButton: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.EDITOR_SAVE_BUTTON))
+            ?: device.findObject(By.text("Save"))
+
+    val editButton: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.TUNNEL_EDIT_BUTTON))
+            ?: device.findObject(By.text("Edit"))
+
     fun tapPrimary(): TunnelHomePage {
         primaryButton?.click()
         device.waitForIdle()
@@ -70,6 +97,102 @@ class TunnelHomePage(
         device.waitForIdle()
         return this
     }
+
+    fun tapAdd(): TunnelHomePage {
+        revealUpperActionSection()
+        checkNotNull(addButton) { "Add button not found." }.click()
+        device.waitForIdle()
+        return this
+    }
+
+    fun tapEdit(): TunnelHomePage {
+        repeat(3) { attempt ->
+            revealCatalogSection()
+            editButton?.let { button ->
+                button.click()
+                device.waitForIdle()
+                Thread.sleep(500)
+                return this
+            }
+            if (attempt < 2) {
+                Thread.sleep(300)
+            }
+        }
+        error("Edit button not found.")
+    }
+
+    fun waitForEditor(timeout: Long): TunnelHomePage {
+        val attempts = 3
+        repeat(attempts) { attempt ->
+            val found = device.wait(Until.hasObject(By.res(TunnelHomeTags.EDITOR_CARD)), 800) ||
+                device.wait(Until.hasObject(By.res(TunnelHomeTags.EDITOR_NAME_INPUT)), 800) ||
+                device.wait(Until.hasObject(By.res(TunnelHomeTags.EDITOR_SOURCE_URL_INPUT)), 800) ||
+                device.wait(Until.hasObject(By.res(TunnelHomeTags.EDITOR_SAVE_BUTTON)), 800) ||
+                device.wait(Until.hasObject(By.text("Edit Tunnel")), 800) ||
+                device.wait(Until.hasObject(By.text("Connection Source")), 800)
+            if (found) {
+                return this
+            }
+            if (attempt < attempts - 1) {
+                revealEditorSection()
+                Thread.sleep(400)
+            }
+        }
+        throw AssertionError("Expected editor within ${timeout}ms.")
+    }
+
+    fun updateName(value: String): TunnelHomePage {
+        val field = checkNotNull(editorNameField) { "Tunnel name field not found." }
+        field.click()
+        device.waitForIdle()
+        field.text = value
+        device.waitForIdle()
+        return this
+    }
+
+    fun updateSourceUrl(value: String): TunnelHomePage {
+        val field = checkNotNull(editorSourceUrlField) { "Source URL field not found." }
+        field.click()
+        device.waitForIdle()
+        field.text = value
+        device.waitForIdle()
+        return this
+    }
+
+    fun tapSave(): TunnelHomePage {
+        revealEditorFooter()
+        checkNotNull(editorSaveButton) { "Save button not found." }.click()
+        device.waitForIdle()
+        return this
+    }
+
+    fun waitForEditorHidden(timeout: Long): TunnelHomePage {
+        val hidden = device.wait(Until.gone(By.res(TunnelHomeTags.EDITOR_CARD)), timeout)
+        if (!hidden) {
+            throw AssertionError("Expected editor to close within ${timeout}ms.")
+        }
+        return this
+    }
+
+    fun waitForSourceSummaryContains(text: String, timeout: Long): TunnelHomePage {
+        val found = waitForTextContains(selector = { sourceSummary?.text.orEmpty() }, expected = text, timeout = timeout)
+        if (!found) {
+            throw AssertionError("Expected source summary containing '$text' within ${timeout}ms. Current='${sourceSummary?.text.orEmpty()}'.")
+        }
+        return this
+    }
+
+    fun waitForEndpointContains(text: String, timeout: Long): TunnelHomePage {
+        val found = waitForTextContains(selector = { endpoint?.text.orEmpty() }, expected = text, timeout = timeout)
+        if (!found) {
+            throw AssertionError("Expected endpoint containing '$text' within ${timeout}ms. Current='${endpoint?.text.orEmpty()}'.")
+        }
+        return this
+    }
+
+    fun sourceSummaryText(): String = sourceSummary?.text.orEmpty()
+
+    fun endpointText(): String = endpoint?.text.orEmpty()
 
     fun waitForPhase(expected: TunnelPhase, timeout: Long): TunnelHomePage {
         val found = device.wait(Until.hasObject(By.text(expected.name)), timeout) ||
@@ -139,6 +262,21 @@ class TunnelHomePage(
         return false
     }
 
+    private fun waitForTextContains(
+        selector: () -> String,
+        expected: String,
+        timeout: Long,
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + timeout
+        while (System.currentTimeMillis() < deadline) {
+            if (selector().contains(expected, ignoreCase = true)) {
+                return true
+            }
+            Thread.sleep(200)
+        }
+        return false
+    }
+
     private fun waitForEgressObservation(
         label: String,
         selector: () -> String,
@@ -173,6 +311,42 @@ class TunnelHomePage(
         val endY = (device.displayHeight * 0.42f).toInt()
         device.swipe(centerX, startY, centerX, endY, 20)
         device.waitForIdle()
+    }
+
+    private fun revealUpperActionSection() {
+        val centerX = device.displayWidth / 2
+        val startY = (device.displayHeight * 0.25f).toInt()
+        val endY = (device.displayHeight * 0.88f).toInt()
+        repeat(2) {
+            device.swipe(centerX, startY, centerX, endY, 20)
+            device.waitForIdle()
+        }
+    }
+
+    private fun revealCatalogSection() {
+        val centerX = device.displayWidth / 2
+        val startY = (device.displayHeight * 0.82f).toInt()
+        val endY = (device.displayHeight * 0.52f).toInt()
+        device.swipe(centerX, startY, centerX, endY, 20)
+        device.waitForIdle()
+    }
+
+    private fun revealEditorSection() {
+        val centerX = device.displayWidth / 2
+        val startY = (device.displayHeight * 0.82f).toInt()
+        val endY = (device.displayHeight * 0.42f).toInt()
+        device.swipe(centerX, startY, centerX, endY, 20)
+        device.waitForIdle()
+    }
+
+    private fun revealEditorFooter() {
+        val centerX = device.displayWidth / 2
+        val startY = (device.displayHeight * 0.70f).toInt()
+        val endY = (device.displayHeight * 0.20f).toInt()
+        repeat(2) {
+            device.swipe(centerX, startY, centerX, endY, 20)
+            device.waitForIdle()
+        }
     }
 
     private fun hasCapturedObservation(

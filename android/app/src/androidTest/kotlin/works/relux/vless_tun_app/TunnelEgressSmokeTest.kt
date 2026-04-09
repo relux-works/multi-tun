@@ -13,7 +13,7 @@ import works.relux.vless_tun_app.pages.TunnelHomePage
 
 @RunWith(AndroidJUnit4::class)
 class TunnelEgressSmokeTest : BaseUiTestSuite() {
-    override val packageName = "works.relux.vless_tun_app"
+    override val packageName = "works.relux.android.vlesstun.app"
 
     private lateinit var observerBootstrapIp: String
 
