@@ -1,0 +1,10 @@
+- Produce `/Users/alexis/src/multi-tun/artifacts/mobile-architecture/android-app-architecture-spec.md`.
+- Mention the board chain `EPIC-260408-1iu8sr / STORY-260408-1eti68 / TASK-260408-1rnfqx`.
+- Specify the module graph for the Android app.
+- Define app process vs `VpnService` boundaries.
+- Define state/store topology and screen/navigation structure.
+- Define persistence layout and control-plane vs data-plane split.
+- Define the tunnel startup sequence and config rendering ownership.
+- Define the dependency strategy for modular Gradle with local or self-hosted dependencies.
+- Define first implementation milestones.
+- Call out banned patterns, especially any localhost proxy listeners.

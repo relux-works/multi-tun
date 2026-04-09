@@ -1,0 +1,9 @@
+- Produce `/Users/alexis/src/multi-tun/artifacts/mobile-architecture/android-emulator-tunnel-verification.md`.
+- Mention the board chain `EPIC-260408-1iu8sr / STORY-260409-hmbsc8 / TASK-260409-zointz`.
+- Define an automated emulator-based strategy for verifying that the Android VLESS TUN tunnel actually starts.
+- Cover how to automate or gate the VPN consent step for emulator-driven tests.
+- Define how to verify connected state publication from the app/service side.
+- Define how to verify that a real network probe is routed through the tunnel.
+- Define how to verify that no localhost proxy listeners are exposed during an active session.
+- Specify which parts belong in instrumentation/UI tests, which parts belong in service/runtime tests, and which parts remain manual smoke checks.
+- Reference the local `skill-android-testing-tools` toolkit and explain how it should be used in this project.
