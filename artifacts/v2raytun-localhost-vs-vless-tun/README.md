@@ -71,9 +71,9 @@ This note does not claim that every localhost proxy automatically exposes full X
 
 Repository evidence:
 
-- default config path uses `network.mode=tun` in [internal/config/config.go](../../internal/config/config.go)
-- validation rejects non-TUN modes in [internal/config/config.go](../../internal/config/config.go)
-- inbound rendering is TUN-only in [internal/singbox/render.go](../../internal/singbox/render.go)
+- default config path uses `network.mode=tun` in [desktop/internal/vless/config/config.go](../../desktop/internal/vless/config/config.go)
+- validation rejects non-TUN modes in [desktop/internal/vless/config/config.go](../../desktop/internal/vless/config/config.go)
+- inbound rendering is TUN-only in [desktop/internal/vless/singbox/render.go](../../desktop/internal/vless/singbox/render.go)
 - the repo documents removal of `system_proxy` in [README.md](../../README.md)
 
 The important difference is not branding. It is surface area:

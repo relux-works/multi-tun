@@ -3,45 +3,155 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+HOST_OS="$(uname -s)"
+HOST_ARCH_RAW="$(uname -m)"
 
-SKILL_NAME="vpn-config"
 PROJECT_NAME="multi-tun"
-SKILL_CONTENT_DIR="$PROJECT_ROOT/agents/skills/$SKILL_NAME"
 VLESS_CLI_NAME="vless-tun"
 OPENCONNECT_CLI_NAME="openconnect-tun"
 DUMP_CLI_NAME="dump"
 CISCO_DUMP_COMPAT_NAME="cisco-dump"
 VPN_CORE_CLI_NAME="vpn-core"
 VPN_AUTH_CLI_NAME="vpn-auth"
-VPN_AUTH_PACKAGE_DIR="$PROJECT_ROOT/cmd/vpn-auth"
+VPN_AUTH_PACKAGE_DIR="$PROJECT_ROOT/desktop/cmd/vpn-auth"
 
-AGENTS_DIR="$HOME/.agents/skills"
-GLOBAL_SKILL_DIR="$AGENTS_DIR/$SKILL_NAME"
-CLAUDE_DIR="$HOME/.claude/skills"
-CODEX_DIR="$HOME/.codex/skills"
 BIN_DIR="$HOME/.local/bin"
 GLOBAL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vless-tun"
 GLOBAL_CONFIG_PATH="$GLOBAL_CONFIG_DIR/config.json"
 LEGACY_CONFIG_PATH="$PROJECT_ROOT/configs/local.json"
 EXAMPLE_CONFIG_PATH="$PROJECT_ROOT/configs/local.example.json"
-LOCAL_AGENTS_DIR="$PROJECT_ROOT/.agents"
-LOCAL_AGENTS_INSTRUCTIONS_DIR="$LOCAL_AGENTS_DIR/.instructions"
-LOCAL_AGENTS_SKILLS_DIR="$LOCAL_AGENTS_DIR/skills"
-LOCAL_CLAUDE_DIR="$PROJECT_ROOT/.claude"
-LOCAL_CODEX_DIR="$PROJECT_ROOT/.codex"
-PROJECT_INSTRUCTIONS_SRC="$PROJECT_ROOT/agents/instructions/INSTRUCTIONS_PROJECT.md"
-PROJECT_INSTRUCTIONS_DST="$LOCAL_AGENTS_INSTRUCTIONS_DIR/INSTRUCTIONS_PROJECT.md"
-PROJECT_MANAGEMENT_SKILL_SRC="$HOME/.agents/skills/project-management"
+RELEASES_DIR="$PROJECT_ROOT/artifacts/releases"
 
-echo "=== $PROJECT_NAME Setup ==="
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/setup.sh [--mac-arch host|arm64|amd64]
 
-ensure_include() {
-  local file="$1"
-  local include_line="$2"
-  if [[ -f "$file" ]] && ! grep -Fxq "$include_line" "$file"; then
-    printf '\n%s\n' "$include_line" >>"$file"
+Defaults to a full host-native setup on macOS.
+
+Options:
+  --mac-arch host     Build for the current macOS host architecture (default)
+  --mac-arch arm64    Build macOS Apple Silicon artifacts
+  --mac-arch amd64    Build macOS Intel artifacts
+
+When a non-host macOS architecture is requested, setup switches to artifact-only
+cross-build mode:
+  - desktop binaries are written to artifacts/releases/
+  - ~/.local/bin links are not changed
+  - tool installation and config wiring are skipped
+EOF
+}
+
+normalize_mac_arch() {
+  local value="$1"
+  case "$value" in
+    host|auto)
+      printf '%s\n' "$HOST_MAC_ARCH"
+      ;;
+    arm64|aarch64)
+      printf 'arm64\n'
+      ;;
+    amd64|x86_64)
+      printf 'amd64\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+build_output_path() {
+  local binary_name="$1"
+  if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
+    printf '%s/%s-%s\n' "$RELEASES_DIR" "$binary_name" "$TARGET_TRIPLE"
+  else
+    printf '%s/%s\n' "$PROJECT_ROOT" "$binary_name"
   fi
 }
+
+go_build_desktop_binary() {
+  local output_path="$1"
+  local package_path="$2"
+  if [[ "$HOST_OS" == "Darwin" && -n "${TARGET_GOARCH:-}" ]]; then
+    if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
+      CGO_ENABLED=0 GOOS=darwin GOARCH="$TARGET_GOARCH" go build -o "$output_path" "$package_path"
+    else
+      GOOS=darwin GOARCH="$TARGET_GOARCH" go build -o "$output_path" "$package_path"
+    fi
+  else
+    go build -o "$output_path" "$package_path"
+  fi
+}
+
+HOST_MAC_ARCH=""
+if [[ "$HOST_OS" == "Darwin" ]]; then
+  case "$HOST_ARCH_RAW" in
+    arm64|aarch64)
+      HOST_MAC_ARCH="arm64"
+      ;;
+    x86_64|amd64)
+      HOST_MAC_ARCH="amd64"
+      ;;
+    *)
+      echo "  ERROR: unsupported macOS host architecture: $HOST_ARCH_RAW"
+      exit 1
+      ;;
+  esac
+fi
+
+REQUESTED_MAC_ARCH="host"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mac-arch)
+      if [[ $# -lt 2 ]]; then
+        echo "  ERROR: --mac-arch requires one of: host, arm64, amd64"
+        usage
+        exit 1
+      fi
+      REQUESTED_MAC_ARCH="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "  ERROR: unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+TARGET_MAC_ARCH=""
+TARGET_GOARCH=""
+TARGET_TRIPLE=""
+CROSS_BUILD_ONLY="0"
+if [[ "$HOST_OS" == "Darwin" ]]; then
+  TARGET_MAC_ARCH="$(normalize_mac_arch "$REQUESTED_MAC_ARCH")" || {
+    echo "  ERROR: unsupported --mac-arch value: $REQUESTED_MAC_ARCH"
+    usage
+    exit 1
+  }
+  TARGET_GOARCH="$TARGET_MAC_ARCH"
+  TARGET_TRIPLE="darwin-$TARGET_GOARCH"
+  if [[ "$TARGET_MAC_ARCH" != "$HOST_MAC_ARCH" ]]; then
+    CROSS_BUILD_ONLY="1"
+  fi
+elif [[ "$REQUESTED_MAC_ARCH" != "host" && "$REQUESTED_MAC_ARCH" != "auto" ]]; then
+  echo "  ERROR: --mac-arch is only supported on macOS hosts for now"
+  exit 1
+fi
+
+echo "=== $PROJECT_NAME Setup ==="
+if [[ "$HOST_OS" == "Darwin" ]]; then
+  echo "  Host macOS arch   -> $HOST_MAC_ARCH"
+  echo "  Target macOS arch -> $TARGET_MAC_ARCH"
+  if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
+    echo "  Mode              -> cross-build artifacts only"
+  else
+    echo "  Mode              -> full host-native setup"
+  fi
+fi
 
 ensure_brew_formula() {
   local formula="$1"
@@ -97,51 +207,80 @@ resolve_swift_release_binary() {
   return 1
 }
 
-ensure_brew_formula ripgrep rg
-ensure_brew_formula pipx pipx
-ensure_brew_formula sing-box sing-box
-ensure_brew_formula openconnect openconnect
-ensure_brew_formula oath-toolkit oathtool
-ensure_brew_formula totp-cli totp-cli
+if [[ "$CROSS_BUILD_ONLY" != "1" ]]; then
+  ensure_brew_formula ripgrep rg
+  ensure_brew_formula pipx pipx
+  ensure_brew_formula sing-box sing-box
+  ensure_brew_formula openconnect openconnect
+  ensure_brew_formula oath-toolkit oathtool
+  ensure_brew_formula totp-cli totp-cli
 
-require_swift
+  require_swift
 
-if ! command -v python3 >/dev/null 2>&1; then
-  ensure_brew_formula python python3
-fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    ensure_brew_formula python python3
+  fi
 
-ensure_pipx_package vpn-slice vpn-slice
+  ensure_pipx_package vpn-slice vpn-slice
 
-if ! command -v security >/dev/null 2>&1; then
-  echo "  WARNING: macOS security CLI is not available; keychain-backed openconnect setup will not work"
+  if ! command -v security >/dev/null 2>&1; then
+    echo "  WARNING: macOS security CLI is not available; keychain-backed openconnect setup will not work"
+  fi
 fi
 
 echo "Building $VLESS_CLI_NAME binary..."
 cd "$PROJECT_ROOT"
-go build -o "$VLESS_CLI_NAME" ./cmd/vless-tun/
+VLESS_OUTPUT_PATH="$(build_output_path "$VLESS_CLI_NAME")"
+OPENCONNECT_OUTPUT_PATH="$(build_output_path "$OPENCONNECT_CLI_NAME")"
+DUMP_OUTPUT_PATH="$(build_output_path "$DUMP_CLI_NAME")"
+VPN_CORE_OUTPUT_PATH="$(build_output_path "$VPN_CORE_CLI_NAME")"
+VPN_AUTH_OUTPUT_PATH="$(build_output_path "$VPN_AUTH_CLI_NAME")"
+if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
+  mkdir -p "$RELEASES_DIR"
+fi
+
+go_build_desktop_binary "$VLESS_OUTPUT_PATH" ./desktop/cmd/vless-tun/
 echo "Building $OPENCONNECT_CLI_NAME binary..."
-go build -o "$OPENCONNECT_CLI_NAME" ./cmd/openconnect-tun/
+go_build_desktop_binary "$OPENCONNECT_OUTPUT_PATH" ./desktop/cmd/openconnect-tun/
 echo "Building $DUMP_CLI_NAME binary..."
-go build -o "$DUMP_CLI_NAME" ./cmd/dump/
+go_build_desktop_binary "$DUMP_OUTPUT_PATH" ./desktop/cmd/dump/
 echo "Building $VPN_CORE_CLI_NAME binary..."
-go build -o "$VPN_CORE_CLI_NAME" ./cmd/vpn-core/
+go_build_desktop_binary "$VPN_CORE_OUTPUT_PATH" ./desktop/cmd/vpn-core/
+
+if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
+  cp "$DUMP_OUTPUT_PATH" "$(build_output_path "$CISCO_DUMP_COMPAT_NAME")"
+  echo "Cross-build artifacts:"
+  echo "  $VLESS_OUTPUT_PATH"
+  echo "  $OPENCONNECT_OUTPUT_PATH"
+  echo "  $DUMP_OUTPUT_PATH"
+  echo "  $(build_output_path "$CISCO_DUMP_COMPAT_NAME")"
+  echo "  $VPN_CORE_OUTPUT_PATH"
+  echo
+  echo "Cross-arch mode intentionally skips:"
+  echo "  ~/.local/bin installation"
+  echo "  config wiring"
+  echo "  vpn-auth Swift helper build"
+  echo
+  echo "Use host-native setup on the destination Mac to install the full toolchain there."
+  exit 0
+fi
+
 echo "Building $VPN_AUTH_CLI_NAME binary..."
 swift build -c release --package-path "$VPN_AUTH_PACKAGE_DIR"
 VPN_AUTH_RELEASE_BIN="$(resolve_swift_release_binary "$VPN_AUTH_PACKAGE_DIR" "$VPN_AUTH_CLI_NAME")" || {
   echo "  ERROR: built $VPN_AUTH_CLI_NAME binary was not found under $VPN_AUTH_PACKAGE_DIR/.build"
   exit 1
 }
-cp "$VPN_AUTH_RELEASE_BIN" "$PROJECT_ROOT/$VPN_AUTH_CLI_NAME"
-chmod +x "$PROJECT_ROOT/$VPN_AUTH_CLI_NAME"
+cp "$VPN_AUTH_RELEASE_BIN" "$VPN_AUTH_OUTPUT_PATH"
+chmod +x "$VPN_AUTH_OUTPUT_PATH"
 
 mkdir -p "$BIN_DIR"
-ln -sf "$PROJECT_ROOT/$VLESS_CLI_NAME" "$BIN_DIR/$VLESS_CLI_NAME"
-ln -sf "$PROJECT_ROOT/$OPENCONNECT_CLI_NAME" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
-ln -sf "$PROJECT_ROOT/$DUMP_CLI_NAME" "$BIN_DIR/$DUMP_CLI_NAME"
-ln -sf "$PROJECT_ROOT/$DUMP_CLI_NAME" "$BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
-ln -sf "$PROJECT_ROOT/$VPN_CORE_CLI_NAME" "$BIN_DIR/$VPN_CORE_CLI_NAME"
-ln -sf "$PROJECT_ROOT/$VPN_AUTH_CLI_NAME" "$BIN_DIR/$VPN_AUTH_CLI_NAME"
-rm -f "$BIN_DIR/vpn-config"
+ln -sf "$VLESS_OUTPUT_PATH" "$BIN_DIR/$VLESS_CLI_NAME"
+ln -sf "$OPENCONNECT_OUTPUT_PATH" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
+ln -sf "$DUMP_OUTPUT_PATH" "$BIN_DIR/$DUMP_CLI_NAME"
+ln -sf "$DUMP_OUTPUT_PATH" "$BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
+ln -sf "$VPN_CORE_OUTPUT_PATH" "$BIN_DIR/$VPN_CORE_CLI_NAME"
+ln -sf "$VPN_AUTH_OUTPUT_PATH" "$BIN_DIR/$VPN_AUTH_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$VLESS_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$OPENCONNECT_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$DUMP_CLI_NAME"
@@ -153,24 +292,6 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo "  WARNING: $BIN_DIR is not in your PATH"
 fi
 
-echo "Installing skill payload: $SKILL_NAME"
-if [ -L "$GLOBAL_SKILL_DIR" ]; then
-  rm -f "$GLOBAL_SKILL_DIR"
-fi
-mkdir -p "$GLOBAL_SKILL_DIR"
-rsync -a --delete "$SKILL_CONTENT_DIR/" "$GLOBAL_SKILL_DIR/" --exclude='.git'
-echo "  Copied -> $GLOBAL_SKILL_DIR/"
-
-mkdir -p "$CLAUDE_DIR"
-rm -f "$CLAUDE_DIR/$SKILL_NAME"
-ln -s "$GLOBAL_SKILL_DIR" "$CLAUDE_DIR/$SKILL_NAME"
-echo "  Symlink -> $CLAUDE_DIR/$SKILL_NAME"
-
-mkdir -p "$CODEX_DIR"
-rm -f "$CODEX_DIR/$SKILL_NAME"
-ln -s "$GLOBAL_SKILL_DIR" "$CODEX_DIR/$SKILL_NAME"
-echo "  Symlink -> $CODEX_DIR/$SKILL_NAME"
-
 mkdir -p "$GLOBAL_CONFIG_DIR"
 if [[ -f "$LEGACY_CONFIG_PATH" && ! -f "$GLOBAL_CONFIG_PATH" ]]; then
   mv "$LEGACY_CONFIG_PATH" "$GLOBAL_CONFIG_PATH"
@@ -180,35 +301,6 @@ elif [[ ! -f "$GLOBAL_CONFIG_PATH" ]]; then
   echo "  Created example config -> $GLOBAL_CONFIG_PATH"
 else
   echo "  Config -> $GLOBAL_CONFIG_PATH"
-fi
-
-if command -v agents-infra >/dev/null 2>&1; then
-  echo "Refreshing repo-local agents runtime..."
-  agents-infra setup local "$PROJECT_ROOT"
-
-  mkdir -p "$LOCAL_AGENTS_INSTRUCTIONS_DIR" "$LOCAL_AGENTS_SKILLS_DIR"
-  if [[ -f "$PROJECT_INSTRUCTIONS_SRC" ]]; then
-    cp "$PROJECT_INSTRUCTIONS_SRC" "$PROJECT_INSTRUCTIONS_DST"
-    ensure_include "$LOCAL_AGENTS_INSTRUCTIONS_DIR/AGENTS.md" "@$PROJECT_INSTRUCTIONS_DST"
-    ensure_include "$LOCAL_AGENTS_INSTRUCTIONS_DIR/INSTRUCTIONS.md" "@$PROJECT_INSTRUCTIONS_DST"
-    echo "  Project instructions -> $PROJECT_INSTRUCTIONS_DST"
-  fi
-
-  mkdir -p "$LOCAL_CLAUDE_DIR/skills" "$LOCAL_CODEX_DIR/skills"
-  rm -rf "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME"
-  ln -sfn "$GLOBAL_SKILL_DIR" "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME"
-  ln -sfn "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME" "$LOCAL_CLAUDE_DIR/skills/$SKILL_NAME"
-  ln -sfn "$LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME" "$LOCAL_CODEX_DIR/skills/$SKILL_NAME"
-  echo "  Local skill -> $LOCAL_AGENTS_SKILLS_DIR/$SKILL_NAME"
-
-  if [[ -d "$PROJECT_MANAGEMENT_SKILL_SRC" ]]; then
-    ln -sfn "$PROJECT_MANAGEMENT_SKILL_SRC" "$LOCAL_AGENTS_SKILLS_DIR/project-management"
-    ln -sfn "$LOCAL_AGENTS_SKILLS_DIR/project-management" "$LOCAL_CLAUDE_DIR/skills/project-management"
-    ln -sfn "$LOCAL_AGENTS_SKILLS_DIR/project-management" "$LOCAL_CODEX_DIR/skills/project-management"
-    echo "  Local skill -> $LOCAL_AGENTS_SKILLS_DIR/project-management"
-  fi
-else
-  echo "  WARNING: agents-infra is not installed; repo-local instructions and skill links were not refreshed"
 fi
 
 echo

@@ -4,16 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SKILL_NAME="vpn-config"
 SERVICE_NAME="multi-tun"
-
-GLOBAL_SKILL_DIR="$HOME/.agents/skills/$SKILL_NAME"
-GLOBAL_CLAUDE_LINK="$HOME/.claude/skills/$SKILL_NAME"
-GLOBAL_CODEX_LINK="$HOME/.codex/skills/$SKILL_NAME"
-
-LOCAL_SKILL_LINK="$PROJECT_ROOT/.agents/skills/$SKILL_NAME"
-LOCAL_CLAUDE_LINK="$PROJECT_ROOT/.claude/skills/$SKILL_NAME"
-LOCAL_CODEX_LINK="$PROJECT_ROOT/.codex/skills/$SKILL_NAME"
 
 GLOBAL_BIN_DIR="$HOME/.local/bin"
 BIN_NAMES=(
@@ -55,7 +46,7 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/deinit.sh [options]
 
-Removes the managed multi-tun skill links and installed binary symlinks.
+Removes the managed installed binary symlinks.
 Config, cache, keychain secrets, and repo build artifacts are preserved by default.
 
 Options:
@@ -166,14 +157,6 @@ log "=== multi-tun deinit ==="
 for bin_name in "${BIN_NAMES[@]}"; do
   remove_managed_path "$GLOBAL_BIN_DIR/$bin_name" "global bin"
 done
-
-remove_managed_path "$GLOBAL_CODEX_LINK" "global codex skill link"
-remove_managed_path "$GLOBAL_CLAUDE_LINK" "global claude skill link"
-remove_managed_path "$GLOBAL_SKILL_DIR" "global skill payload"
-
-remove_managed_path "$LOCAL_CODEX_LINK" "repo-local codex skill link"
-remove_managed_path "$LOCAL_CLAUDE_LINK" "repo-local claude skill link"
-remove_managed_path "$LOCAL_SKILL_LINK" "repo-local skill link"
 
 if [[ "$PURGE_CONFIG" == true ]]; then
   for path in "${CONFIG_DIRS[@]}"; do

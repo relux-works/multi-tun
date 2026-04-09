@@ -75,7 +75,7 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
 - `openconnect-tun stop`: stop the active OpenConnect process cleanly
 - `dump start|status|stop|inspect`: canonical packet-dump workflow for tunnel-aware VPN diagnostics; `cisco-dump` remains as a compatibility alias
-- `scripts/setup.sh`: install the shipped toolchain end-to-end, including `sing-box` for VLESS runtime plus `vpn-auth` and its TOTP prerequisite path for aggregate OpenConnect auth
+- `scripts/setup.sh`: install the shipped toolchain end-to-end, including `sing-box` for VLESS runtime plus `vpn-auth` and its TOTP prerequisite path for aggregate OpenConnect auth; on macOS it should default to host-native Apple Silicon vs Intel builds and allow explicit `--mac-arch arm64|amd64` artifact-only cross-builds
 
 ## Non-Goals For This Iteration
 
@@ -96,6 +96,4 @@ Build local CLIs and agent guidance that can:
 - Go CLI
 - tests and fixtures
 - setup script
-- task board
-- repo-local agent guidance layered on top of `agents-infra setup local`
-- skill docs for future agent use
+- platform roots for `desktop/`, `android/`, and `ios/`, with desktop code organized into `core`, `vless`, and `anyconnect`
