@@ -7,7 +7,7 @@ ANDROID_DIR="$ROOT_DIR/android"
 ADB="${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb"
 GRADLE="./gradlew"
 
-APP_PACKAGE="works.relux.vless_tun_app"
+APP_PACKAGE="works.relux.android.vlesstun.app"
 TEST_PACKAGE="${APP_PACKAGE}.test"
 TEST_CLASS_DEFAULT="works.relux.vless_tun_app.TunnelHomeSmokeTest"
 RUNNER="${TEST_PACKAGE}/androidx.test.runner.AndroidJUnitRunner"

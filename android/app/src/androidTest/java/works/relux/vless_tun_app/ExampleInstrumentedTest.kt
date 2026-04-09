@@ -19,6 +19,6 @@ class ExampleInstrumentedTest {
     fun useAppContext() {
         // Context of the app under test.
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-        assertEquals("works.relux.vless_tun_app", appContext.packageName)
+        assertEquals("works.relux.android.vlesstun.app", appContext.packageName)
     }
 }

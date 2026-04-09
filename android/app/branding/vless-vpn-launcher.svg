@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="frame" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#65738D"/>
+      <stop offset="30%" stop-color="#AFC2E6"/>
+      <stop offset="60%" stop-color="#33425C"/>
+      <stop offset="100%" stop-color="#9AAED2"/>
+    </linearGradient>
+    <radialGradient id="bg" cx="50%" cy="45%" r="65%">
+      <stop offset="0%" stop-color="#0B173A"/>
+      <stop offset="55%" stop-color="#071028"/>
+      <stop offset="100%" stop-color="#020611"/>
+    </radialGradient>
+    <radialGradient id="coreGlow" cx="50%" cy="52%" r="45%">
+      <stop offset="0%" stop-color="#28B8FF" stop-opacity="0.95"/>
+      <stop offset="50%" stop-color="#135DCE" stop-opacity="0.40"/>
+      <stop offset="100%" stop-color="#0A1436" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shieldFill" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#163B78"/>
+      <stop offset="35%" stop-color="#0A1D47"/>
+      <stop offset="100%" stop-color="#09142D"/>
+    </linearGradient>
+    <linearGradient id="shieldEdge" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E7F0FF"/>
+      <stop offset="30%" stop-color="#8CA8D8"/>
+      <stop offset="60%" stop-color="#3E567F"/>
+      <stop offset="100%" stop-color="#D7E4FF"/>
+    </linearGradient>
+    <linearGradient id="boltFill" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#D9F8FF"/>
+      <stop offset="40%" stop-color="#66D8FF"/>
+      <stop offset="100%" stop-color="#1F8CFF"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="34" y="34" width="956" height="956" rx="180" fill="#000000"/>
+  <rect x="42" y="42" width="940" height="940" rx="172" fill="url(#bg)" stroke="#3D4A65" stroke-width="8"/>
+
+  <g opacity="0.78" stroke="#1578FF" fill="none">
+    <circle cx="512" cy="462" r="122" stroke-width="3"/>
+    <circle cx="512" cy="462" r="186" stroke-width="2.5" opacity="0.85"/>
+    <circle cx="512" cy="462" r="252" stroke-width="2" opacity="0.7"/>
+    <circle cx="512" cy="462" r="314" stroke-width="1.8" opacity="0.48"/>
+  </g>
+
+  <g opacity="0.42" stroke="#1790FF" stroke-width="2">
+    <path d="M112 520H912"/>
+    <path d="M154 430H870"/>
+    <path d="M154 610H870"/>
+    <path d="M220 340H804"/>
+    <path d="M220 700H804"/>
+    <path d="M286 250H738"/>
+    <path d="M286 790H738"/>
+    <path d="M210 188L814 736"/>
+    <path d="M182 274L842 650"/>
+    <path d="M162 376L862 548"/>
+    <path d="M210 736L814 188"/>
+    <path d="M182 650L842 274"/>
+    <path d="M162 548L862 376"/>
+  </g>
+
+  <g fill="#2AB2FF">
+    <circle cx="185" cy="770" r="8"/>
+    <circle cx="238" cy="668" r="6"/>
+    <circle cx="320" cy="814" r="7"/>
+    <circle cx="768" cy="236" r="7"/>
+    <circle cx="835" cy="334" r="8"/>
+    <circle cx="892" cy="610" r="7"/>
+    <circle cx="726" cy="812" r="8"/>
+  </g>
+
+  <rect x="132" y="132" width="760" height="760" rx="150" fill="url(#coreGlow)"/>
+
+  <g transform="translate(0 10)">
+    <path d="M512 152C616 211 708 245 810 268V456C810 670 692 840 512 904C332 840 214 670 214 456V268C316 245 408 211 512 152Z"
+          fill="url(#shieldFill)" stroke="url(#shieldEdge)" stroke-width="26" stroke-linejoin="round"/>
+    <path d="M512 198C602 244 682 272 770 290V458C770 633 671 779 512 834C353 779 254 633 254 458V290C342 272 422 244 512 198Z"
+          fill="#0B173D" stroke="#1B6BEA" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M330 286L690 716" stroke="#48B8FF" stroke-width="10" opacity="0.82"/>
+    <path d="M306 302L716 302" stroke="#4EB9FF" stroke-width="6" opacity="0.34"/>
+    <path d="M316 716C430 666 594 666 708 716" stroke="#2AAEFF" stroke-width="10" opacity="0.85" fill="none" stroke-linecap="round"/>
+
+    <text x="512" y="446"
+          fill="#F8FBFF"
+          font-size="118"
+          font-family="Helvetica, Arial, sans-serif"
+          font-weight="800"
+          text-anchor="middle"
+          letter-spacing="2">VLESS</text>
+    <text x="512" y="574"
+          fill="#F8FBFF"
+          font-size="118"
+          font-family="Helvetica, Arial, sans-serif"
+          font-weight="800"
+          text-anchor="middle"
+          letter-spacing="2">VPN</text>
+
+    <path d="M520 598L430 756H496L458 866L600 694H530L572 598Z"
+          fill="url(#boltFill)"
+          stroke="#C9F7FF"
+          stroke-width="7"
+          stroke-linejoin="round"/>
+    <circle cx="516" cy="870" r="18" fill="#BFF6FF" opacity="0.95"/>
+  </g>
+</svg>

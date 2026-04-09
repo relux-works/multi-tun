@@ -1,26 +1,100 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.triplet.play)
 }
+
+fun loadLocalProperties(file: File): Properties =
+    Properties().apply {
+        if (file.exists()) {
+            FileInputStream(file).use(::load)
+        }
+    }
+
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = loadLocalProperties(keystorePropertiesFile)
+
+fun localProperty(name: String): String? =
+    keystoreProperties.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
+
+val releaseStoreFilePath = localProperty("storeFile")
+val releaseKeyAlias = localProperty("keyAlias")
+val releaseStorePassword =
+    providers.environmentVariable("VLESS_TUN_ANDROID_STORE_PASSWORD").orNull?.trim()?.takeIf { it.isNotEmpty() }
+        ?: localProperty("storePassword")
+val releaseKeyPassword =
+    providers.environmentVariable("VLESS_TUN_ANDROID_KEY_PASSWORD").orNull?.trim()?.takeIf { it.isNotEmpty() }
+        ?: localProperty("keyPassword")
+
+val releaseSigningReady =
+    !releaseStoreFilePath.isNullOrEmpty() &&
+        !releaseKeyAlias.isNullOrEmpty() &&
+        !releaseStorePassword.isNullOrEmpty() &&
+        !releaseKeyPassword.isNullOrEmpty()
+
+val wantsReleaseTask = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+if (wantsReleaseTask && !releaseSigningReady) {
+    throw GradleException(
+        """
+        Missing Android release signing metadata or secrets.
+        Expected:
+          - android/keystore.properties with storeFile + keyAlias
+          - VLESS_TUN_ANDROID_STORE_PASSWORD
+          - VLESS_TUN_ANDROID_KEY_PASSWORD
+
+        Use the Go helper:
+          android-release setup
+          android-release generate-keystore
+          android-release bundle
+        """.trimIndent()
+    )
+}
+
+val playTrack =
+    providers.gradleProperty("VLESS_TUN_ANDROID_PLAY_TRACK")
+        .orElse(providers.environmentVariable("VLESS_TUN_ANDROID_PLAY_TRACK"))
+        .orElse("internal")
 
 android {
     namespace = "works.relux.vless_tun_app"
-    compileSdk = 36
+	compileSdk = 36
 
     defaultConfig {
-        applicationId = "works.relux.vless_tun_app"
+        applicationId = "works.relux.android.vlesstun.app"
         minSdk = 33
-        targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        targetSdk = 35
+        versionCode = 2
+        versionName = "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("release") {
+                storeFile = rootProject.file(requireNotNull(releaseStoreFilePath))
+                storePassword = releaseStorePassword
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            ndk {
+                // Keep Play symbolication useful without shipping full native debug info.
+                debugSymbolLevel = "SYMBOL_TABLE"
+            }
+            if (releaseSigningReady) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -40,6 +114,11 @@ android {
 
 kotlin {
     jvmToolchain(17)
+}
+
+play {
+    defaultToAppBundles.set(true)
+    track.set(playTrack)
 }
 
 dependencies {

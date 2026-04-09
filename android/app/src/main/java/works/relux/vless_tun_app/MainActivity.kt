@@ -47,11 +47,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun VlessTunRoot() {
     val context = LocalContext.current
+    val activity = context as? Activity
     val scope = rememberCoroutineScope()
     val renderer = remember { TunnelConfigRenderer() }
     val resolver = remember { SourceProfileResolver() }
     val egressProbe = remember { EgressProbeClient() }
     val connector = remember(context) { TunnelServiceConnector(context) }
+    val uiTestConfig = remember(activity?.intent) { UiTestLaunchConfig.fromIntent(activity?.intent) }
     val catalogStore = remember(context) {
         TunnelCatalogStore(
             storageFile = File(context.filesDir, "config/tunnel-catalog.json"),
@@ -63,6 +65,7 @@ private fun VlessTunRoot() {
     var storeRef by remember { mutableStateOf<TunnelHomeStore?>(null) }
     var pendingPermissionProfile by remember { mutableStateOf<works.relux.vless_tun_app.core.model.TunnelProfile?>(null) }
     var egressBootstrapAddress by rememberSaveable { mutableStateOf<String?>(null) }
+    var didApplyUiTestBootAction by rememberSaveable { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -132,6 +135,23 @@ private fun VlessTunRoot() {
         storeRef = store
     }
 
+    LaunchedEffect(store, uiTestConfig, didApplyUiTestBootAction) {
+        if (didApplyUiTestBootAction) return@LaunchedEffect
+        when (uiTestConfig.action) {
+            UiTestLaunchContract.ACTION_OPEN_CREATE_EDITOR -> {
+                store.dispatch(works.relux.vless_tun_app.feature.tunnel.TunnelHomeAction.AddTunnelClicked)
+            }
+            UiTestLaunchContract.ACTION_OPEN_EDIT_SELECTED_EDITOR -> {
+                store.state.value.selectedProfileId?.let { selectedProfileId ->
+                    store.dispatch(
+                        works.relux.vless_tun_app.feature.tunnel.TunnelHomeAction.EditTunnelClicked(selectedProfileId),
+                    )
+                }
+            }
+        }
+        didApplyUiTestBootAction = true
+    }
+
     LaunchedEffect(snapshot) {
         store.syncRuntime(snapshot)
     }
@@ -145,6 +165,7 @@ private fun VlessTunRoot() {
     TunnelHomeScreen(
         state = state,
         onAction = store::dispatch,
+        editorPinnedTop = uiTestConfig.editorPinnedTop,
     )
 }
 
@@ -177,11 +198,20 @@ private fun previewConfig(
     if (resolvedInline != null) {
         return renderer.render(resolvedInline).json
     }
-    return if (profile.host.isBlank() || profile.serverName.isBlank() || profile.uuid.isBlank()) {
+    return if (profile.sourceUrl.isNotBlank()) {
+        val sourceSummary = profile.sourceUrl.lineSequence().firstOrNull()?.trim().orEmpty()
         """
         {
-          "note": "Config preview is deferred until the source URL is resolved at connect time.",
-          "source_url_configured": ${profile.sourceUrl.isNotBlank()}
+          "note": "Config preview is deferred until connect time because this tunnel resolves from a source URL.",
+          "source_url": "${sourceSummary.replace("\"", "\\\"")}",
+          "resolved_on_connect": true
+        }
+        """.trimIndent()
+    } else if (profile.host.isBlank() || profile.serverName.isBlank() || profile.uuid.isBlank()) {
+        """
+        {
+          "note": "Manual endpoint is incomplete. Fill host, server name, and UUID or paste a source URL.",
+          "manual_endpoint_complete": false
         }
         """.trimIndent()
     } else {

@@ -9,6 +9,7 @@ import works.relux.vless_tun_app.core.model.TunnelProfile
 import works.relux.vless_tun_app.core.model.TunnelSourceMode
 import works.relux.vless_tun_app.core.model.endpoint
 import works.relux.vless_tun_app.core.model.sourceSummary
+import works.relux.vless_tun_app.core.model.transportLabel
 import works.relux.vless_tun_app.core.runtime.TunnelPhase
 import works.relux.vless_tun_app.core.runtime.TunnelRuntimeSnapshot
 
@@ -19,7 +20,6 @@ sealed interface TunnelHomeAction {
     data class SelectTunnelClicked(val profileId: String) : TunnelHomeAction
     data class EditTunnelClicked(val profileId: String) : TunnelHomeAction
     data object DismissEditorClicked : TunnelHomeAction
-    data object EditorManualOverrideToggled : TunnelHomeAction
     data class EditorNameChanged(val value: String) : TunnelHomeAction
     data class EditorHostChanged(val value: String) : TunnelHomeAction
     data class EditorPortChanged(val value: String) : TunnelHomeAction
@@ -55,7 +55,6 @@ data class TunnelEditorState(
     val transport: String = "grpc",
     val sourceMode: TunnelSourceMode = TunnelSourceMode.ProxyResolver,
     val sourceUrl: String = "",
-    val manualConfigEnabled: Boolean = false,
     val serverName: String = "",
     val uuid: String = "",
     val validationError: String? = null,
@@ -64,7 +63,7 @@ data class TunnelEditorState(
         get() = if (mode == TunnelEditorMode.Create) "Add Tunnel" else "Edit Tunnel"
 
     val showManualEndpointFields: Boolean
-        get() = manualConfigEnabled || sourceUrl.isBlank()
+        get() = sourceUrl.isBlank()
 }
 
 data class EgressObservation(
@@ -167,12 +166,6 @@ class TunnelHomeStore(
                 findProfile(action.profileId)?.let { openEditor(editorFor(it)) }
             }
             TunnelHomeAction.DismissEditorClicked -> closeEditor()
-            TunnelHomeAction.EditorManualOverrideToggled -> updateEditor {
-                copy(
-                    manualConfigEnabled = !manualConfigEnabled,
-                    validationError = null,
-                )
-            }
             is TunnelHomeAction.EditorNameChanged -> updateEditor { copy(name = action.value, validationError = null) }
             is TunnelHomeAction.EditorHostChanged -> updateEditor { copy(host = action.value, validationError = null) }
             is TunnelHomeAction.EditorPortChanged -> updateEditor { copy(port = action.value, validationError = null) }
@@ -186,7 +179,6 @@ class TunnelHomeStore(
             is TunnelHomeAction.EditorSourceUrlChanged -> updateEditor {
                 copy(
                     sourceUrl = action.value,
-                    manualConfigEnabled = if (action.value.isBlank()) true else manualConfigEnabled,
                     validationError = null,
                 )
             }
@@ -394,16 +386,18 @@ class TunnelHomeStore(
             return
         }
 
+        val sourceUrl = editor.sourceUrl.trim()
+        val useSourceManagedEndpoint = sourceUrl.isNotBlank()
         val savedProfile = TunnelProfile(
             id = editor.profileId ?: buildProfileId(editor.name),
             name = editor.name.trim(),
-            host = editor.host.trim(),
-            port = editor.port.toInt(),
-            transport = editor.transport.trim().ifBlank { "grpc" },
+            host = if (useSourceManagedEndpoint) "" else editor.host.trim(),
+            port = if (useSourceManagedEndpoint) 443 else editor.port.toInt(),
+            transport = if (useSourceManagedEndpoint) "" else editor.transport.trim().ifBlank { "grpc" },
             sourceMode = editor.sourceMode,
-            sourceUrl = editor.sourceUrl.trim(),
-            serverName = editor.serverName.trim(),
-            uuid = editor.uuid.trim(),
+            sourceUrl = sourceUrl,
+            serverName = if (useSourceManagedEndpoint) "" else editor.serverName.trim(),
+            uuid = if (useSourceManagedEndpoint) "" else editor.uuid.trim(),
         )
 
         profiles = if (editor.mode == TunnelEditorMode.Create) {
@@ -451,7 +445,7 @@ class TunnelHomeStore(
                     name = profile.name,
                     endpoint = profile.endpoint(),
                     sourceSummary = profile.sourceSummary(),
-                    transport = profile.transport.uppercase(Locale.ROOT),
+                    transport = profile.transportLabel(),
                     isSelected = profile.id == selected?.id,
                 )
             },
@@ -481,13 +475,12 @@ class TunnelHomeStore(
         return TunnelEditorState(
             isVisible = true,
             mode = TunnelEditorMode.Create,
-            name = "",
+            name = "My Tunnel",
             host = seed?.host ?: "",
             port = seed?.port?.toString() ?: "443",
             transport = seed?.transport ?: "grpc",
             sourceMode = seed?.sourceMode ?: TunnelSourceMode.ProxyResolver,
             sourceUrl = seed?.sourceUrl ?: "https://subscription.example/path",
-            manualConfigEnabled = false,
             serverName = seed?.serverName ?: "",
             uuid = seed?.uuid ?: "",
         )
@@ -504,7 +497,6 @@ class TunnelHomeStore(
             transport = profile.transport,
             sourceMode = profile.sourceMode,
             sourceUrl = profile.sourceUrl,
-            manualConfigEnabled = profile.sourceUrl.isBlank(),
             serverName = profile.serverName,
             uuid = profile.uuid,
         )

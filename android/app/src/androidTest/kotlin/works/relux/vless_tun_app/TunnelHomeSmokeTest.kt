@@ -5,7 +5,7 @@ import org.junit.Test
 import works.relux.vless_tun_app.pages.TunnelHomePage
 
 class TunnelHomeSmokeTest : BaseUiTestSuite() {
-    override val packageName = "works.relux.vless_tun_app"
+    override val packageName = "works.relux.android.vlesstun.app"
 
     @Test
     fun tunnelHomeLoads() {

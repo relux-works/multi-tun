@@ -7,12 +7,12 @@ enum class TunnelSourceMode(
     val subtitle: String,
 ) {
     ProxyResolver(
-        title = "Proxy Resolver",
-        subtitle = "Resolve through the app-managed source URL before bootstrapping VLESS.",
+        title = "Subscription",
+        subtitle = "Fetch and resolve your subscription URL on every connect.",
     ),
     DirectVless(
         title = "Direct VLESS",
-        subtitle = "Use the explicit VLESS endpoint directly with no resolver hop.",
+        subtitle = "Paste one direct VLESS URI with no subscription fetch.",
     ),
 }
 
@@ -34,10 +34,16 @@ data class TunnelProfile(
     val flow: String = "",
 )
 
-fun TunnelProfile.endpoint(): String = if (host.isBlank()) {
-    "Source-managed endpoint"
-} else {
-    "$host:$port"
+fun TunnelProfile.endpoint(): String = when {
+    host.isNotBlank() -> "$host:$port"
+    sourceUrl.isNotBlank() -> "Resolved on connect"
+    else -> "Endpoint not configured"
+}
+
+fun TunnelProfile.transportLabel(): String = when {
+    transport.isNotBlank() -> transport.uppercase()
+    sourceUrl.isNotBlank() -> "AUTO"
+    else -> "AUTO"
 }
 
 fun TunnelProfile.sourceSummary(): String = when (sourceMode) {
@@ -48,38 +54,40 @@ fun TunnelProfile.sourceSummary(): String = when (sourceMode) {
 private fun String.toResolverSummary(): String {
     val trimmed = trim()
     if (trimmed.isBlank()) {
-        return "Resolver: Source URL not configured"
+        return "Subscription URL not configured"
     }
-    val scheme = runCatching { URI(trimmed).scheme?.lowercase() }.getOrNull()
+    val parsed = runCatching { URI(trimmed) }.getOrNull()
+    val scheme = parsed?.scheme?.lowercase()
+    val host = parsed?.host?.takeIf { it.isNotBlank() }
     return when (scheme) {
-        "http", "https" -> "Resolver: Source URL configured"
-        "vless" -> "Resolver: Inline VLESS source"
-        else -> "Resolver: Source configured"
+        "http", "https" -> "Subscription URL: ${host ?: "configured"}"
+        "vless" -> "Subscription: inline VLESS URI"
+        else -> "Subscription source configured"
     }
 }
 
 private fun String.toDirectSummary(serverName: String): String {
     val trimmed = trim()
     if (trimmed.startsWith("vless://", ignoreCase = true)) {
-        return "Direct: Inline VLESS source"
+        return "Direct VLESS URI configured"
     }
     if (serverName.isNotBlank()) {
-        return "Direct: Explicit endpoint"
+        return "Manual endpoint configured"
     }
-    return "Direct: Endpoint not configured"
+    return "Direct VLESS URI not configured"
 }
 
 object DefaultTunnelCatalog {
     val defaultProfile = TunnelProfile(
         id = "default-tunnel",
         name = "My Tunnel",
-        host = "edge.example.com",
+        host = "",
         port = 443,
-        transport = "grpc",
+        transport = "",
         sourceMode = TunnelSourceMode.ProxyResolver,
         sourceUrl = "https://subscription.example/path",
-        serverName = "edge.example.com",
-        uuid = "00000000-0000-0000-0000-000000000000",
+        serverName = "",
+        uuid = "",
     )
     val defaultProfiles: List<TunnelProfile> = listOf(defaultProfile)
 }
