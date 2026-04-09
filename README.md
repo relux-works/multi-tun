@@ -21,10 +21,34 @@ This repo also keeps live notes from previous VPN investigations:
 - `v2raytun-dancevpn-routing.md`
 - `corp-vpn-wifi-bypass.md`
 
+## Platform Layout
+
+- `desktop/`: current shipped codebase
+  - `desktop/internal/core/`: shared desktop infrastructure
+  - `desktop/internal/vless/`: VLESS-specific desktop logic
+  - `desktop/internal/anyconnect/`: Cisco/OpenConnect-specific desktop logic
+- `android/`: Android client/runtime workspace with a modular app shell, persisted generic tunnel config, real `VpnService` + `libbox` TUN runtime, and a separate observer app for cross-UID egress checks
+- `ios/`: future iOS client/runtime workspace
+
+Android real-device smoke currently lives behind the dedicated runner:
+
+```bash
+./scripts/android/run-device-smoke.sh
+./scripts/android/run-device-smoke.sh --serial 535a1632
+./scripts/android/run-device-smoke.sh \
+  --serial 535a1632 \
+  --test-class works.relux.vless_tun_app.TunnelEgressSmokeTest \
+  --source-inline-vless-from-desktop-config
+```
+
+That path uses preinstall + direct `adb shell am instrument` instead of `connectedDebugAndroidTest`, which is more reliable on MIUI/Xiaomi devices.
+The live egress loop is now verified on a real Xiaomi device with a separate observer app: direct observer egress was `91.77.167.22 · Russia (RU)`, and after connect it switched to `144.31.90.46 · Finland (FI)`.
+
 ## Quick Start
 
 ```bash
 ./scripts/setup.sh
+./scripts/setup.sh --mac-arch amd64
 ./scripts/deinit.sh --dry-run
 
 # edit ~/.config/vless-tun/config.json and set source.url
@@ -45,7 +69,9 @@ openconnect-tun inspect-profiles
 dump status
 ```
 
-`./scripts/setup.sh` now also refreshes the repo-local `agents-infra` runtime when `agents-infra` is installed, layers project-specific local instructions into `.agents/.instructions/`, exposes the repo `vpn-config` skill plus `project-management` in local `.claude/skills` and `.codex/skills`, ensures the shipped runtime prerequisites such as `sing-box`, and builds the bundled `cmd/vpn-auth` Swift helper into the normal `~/.local/bin` install set.
+`./scripts/setup.sh` installs the shipped desktop toolchain end-to-end: it ensures the runtime prerequisites such as `sing-box`, builds the bundled `desktop/cmd/vpn-auth` Swift helper, and links the resulting binaries into `~/.local/bin`.
+
+On macOS the default `./scripts/setup.sh` path is host-native: on Apple Silicon it builds/install `arm64` binaries, and on Intel Macs it builds/install `amd64` binaries with the normal toolchain prerequisites for that machine. If you explicitly pass `--mac-arch arm64|amd64` for the non-host architecture, setup switches into artifact-only cross-build mode and writes desktop binaries into `artifacts/releases/` without touching `~/.local/bin`, configs, or skill wiring.
 
 `./scripts/deinit.sh` removes the managed `multi-tun` global/local skill links and `~/.local/bin` symlinks. Config, cache, keychain secrets, and repo build artifacts stay intact unless you pass the explicit `--purge-*` flags.
 
@@ -113,7 +139,7 @@ Operational notes:
 - the canonical lifecycle commands are now `start`, `reconnect`, `status`, and `stop`; `run`, `connect`, and `disconnect` remain as compatibility aliases.
 - `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. The shipped example bootstrap convention is fully keychain-backed: `auth.username_keychain_account=corp-vpn/username` and `auth.password_keychain_account=corp-vpn/password`. Plain `auth.username` remains as a compatibility fallback. `totp_secret_keychain_account` stays optional and is intentionally not wired by default.
 - live auth now defaults to `--auth aggregate`, which is the only path that currently completes the example SSO+CSD flow on this machine; `--auth openconnect` remains available as the direct `openconnect --authenticate` path for debugging. `vpn-auth` is used for the browser-assisted SAML steps in aggregate mode, with preset-cookie support for follow-up pages.
-- `./scripts/setup.sh` now treats the full live runtime as part of the shipped toolchain: it ensures `sing-box` for `vless-tun`, `totp-cli` for `vpn-auth`, builds `cmd/vpn-auth`, installs the resulting binary into `~/.local/bin`, and `./scripts/deinit.sh` removes that managed binary link again.
+- `./scripts/setup.sh` now treats the full live runtime as part of the shipped toolchain: it ensures `sing-box` for `vless-tun`, `totp-cli` for `vpn-auth`, builds `desktop/cmd/vpn-auth`, installs the resulting binary into `~/.local/bin`, and `./scripts/deinit.sh` removes that managed binary link again.
 - the CSD helper is resolved from the active OpenConnect install, preferring native Cisco `libcsd.dylib` when it is available under `~/.cisco/...`; otherwise it falls back to Homebrew's stable `opt/openconnect/libexec/openconnect/csd-post.sh` path instead of versioned `Cellar/...` paths. The fallback `csd-post.sh` path is still wrapped with tiny macOS shims for `pidof` and GNU-style `stat -c %Y`.
 - `dump` is now the canonical activity-oriented name for packet diagnostics. `cisco-dump` remains installed as a compatibility alias, while runtime state stays under `~/.cache/cisco-dump` for continuity.
 - `dump` keeps its own runtime state under `~/.cache/cisco-dump`, with session logs in `~/.cache/cisco-dump/sessions`, the current session pointer in `~/.cache/cisco-dump/runtime/current-session.json`, mirrored Cisco logs and cache artifacts under each session directory, tracked Cisco per-pid `lsof` snapshots, all-loopback TCP snapshots from `lsof`/`netstat`, a default tunnel-aware traffic capture pcap, a separate loopback OCSC pcap, and host-level DNS/route/TCP/HTTPS probe snapshots for the anonymized example targets.
@@ -412,10 +438,10 @@ vless-tun status
 ```bash
 go fmt ./...
 go test ./...
-go build -o vless-tun ./cmd/vless-tun
-go build -o openconnect-tun ./cmd/openconnect-tun
-go build -o dump ./cmd/dump
-go build -o cisco-dump ./cmd/cisco-dump
+go build -o vless-tun ./desktop/cmd/vless-tun
+go build -o openconnect-tun ./desktop/cmd/openconnect-tun
+go build -o dump ./desktop/cmd/dump
+go build -o cisco-dump ./desktop/cmd/cisco-dump
 ```
 
 ## Notes
