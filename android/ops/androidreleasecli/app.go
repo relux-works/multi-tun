@@ -585,7 +585,7 @@ func resolveReleaseNotes(inline, path string) (string, error) {
 		return inline, nil
 	}
 	if path == "" {
-		return "", nil
+		return "", errors.New("release notes are required; pass --release-notes or --release-notes-file")
 	}
 
 	raw, err := os.ReadFile(path)

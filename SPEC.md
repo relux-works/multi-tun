@@ -97,3 +97,4 @@ Build local CLIs and agent guidance that can:
 - tests and fixtures
 - setup script
 - platform roots for `desktop/`, `android/`, and `ios/`, with desktop code organized into `core`, `vless`, and `anyconnect`
+- Android release helpers must produce a signed Play bundle together with colocated `release-notes.txt` and `native-debug-symbols.zip` sidecars
