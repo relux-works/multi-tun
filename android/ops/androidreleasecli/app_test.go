@@ -92,11 +92,26 @@ func TestRunBundleFailsWhenPlaceholderSecretsRemain(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := New(&stdout, &stderr)
-	exitCode := app.Run([]string{"bundle", "--project-root", root})
+	exitCode := app.Run([]string{"bundle", "--project-root", root, "--release-notes", "Test release notes."})
 	if exitCode != 1 {
 		t.Fatalf("Run(bundle) exitCode = %d, want 1", exitCode)
 	}
 	if !strings.Contains(stderr.String(), "placeholder secret still set") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunBundleRequiresReleaseNotes(t *testing.T) {
+	root := newAndroidProjectRoot(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	exitCode := app.Run([]string{"bundle", "--project-root", root})
+	if exitCode != 1 {
+		t.Fatalf("Run(bundle) exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "release notes are required") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
@@ -227,12 +242,38 @@ func TestRunPublishInjectsPlayCredentialsAndTrack(t *testing.T) {
 		"--project-root", root,
 		"--publisher-json", publisherJSONPath,
 		"--track", "internal",
+		"--release-notes", "Fixed Android 15 VPN connect crash.",
 	})
 	if exitCode != 0 {
 		t.Fatalf("Run(publish) exitCode = %d, stderr=%s", exitCode, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "published ") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunPublishRequiresReleaseNotes(t *testing.T) {
+	root := newAndroidProjectRoot(t)
+
+	publisherJSONPath := filepath.Join(root, "publisher.json")
+	if err := os.WriteFile(publisherJSONPath, []byte("{\"type\":\"service_account\"}"), 0o600); err != nil {
+		t.Fatalf("WriteFile(publisherJSONPath) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	exitCode := app.Run([]string{
+		"publish",
+		"--project-root", root,
+		"--publisher-json", publisherJSONPath,
+		"--track", "internal",
+	})
+	if exitCode != 1 {
+		t.Fatalf("Run(publish) exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "release notes are required") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 

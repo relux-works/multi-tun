@@ -46,13 +46,13 @@ Defaults:
 Then replace the placeholder Keychain values with the real passwords in Keychain
 Access, or via `security add-generic-password -U ...`.
 
-Build the signed test-track bundle:
+Build the signed test-track bundle.
+Release notes are required for every bundle and are copied next to the `.aab`:
 
 ```bash
-android-release bundle
 android-release bundle --release-notes "Fixed Android 15 VPN connect crash."
 android-release bundle --release-notes-file /absolute/path/to/release-notes.txt
-./android/.scripts/release-bundle
+./android/.scripts/release-bundle --release-notes-file /absolute/path/to/release-notes.txt
 ```
 
 Output:
@@ -60,7 +60,7 @@ Output:
 - `android/app/build/outputs/bundle/release/app-release.aab`
 - `android/app/build/outputs/native-debug-symbols/release/native-debug-symbols.zip`
 - `android/app/build/outputs/bundle/release/native-debug-symbols.zip`
-- `android/app/build/outputs/bundle/release/release-notes.txt` when `--release-notes` or `--release-notes-file` is provided
+- `android/app/build/outputs/bundle/release/release-notes.txt`
 - `android/app/build/outputs/mapping/release/mapping.txt`
 
 Notes:
@@ -73,9 +73,8 @@ Manual Play publishing now goes through Gradle Play Publisher via `android-relea
 Examples:
 
 ```bash
-android-release publish --track internal --publisher-json /path/to/google-play-service-account.json
 android-release publish --track internal --publisher-json /path/to/google-play-service-account.json --release-notes-file /absolute/path/to/release-notes.txt
-./android/.scripts/publish-internal --publisher-json /path/to/google-play-service-account.json
+./android/.scripts/publish-internal --publisher-json /path/to/google-play-service-account.json --release-notes-file /absolute/path/to/release-notes.txt
 ```
 
 Credential options:
@@ -83,8 +82,7 @@ Credential options:
 - export `ANDROID_PUBLISHER_CREDENTIALS` with the raw JSON content
 - or pass `--publisher-json /absolute/path/to/service-account.json`
 
-The publish command reuses the signed `app-release.aab` from `android-release bundle` and uploads it to the requested Play track.
-If you pass `--release-notes` or `--release-notes-file`, the same text is also copied to `android/app/build/outputs/bundle/release/release-notes.txt`.
+The publish command reuses the signed `app-release.aab` from `android-release bundle`, requires release notes, uploads the bundle to the requested Play track, and keeps the same `release-notes.txt` sidecar next to the bundle.
 
 ## Real Device Smoke
 

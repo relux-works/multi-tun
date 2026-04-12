@@ -88,7 +88,7 @@ That installed toolchain now also includes `android-release`, the local Go helpe
 
 - seeding Android release-signing metadata
 - generating the Play upload keystore
-- building a signed `app-release.aab` for Play test tracks
+- building a signed `app-release.aab` for Play test tracks with required release notes sidecar output
 - emitting `native-debug-symbols.zip` and ProGuard mapping artifacts for Play symbolication
 - manually publishing the signed bundle to a chosen Google Play track via Gradle Play Publisher
 
