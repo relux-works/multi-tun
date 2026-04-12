@@ -1,6 +1,7 @@
 package works.relux.vless_tun_app.feature.tunnel
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -18,6 +19,7 @@ fun TunnelHomeScreen(
     state: TunnelHomeState,
     onAction: (TunnelHomeAction) -> Unit,
     editorPinnedTop: Boolean = false,
+    onHeaderTap: () -> Unit = {},
 ) {
     Surface(
         modifier = Modifier
@@ -25,7 +27,7 @@ fun TunnelHomeScreen(
             .semantics { testTagsAsResourceId = true },
     ) {
         Scaffold(
-            topBar = { TunnelTopBar() },
+            topBar = { TunnelTopBar(onHeaderTap = onHeaderTap) },
         ) { contentPadding ->
             TunnelHomePage(
                 state = state,
@@ -39,8 +41,13 @@ fun TunnelHomeScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun TunnelTopBar() {
+internal fun TunnelTopBar(
+    onHeaderTap: () -> Unit,
+) {
     CenterAlignedTopAppBar(
+        modifier = Modifier
+            .testTag(TunnelHomeTags.TOP_BAR)
+            .clickable(onClick = onHeaderTap),
         title = {
             Text(
                 text = "Tunnel Home",

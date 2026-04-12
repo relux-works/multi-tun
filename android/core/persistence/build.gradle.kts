@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
+    id("org.jetbrains.kotlin.kapt")
 }
 
 android {
@@ -25,7 +26,9 @@ kotlin {
 dependencies {
     api(project(":core:model"))
 
+    implementation(libs.androidx.room.runtime)
     implementation(libs.kotlinx.serialization.json)
+    kapt(libs.androidx.room.compiler)
 
     testImplementation(libs.junit)
 }

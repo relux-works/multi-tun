@@ -22,6 +22,7 @@ const (
 	placeholderSecret            = "__SET_ME__"
 	storePasswordKeychainAccount = "works.relux.android.vlesstun.app/release-store-password"
 	keyPasswordKeychainAccount   = "works.relux.android.vlesstun.app/release-key-password"
+	releaseNotesFilename         = "release-notes.txt"
 )
 
 type App struct {
@@ -218,11 +219,19 @@ func (a *App) runBundle(args []string) int {
 	clean := fs.Bool("clean", false, "Run :app:clean before bundleRelease")
 	storePasswordAccount := fs.String("store-password-account", storePasswordKeychainAccount, "Keychain account for keystore password")
 	keyPasswordAccount := fs.String("key-password-account", keyPasswordKeychainAccount, "Keychain account for key password")
+	releaseNotes := fs.String("release-notes", "", "Inline release notes text to copy next to the release bundle")
+	releaseNotesFile := fs.String("release-notes-file", "", "Path to a text file whose contents should be copied next to the release bundle")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	layout, err := a.bundleRelease(*projectRoot, *clean, *storePasswordAccount, *keyPasswordAccount)
+	releaseNotesBody, err := resolveReleaseNotes(*releaseNotes, *releaseNotesFile)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "bundle failed: %v\n", err)
+		return 1
+	}
+
+	layout, err := a.bundleRelease(*projectRoot, *clean, *storePasswordAccount, *keyPasswordAccount, releaseNotesBody)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "bundle failed: %v\n", err)
 		return 1
@@ -248,8 +257,16 @@ func (a *App) runPublish(args []string) int {
 	skipBundle := fs.Bool("skip-bundle", false, "Skip bundleRelease and publish an existing app-release.aab")
 	storePasswordAccount := fs.String("store-password-account", storePasswordKeychainAccount, "Keychain account for keystore password")
 	keyPasswordAccount := fs.String("key-password-account", keyPasswordKeychainAccount, "Keychain account for key password")
+	releaseNotes := fs.String("release-notes", "", "Inline release notes text to copy next to the release bundle")
+	releaseNotesFile := fs.String("release-notes-file", "", "Path to a text file whose contents should be copied next to the release bundle")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	releaseNotesBody, err := resolveReleaseNotes(*releaseNotes, *releaseNotesFile)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "publish failed: %v\n", err)
+		return 1
 	}
 
 	layout, err := resolveLayout(*projectRoot)
@@ -275,7 +292,7 @@ func (a *App) runPublish(args []string) int {
 	}
 
 	if !*skipBundle {
-		layout, err = a.bundleRelease(*projectRoot, *clean, *storePasswordAccount, *keyPasswordAccount)
+		layout, err = a.bundleRelease(*projectRoot, *clean, *storePasswordAccount, *keyPasswordAccount, releaseNotesBody)
 		if err != nil {
 			fmt.Fprintf(a.stderr, "publish failed: %v\n", err)
 			return 1
@@ -284,6 +301,10 @@ func (a *App) runPublish(args []string) int {
 
 	if _, err := os.Stat(layout.bundlePath); err != nil {
 		fmt.Fprintf(a.stderr, "publish failed: signed bundle not found: %s\n", layout.bundlePath)
+		return 1
+	}
+	if err := writeReleaseNotesSidecar(a.stdout, layout.bundlePath, releaseNotesBody); err != nil {
+		fmt.Fprintf(a.stderr, "publish failed: %v\n", err)
 		return 1
 	}
 
@@ -447,7 +468,7 @@ func resolveSecret(account, fallback string) (string, error) {
 	return value, nil
 }
 
-func (a *App) bundleRelease(projectRoot string, clean bool, storePasswordAccount, keyPasswordAccount string) (layout, error) {
+func (a *App) bundleRelease(projectRoot string, clean bool, storePasswordAccount, keyPasswordAccount, releaseNotes string) (layout, error) {
 	layout, err := resolveLayout(projectRoot)
 	if err != nil {
 		return layout, err
@@ -507,6 +528,11 @@ func (a *App) bundleRelease(projectRoot string, clean bool, storePasswordAccount
 	}
 	if nativeSymbolsPath != "" {
 		fmt.Fprintf(a.stdout, "native_debug_symbols: %s\n", nativeSymbolsPath)
+		adjacentPath, err := copyFileAdjacentToBundle(layout.bundlePath, nativeSymbolsPath)
+		if err != nil {
+			return layout, err
+		}
+		fmt.Fprintf(a.stdout, "bundle_sidecar_native_debug_symbols: %s\n", adjacentPath)
 		if fallbackUsed {
 			fmt.Fprintf(
 				a.stderr,
@@ -514,8 +540,91 @@ func (a *App) bundleRelease(projectRoot string, clean bool, storePasswordAccount
 			)
 		}
 	}
+	if err := writeReleaseNotesSidecar(a.stdout, layout.bundlePath, releaseNotes); err != nil {
+		return layout, err
+	}
 
 	return layout, nil
+}
+
+func copyFileAdjacentToBundle(bundlePath, sourcePath string) (string, error) {
+	targetPath := filepath.Join(filepath.Dir(bundlePath), filepath.Base(sourcePath))
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return "", fmt.Errorf("mkdir bundle sidecar dir: %w", err)
+	}
+	if err := copyFile(sourcePath, targetPath); err != nil {
+		return "", fmt.Errorf("copy bundle sidecar %s: %w", filepath.Base(sourcePath), err)
+	}
+	return targetPath, nil
+}
+
+func writeReleaseNotesSidecar(stdout io.Writer, bundlePath, releaseNotes string) error {
+	releaseNotes = strings.TrimSpace(releaseNotes)
+	if releaseNotes == "" {
+		return nil
+	}
+
+	targetPath := filepath.Join(filepath.Dir(bundlePath), releaseNotesFilename)
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir release notes dir: %w", err)
+	}
+	if err := os.WriteFile(targetPath, []byte(releaseNotes+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write release notes sidecar: %w", err)
+	}
+	fmt.Fprintf(stdout, "bundle_sidecar_release_notes: %s\n", targetPath)
+	return nil
+}
+
+func resolveReleaseNotes(inline, path string) (string, error) {
+	inline = strings.TrimSpace(inline)
+	path = strings.TrimSpace(path)
+	if inline != "" && path != "" {
+		return "", errors.New("pass either --release-notes or --release-notes-file, not both")
+	}
+	if inline != "" {
+		return inline, nil
+	}
+	if path == "" {
+		return "", nil
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read release notes file %s: %w", path, err)
+	}
+	contents := strings.TrimSpace(string(raw))
+	if contents == "" {
+		return "", fmt.Errorf("release notes file %s is empty", path)
+	}
+	return contents, nil
+}
+
+func copyFile(sourcePath, targetPath string) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	info, err := source.Stat()
+	if err != nil {
+		return err
+	}
+
+	target, err := os.Create(targetPath)
+	if err != nil {
+		return err
+	}
+
+	_, copyErr := io.Copy(target, source)
+	closeErr := target.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Chmod(targetPath, info.Mode().Perm())
 }
 
 func packageNativeDebugSymbols(layout layout) (string, bool, error) {

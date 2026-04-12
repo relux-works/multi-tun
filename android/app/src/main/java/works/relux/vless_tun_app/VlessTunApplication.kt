@@ -5,10 +5,18 @@ import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import works.relux.vless_tun_app.core.persistence.CrashLogStore
+import works.relux.vless_tun_app.diagnostics.AppCrashLoggingUncaughtExceptionHandler
+import works.relux.vless_tun_app.diagnostics.InstalledAppInfo
 
 class VlessTunApplication : Application() {
+    lateinit var crashLogStore: CrashLogStore
+        private set
+
     override fun onCreate() {
         super.onCreate()
+        crashLogStore = CrashLogStore(this).also(CrashLogStore::warmUp)
+        installCrashHandler()
         initializeLibbox()
     }
 
@@ -39,6 +47,17 @@ class VlessTunApplication : Application() {
                 setDebug(false)
                 setCrashReportSource("VlessTunApplication")
             },
+        )
+    }
+
+    private fun installCrashHandler() {
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler(
+            AppCrashLoggingUncaughtExceptionHandler(
+                persistReport = crashLogStore::record,
+                installedAppInfo = InstalledAppInfo.from(this),
+                previousHandler = previousHandler,
+            ),
         )
     }
 

@@ -9,6 +9,7 @@ import androidx.test.uiautomator.Until
 import java.io.File
 import java.util.Base64
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.persistence.CrashLogWrite
 import works.relux.vless_tun_app.core.model.TunnelSourceMode
 import works.relux.vless_tun_app.core.persistence.TunnelCatalog
 import works.relux.vless_tun_app.core.persistence.TunnelCatalogStore
@@ -66,6 +67,34 @@ internal object TunnelDeviceTestHarness {
             TunnelCatalog(
                 profiles = listOf(seededProfile),
                 selectedProfileId = seededProfile.id,
+            ),
+        )
+    }
+
+    fun clearCrashLogs() {
+        val application = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as VlessTunApplication
+        application.crashLogStore.clear()
+    }
+
+    fun seedCrashLog(
+        exceptionClass: String = "java.lang.IllegalStateException",
+        exceptionMessage: String = "Seeded test crash",
+    ) {
+        val application = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as VlessTunApplication
+        application.crashLogStore.record(
+            CrashLogWrite(
+                handledAtEpochMillis = System.currentTimeMillis(),
+                threadName = "main",
+                exceptionClass = exceptionClass,
+                exceptionMessage = exceptionMessage,
+                stackTrace = "$exceptionClass: $exceptionMessage\n\tat works.relux.vless_tun_app.TestHarness.seedCrashLog(TestHarness.kt:1)",
+                packageName = application.packageName,
+                appVersionName = "instrumented",
+                appVersionCode = 0,
+                deviceManufacturer = android.os.Build.MANUFACTURER.orEmpty(),
+                deviceModel = android.os.Build.MODEL.orEmpty(),
+                androidRelease = android.os.Build.VERSION.RELEASE.orEmpty(),
+                sdkInt = android.os.Build.VERSION.SDK_INT,
             ),
         )
     }

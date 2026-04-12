@@ -20,12 +20,21 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.persistence.CrashLogEntry
 import works.relux.vless_tun_app.core.persistence.TunnelCatalog
 import works.relux.vless_tun_app.core.persistence.TunnelCatalogStore
 import works.relux.vless_tun_app.core.render.TunnelConfigRenderer
 import works.relux.vless_tun_app.core.subscription.SourceProfileResolver
+import works.relux.vless_tun_app.diagnostics.AppDebugInfo
+import works.relux.vless_tun_app.diagnostics.DebugMenuPage
+import works.relux.vless_tun_app.diagnostics.DebugMenuSheet
+import works.relux.vless_tun_app.diagnostics.DebugMenuTapGate
+import works.relux.vless_tun_app.diagnostics.buildAppDebugInfo
+import works.relux.vless_tun_app.diagnostics.shareCrashLogEntry
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeScreen
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeStore
 import works.relux.vless_tun_app.platform.vpnservice.TunnelServiceConnector
@@ -48,11 +57,14 @@ class MainActivity : ComponentActivity() {
 private fun VlessTunRoot() {
     val context = LocalContext.current
     val activity = context as? Activity
+    val application = context.applicationContext as VlessTunApplication
     val scope = rememberCoroutineScope()
     val renderer = remember { TunnelConfigRenderer() }
     val resolver = remember { SourceProfileResolver() }
     val egressProbe = remember { EgressProbeClient() }
     val connector = remember(context) { TunnelServiceConnector(context) }
+    val crashLogStore = remember(application) { application.crashLogStore }
+    val debugMenuTapGate = remember { DebugMenuTapGate() }
     val uiTestConfig = remember(activity?.intent) { UiTestLaunchConfig.fromIntent(activity?.intent) }
     val catalogStore = remember(context) {
         TunnelCatalogStore(
@@ -66,6 +78,11 @@ private fun VlessTunRoot() {
     var pendingPermissionProfile by remember { mutableStateOf<works.relux.vless_tun_app.core.model.TunnelProfile?>(null) }
     var egressBootstrapAddress by rememberSaveable { mutableStateOf<String?>(null) }
     var didApplyUiTestBootAction by rememberSaveable { mutableStateOf(false) }
+    var isDebugMenuVisible by rememberSaveable { mutableStateOf(false) }
+    var selectedDebugMenuPage by rememberSaveable { mutableStateOf(DebugMenuPage.AppInfo) }
+    var appDebugInfo by remember { mutableStateOf<AppDebugInfo?>(null) }
+    var crashEntries by remember { mutableStateOf<List<CrashLogEntry>>(emptyList()) }
+    var isLoadingCrashEntries by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -162,11 +179,50 @@ private fun VlessTunRoot() {
         }
     }
 
+    LaunchedEffect(isDebugMenuVisible) {
+        if (!isDebugMenuVisible) {
+            return@LaunchedEffect
+        }
+        appDebugInfo = buildAppDebugInfo(
+            context = context,
+            crashDatabasePath = crashLogStore.databasePath(),
+            tunnelCatalogPath = catalogStore.storagePath(),
+        )
+        isLoadingCrashEntries = true
+        crashEntries = withContext(Dispatchers.IO) { crashLogStore.listRecent() }
+        isLoadingCrashEntries = false
+    }
+
     TunnelHomeScreen(
         state = state,
         onAction = store::dispatch,
         editorPinnedTop = uiTestConfig.editorPinnedTop,
+        onHeaderTap = {
+            if (debugMenuTapGate.registerTap()) {
+                selectedDebugMenuPage = DebugMenuPage.AppInfo
+                isDebugMenuVisible = true
+            }
+        },
     )
+
+    if (isDebugMenuVisible) {
+        DebugMenuSheet(
+            appInfo = appDebugInfo ?: buildAppDebugInfo(
+                context = context,
+                crashDatabasePath = crashLogStore.databasePath(),
+                tunnelCatalogPath = catalogStore.storagePath(),
+            ),
+            crashEntries = crashEntries,
+            isLoadingExceptions = isLoadingCrashEntries,
+            selectedPage = selectedDebugMenuPage,
+            onPageSelected = { selectedDebugMenuPage = it },
+            onShareCrashEntry = { entry -> shareCrashLogEntry(context, entry) },
+            onDismiss = {
+                debugMenuTapGate.reset()
+                isDebugMenuVisible = false
+            },
+        )
+    }
 }
 
 private fun Throwable.toUiMessage(fallback: String): String {

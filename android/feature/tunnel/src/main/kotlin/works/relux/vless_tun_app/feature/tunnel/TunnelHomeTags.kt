@@ -2,6 +2,7 @@ package works.relux.vless_tun_app.feature.tunnel
 
 object TunnelHomeTags {
     const val SCREEN = "Tunnel_Home_Screen_container"
+    const val TOP_BAR = "Tunnel_Home_TopBar_container"
     const val TITLE = "Tunnel_Home_Title_text"
     const val STATUS_CARD = "Tunnel_Home_Status_card"
     const val STATUS_PHASE = "Tunnel_Home_StatusPhase_text"

@@ -142,7 +142,11 @@ func TestRunBundleInjectsSecretsIntoGradleEnvironment(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := New(&stdout, &stderr)
-	exitCode := app.Run([]string{"bundle", "--project-root", root})
+	exitCode := app.Run([]string{
+		"bundle",
+		"--project-root", root,
+		"--release-notes", "Fixed Android 15 VPN connect crash.",
+	})
 	if exitCode != 0 {
 		t.Fatalf("Run(bundle) exitCode = %d, stderr=%s", exitCode, stderr.String())
 	}
@@ -151,6 +155,24 @@ func TestRunBundleInjectsSecretsIntoGradleEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "native_debug_symbols: "+filepath.Join(root, "android", "app", "build", "outputs", "native-debug-symbols", "release", "native-debug-symbols.zip")) {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+	sidecarPath := filepath.Join(root, "android", "app", "build", "outputs", "bundle", "release", "native-debug-symbols.zip")
+	if !strings.Contains(stdout.String(), "bundle_sidecar_native_debug_symbols: "+sidecarPath) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("Stat(sidecarPath) error = %v", err)
+	}
+	releaseNotesPath := filepath.Join(root, "android", "app", "build", "outputs", "bundle", "release", releaseNotesFilename)
+	if !strings.Contains(stdout.String(), "bundle_sidecar_release_notes: "+releaseNotesPath) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	rawReleaseNotes, err := os.ReadFile(releaseNotesPath)
+	if err != nil {
+		t.Fatalf("ReadFile(releaseNotesPath) error = %v", err)
+	}
+	if string(rawReleaseNotes) != "Fixed Android 15 VPN connect crash.\n" {
+		t.Fatalf("release notes = %q", string(rawReleaseNotes))
 	}
 }
 
@@ -211,6 +233,91 @@ func TestRunPublishInjectsPlayCredentialsAndTrack(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "published ") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunBundleCopiesReleaseNotesFromFile(t *testing.T) {
+	originalGet := keychainGetAndroidRelease
+	originalExec := execCommandAndroidRelease
+	t.Cleanup(func() {
+		keychainGetAndroidRelease = originalGet
+		execCommandAndroidRelease = originalExec
+	})
+
+	root := newAndroidProjectRoot(t)
+	configPath := filepath.Join(root, "android", "keystore.properties")
+	if err := os.WriteFile(configPath, []byte("storeFile=keystore/upload.jks\nkeyAlias=upload\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "android", "keystore"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(keystore) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "android", "keystore", "upload.jks"), []byte("test"), 0o600); err != nil {
+		t.Fatalf("WriteFile(keystore) error = %v", err)
+	}
+
+	releaseNotesSource := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(releaseNotesSource, []byte("Line one.\nLine two.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(releaseNotesSource) error = %v", err)
+	}
+
+	keychainGetAndroidRelease = func(account string) (string, error) {
+		switch account {
+		case storePasswordKeychainAccount:
+			return "store-secret", nil
+		case keyPasswordKeychainAccount:
+			return "key-secret", nil
+		default:
+			return "", fmt.Errorf("unexpected account %s", account)
+		}
+	}
+
+	execCommandAndroidRelease = func(name string, args ...string) *exec.Cmd {
+		cmdArgs := append([]string{"-test.run=TestHelperProcessAndroidRelease", "--", name}, args...)
+		cmd := exec.Command(os.Args[0], cmdArgs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS_ANDROID_RELEASE=1")
+		return cmd
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	exitCode := app.Run([]string{
+		"bundle",
+		"--project-root", root,
+		"--release-notes-file", releaseNotesSource,
+	})
+	if exitCode != 0 {
+		t.Fatalf("Run(bundle) exitCode = %d, stderr=%s", exitCode, stderr.String())
+	}
+
+	releaseNotesPath := filepath.Join(root, "android", "app", "build", "outputs", "bundle", "release", releaseNotesFilename)
+	rawReleaseNotes, err := os.ReadFile(releaseNotesPath)
+	if err != nil {
+		t.Fatalf("ReadFile(releaseNotesPath) error = %v", err)
+	}
+	if string(rawReleaseNotes) != "Line one.\nLine two.\n" {
+		t.Fatalf("release notes = %q", string(rawReleaseNotes))
+	}
+}
+
+func TestRunBundleRejectsConflictingReleaseNotesInputs(t *testing.T) {
+	root := newAndroidProjectRoot(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	exitCode := app.Run([]string{
+		"bundle",
+		"--project-root", root,
+		"--release-notes", "Inline",
+		"--release-notes-file", filepath.Join(root, "notes.txt"),
+	})
+	if exitCode != 1 {
+		t.Fatalf("Run(bundle) exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "pass either --release-notes or --release-notes-file, not both") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
