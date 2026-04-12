@@ -31,6 +31,7 @@ import works.relux.vless_tun_app.core.render.TunnelConfigRenderer
 import works.relux.vless_tun_app.core.subscription.SourceProfileResolver
 import works.relux.vless_tun_app.diagnostics.AppDebugInfo
 import works.relux.vless_tun_app.diagnostics.DebugMenuPage
+import works.relux.vless_tun_app.diagnostics.DebugMenuDismissGate
 import works.relux.vless_tun_app.diagnostics.DebugMenuSheet
 import works.relux.vless_tun_app.diagnostics.DebugMenuTapGate
 import works.relux.vless_tun_app.diagnostics.buildAppDebugInfo
@@ -64,6 +65,7 @@ private fun VlessTunRoot() {
     val egressProbe = remember { EgressProbeClient() }
     val connector = remember(context) { TunnelServiceConnector(context) }
     val crashLogStore = remember(application) { application.crashLogStore }
+    val debugMenuDismissGate = remember { DebugMenuDismissGate() }
     val debugMenuTapGate = remember { DebugMenuTapGate() }
     val uiTestConfig = remember(activity?.intent) { UiTestLaunchConfig.fromIntent(activity?.intent) }
     val catalogStore = remember(context) {
@@ -198,7 +200,11 @@ private fun VlessTunRoot() {
         onAction = store::dispatch,
         editorPinnedTop = uiTestConfig.editorPinnedTop,
         onHeaderTap = {
+            if (isDebugMenuVisible) {
+                return@TunnelHomeScreen
+            }
             if (debugMenuTapGate.registerTap()) {
+                debugMenuDismissGate.markOpened()
                 selectedDebugMenuPage = DebugMenuPage.AppInfo
                 isDebugMenuVisible = true
             }
@@ -217,7 +223,12 @@ private fun VlessTunRoot() {
             selectedPage = selectedDebugMenuPage,
             onPageSelected = { selectedDebugMenuPage = it },
             onShareCrashEntry = { entry -> shareCrashLogEntry(context, entry) },
+            canDismiss = debugMenuDismissGate::canDismiss,
             onDismiss = {
+                if (!debugMenuDismissGate.canDismiss()) {
+                    return@DebugMenuSheet
+                }
+                debugMenuDismissGate.reset()
                 debugMenuTapGate.reset()
                 isDebugMenuVisible = false
             },

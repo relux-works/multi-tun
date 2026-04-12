@@ -107,12 +107,23 @@ class TunnelHomePage(
     }
 
     fun openDebugMenu(): TunnelHomePage {
-        repeat(7) {
-            checkNotNull(topBar) { "Tunnel top bar not found." }.click()
-            device.waitForIdle()
-            Thread.sleep(100)
+        return tapTopBar(times = 7, intervalMillis = 150)
+            .waitForDebugMenu(timeout = 5_000)
+    }
+
+    fun tapTopBar(times: Int, intervalMillis: Long = 0): TunnelHomePage {
+        val topBarBounds = checkNotNull(topBar) { "Tunnel top bar not found." }.visibleBounds
+        val tapX = topBarBounds.centerX()
+        val tapY = topBarBounds.centerY()
+
+        repeat(times) { index ->
+            device.click(tapX, tapY)
+            if (index < times - 1 && intervalMillis > 0) {
+                Thread.sleep(intervalMillis)
+            }
         }
-        return waitForDebugMenu(timeout = 5_000)
+        device.waitForIdle()
+        return this
     }
 
     fun waitForDebugMenu(timeout: Long): TunnelHomePage {
@@ -121,6 +132,11 @@ class TunnelHomePage(
         if (!found) {
             throw AssertionError("Expected debug menu within ${timeout}ms.")
         }
+        return this
+    }
+
+    fun assertDebugMenuVisible(): TunnelHomePage {
+        checkNotNull(debugMenuSheet) { "Expected debug menu to stay visible." }
         return this
     }
 

@@ -12,11 +12,15 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -49,10 +53,19 @@ fun DebugMenuSheet(
     selectedPage: DebugMenuPage,
     onPageSelected: (DebugMenuPage) -> Unit,
     onShareCrashEntry: (CrashLogEntry) -> Unit,
+    canDismiss: () -> Boolean = { true },
     onDismiss: () -> Unit,
 ) {
+    val latestCanDismiss by rememberUpdatedState(canDismiss)
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { targetValue ->
+            targetValue != SheetValue.Hidden || latestCanDismiss()
+        },
+    )
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         modifier = Modifier.testTag(DebugMenuTags.SHEET),
     ) {
         Column(
