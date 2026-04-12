@@ -5,6 +5,7 @@ import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import com.uitesttools.uitest.pageobject.PageElement
+import works.relux.vless_tun_app.diagnostics.DebugMenuTags
 import works.relux.vless_tun_app.core.runtime.TunnelPhase
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeTags
 
@@ -72,6 +73,19 @@ class TunnelHomePage(
         get() = device.findObject(By.res(TunnelHomeTags.ADD_BUTTON))
             ?: device.findObject(By.text("Add Tunnel"))
 
+    val topBar: UiObject2?
+        get() = device.findObject(By.res(TunnelHomeTags.TOP_BAR))
+            ?: device.findObject(By.res(TunnelHomeTags.TITLE))
+            ?: device.findObject(By.text("Tunnel Home"))
+
+    val debugMenuSheet: UiObject2?
+        get() = device.findObject(By.res(DebugMenuTags.SHEET))
+            ?: device.findObject(By.text("Debug Menu"))
+
+    val debugMenuExceptionsTab: UiObject2?
+        get() = device.findObject(By.res(DebugMenuTags.TAB_EXCEPTIONS))
+            ?: device.findObject(By.text("Exceptions"))
+
     val editorNameField: UiObject2?
         get() = device.findObject(By.res(TunnelHomeTags.EDITOR_NAME_INPUT))
 
@@ -89,6 +103,38 @@ class TunnelHomePage(
     fun tapPrimary(): TunnelHomePage {
         primaryButton?.click()
         device.waitForIdle()
+        return this
+    }
+
+    fun openDebugMenu(): TunnelHomePage {
+        repeat(7) {
+            checkNotNull(topBar) { "Tunnel top bar not found." }.click()
+            device.waitForIdle()
+            Thread.sleep(100)
+        }
+        return waitForDebugMenu(timeout = 5_000)
+    }
+
+    fun waitForDebugMenu(timeout: Long): TunnelHomePage {
+        val found = device.wait(Until.hasObject(By.res(DebugMenuTags.SHEET)), timeout) ||
+            device.wait(Until.hasObject(By.text("Debug Menu")), timeout)
+        if (!found) {
+            throw AssertionError("Expected debug menu within ${timeout}ms.")
+        }
+        return this
+    }
+
+    fun openDebugMenuExceptionsTab(): TunnelHomePage {
+        checkNotNull(debugMenuExceptionsTab) { "Debug menu exceptions tab not found." }.click()
+        device.waitForIdle()
+        return this
+    }
+
+    fun waitForVisibleText(text: String, timeout: Long): TunnelHomePage {
+        val found = device.wait(Until.hasObject(By.textContains(text)), timeout)
+        if (!found) {
+            throw AssertionError("Expected visible text containing '$text' within ${timeout}ms.")
+        }
         return this
     }
 
