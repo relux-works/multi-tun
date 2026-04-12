@@ -307,7 +307,7 @@ class TunnelVpnService : VpnService(), SingboxRuntimeHost {
             this,
             NOTIFICATION_ID,
             buildNotification(),
-            0,
+            TunnelForegroundServiceType.resolve(Build.VERSION.SDK_INT),
         )
     }
 
