@@ -3,6 +3,8 @@ package works.relux.vless_tun_app
 import android.content.Intent
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.BySelector
+import androidx.test.uiautomator.StaleObjectException
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
@@ -175,9 +177,7 @@ internal object TunnelDeviceTestHarness {
         val deadline = System.currentTimeMillis() + timeout
         while (System.currentTimeMillis() < deadline) {
             maybeTrustApplication(device)
-            val approvalButton = findApprovalButton(device)
-            if (approvalButton != null) {
-                approvalButton.click()
+            if (clickMatchingObject(device, approvalSelectors())) {
                 device.waitForIdle()
                 Thread.sleep(750)
                 return true
@@ -188,17 +188,19 @@ internal object TunnelDeviceTestHarness {
     }
 
     private fun maybeTrustApplication(device: UiDevice) {
-        val trustSelector = listOf(
+        clickMatchingObject(
+            device,
+            listOf(
             By.textContains("trust"),
             By.textContains("Trust"),
             By.textContains("remember"),
             By.textContains("Remember"),
+            ),
         )
-        trustSelector.firstNotNullOfOrNull(device::findObject)?.click()
     }
 
-    private fun findApprovalButton(device: UiDevice): UiObject2? {
-        val selectors = listOf(
+    private fun approvalSelectors(): List<BySelector> {
+        return listOf(
             By.res("android", "button1"),
             By.res("miuix.appcompat", "button1"),
             By.text("OK"),
@@ -216,6 +218,35 @@ internal object TunnelDeviceTestHarness {
             By.desc("Connect"),
             By.desc("Yes"),
         )
-        return selectors.firstNotNullOfOrNull(device::findObject)
+    }
+
+    private fun clickMatchingObject(
+        device: UiDevice,
+        selectors: List<BySelector>,
+        attemptsPerSelector: Int = 3,
+    ): Boolean {
+        selectors.forEach { selector ->
+            repeat(attemptsPerSelector) {
+                val candidate = device.findObject(selector) ?: return@repeat
+                if (clickObjectSafely(device, candidate)) {
+                    return true
+                }
+                Thread.sleep(150)
+            }
+        }
+        return false
+    }
+
+    private fun clickObjectSafely(
+        device: UiDevice,
+        candidate: UiObject2,
+    ): Boolean {
+        return try {
+            candidate.click()
+            true
+        } catch (_: StaleObjectException) {
+            device.waitForIdle()
+            false
+        }
     }
 }
