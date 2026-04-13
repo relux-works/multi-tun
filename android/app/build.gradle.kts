@@ -67,8 +67,8 @@ android {
         applicationId = "works.relux.android.vlesstun.app"
         minSdk = 33
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.0.7"
+        versionCode = 8
+        versionName = "1.0.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
