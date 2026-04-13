@@ -175,7 +175,7 @@ PY
 resolve_observer_bootstrap_ip() {
     python3 - <<'PY'
 import socket
-infos = socket.getaddrinfo("ip-api.com", 80, socket.AF_INET, socket.SOCK_STREAM)
+infos = socket.getaddrinfo("api.ipify.org", 443, socket.AF_INET, socket.SOCK_STREAM)
 for info in infos:
     addr = info[4][0].strip()
     if addr:
