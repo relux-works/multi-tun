@@ -134,6 +134,7 @@ private fun parseVlessUri(raw: String): ResolvedTunnelSource {
     val uuid = URLDecoder.decode(userInfo, StandardCharsets.UTF_8)
     val query = decodeQuery(parsed.rawQuery)
     val transport = query["type"] ?: query["network"] ?: "tcp"
+    validateTransportSupport(transport)
     val serverName = query["sni"] ?: query["serverName"] ?: host
     val security = query["security"] ?: ""
     val serviceName = query["serviceName"] ?: query["service_name"] ?: ""
@@ -155,6 +156,14 @@ private fun parseVlessUri(raw: String): ResolvedTunnelSource {
         shortId = shortId,
         flow = flow,
     )
+}
+
+private fun validateTransportSupport(transport: String) {
+    if (transport.equals("xhttp", ignoreCase = true)) {
+        throw IllegalArgumentException(
+            "Unsupported VLESS transport 'xhttp'. The current Android runtime uses sing-box/libbox and cannot start Xray XHTTP profiles yet.",
+        )
+    }
 }
 
 private fun normalizePayload(rawPayload: String): String {
