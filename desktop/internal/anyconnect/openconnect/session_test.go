@@ -280,6 +280,50 @@ func TestStopCleansOrphanedResolverStateWithoutCurrentSession(t *testing.T) {
 	}
 }
 
+func TestOrphanedResolverArtifactsPresentDetectsManagedResolversByMarker(t *testing.T) {
+	cacheDir := t.TempDir()
+	session := CurrentSession{
+		ID:             "20260413T102417Z",
+		Server:         "vpn-ra2.mts.ru/outside",
+		Mode:           ConnectModeSplitInclude,
+		VPNDomains:     []string{"mts.ru", "mtsit.com"},
+		BypassSuffixes: []string{"vpn-ra2.mts.ru", "obs.mts.ru"},
+		VPNNameservers: []string{"10.73.16.4", "10.73.0.23"},
+	}
+	if err := os.MkdirAll(SessionsDir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll(SessionsDir) error = %v", err)
+	}
+	if err := SaveMetadata(CurrentSession{
+		ID:             session.ID,
+		MetadataPath:   filepath.Join(SessionsDir(cacheDir), metadataFilePrefix+session.ID+".json"),
+		Server:         session.Server,
+		Mode:           session.Mode,
+		VPNDomains:     session.VPNDomains,
+		BypassSuffixes: session.BypassSuffixes,
+		VPNNameservers: session.VPNNameservers,
+	}); err != nil {
+		t.Fatalf("SaveMetadata() error = %v", err)
+	}
+
+	resolverDir := t.TempDir()
+	prevResolverDir := resolverDirOpenConnect
+	resolverDirOpenConnect = resolverDir
+	t.Cleanup(func() {
+		resolverDirOpenConnect = prevResolverDir
+	})
+
+	if err := os.WriteFile(filepath.Join(resolverDir, "mts.ru"), []byte("placeholder\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(mts.ru) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(resolverDir, "search.tailscale"), []byte("# Added by tailscaled\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(search.tailscale) error = %v", err)
+	}
+
+	if !orphanedResolverArtifactsPresent(cacheDir) {
+		t.Fatal("orphanedResolverArtifactsPresent() = false, want true")
+	}
+}
+
 func TestStopClearsStartingSessionAndCleansOrphanedResolverState(t *testing.T) {
 	cacheDir := t.TempDir()
 	if err := SaveCurrent(cacheDir, CurrentSession{ID: "20260402T111926Z"}); err != nil {
