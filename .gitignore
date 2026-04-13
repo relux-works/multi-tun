@@ -2,6 +2,7 @@
 /vpn-config
 /vless-tun
 /openconnect-tun
+/android-release
 /dump
 /cisco-dump
 /vpn-core
