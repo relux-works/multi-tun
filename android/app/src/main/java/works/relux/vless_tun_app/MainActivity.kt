@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.model.routingPolicy
 import works.relux.vless_tun_app.core.persistence.CrashLogEntry
 import works.relux.vless_tun_app.core.persistence.TunnelCatalog
 import works.relux.vless_tun_app.core.persistence.TunnelCatalogStore
@@ -284,10 +285,15 @@ private fun previewConfig(
     }
     return if (profile.sourceUrl.isNotBlank()) {
         val sourceSummary = profile.sourceUrl.lineSequence().firstOrNull()?.trim().orEmpty()
+        val routingPolicy = profile.routingPolicy()
         """
         {
           "note": "Config preview is deferred until connect time because this tunnel resolves from a source URL.",
           "source_url": "${sourceSummary.replace("\"", "\\\"")}",
+          "routing": {
+            "route_masks": [${routingPolicy.routeMasks.joinToString(", ") { "\"${it.replace("\"", "\\\"")}\"" }}],
+            "bypass_masks": [${routingPolicy.bypassMasks.joinToString(", ") { "\"${it.replace("\"", "\\\"")}\"" }}]
+          },
           "resolved_on_connect": true
         }
         """.trimIndent()

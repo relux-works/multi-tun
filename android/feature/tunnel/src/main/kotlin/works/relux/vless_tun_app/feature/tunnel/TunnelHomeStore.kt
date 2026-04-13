@@ -8,6 +8,10 @@ import works.relux.vless_tun_app.core.mvi.MviStore
 import works.relux.vless_tun_app.core.model.TunnelProfile
 import works.relux.vless_tun_app.core.model.TunnelSourceMode
 import works.relux.vless_tun_app.core.model.endpoint
+import works.relux.vless_tun_app.core.model.parseSuffixMaskText
+import works.relux.vless_tun_app.core.model.routeMasksText
+import works.relux.vless_tun_app.core.model.bypassMasksText
+import works.relux.vless_tun_app.core.model.routingPolicy
 import works.relux.vless_tun_app.core.model.sourceSummary
 import works.relux.vless_tun_app.core.model.transportLabel
 import works.relux.vless_tun_app.core.runtime.TunnelPhase
@@ -28,6 +32,8 @@ sealed interface TunnelHomeAction {
     data class EditorSourceUrlChanged(val value: String) : TunnelHomeAction
     data class EditorServerNameChanged(val value: String) : TunnelHomeAction
     data class EditorUuidChanged(val value: String) : TunnelHomeAction
+    data class EditorRouteMasksChanged(val value: String) : TunnelHomeAction
+    data class EditorBypassMasksChanged(val value: String) : TunnelHomeAction
     data object SaveTunnelClicked : TunnelHomeAction
 }
 
@@ -57,6 +63,8 @@ data class TunnelEditorState(
     val sourceUrl: String = "",
     val serverName: String = "",
     val uuid: String = "",
+    val routeMasksText: String = "",
+    val bypassMasksText: String = "",
     val validationError: String? = null,
 ) {
     val title: String
@@ -184,6 +192,8 @@ class TunnelHomeStore(
             }
             is TunnelHomeAction.EditorServerNameChanged -> updateEditor { copy(serverName = action.value, validationError = null) }
             is TunnelHomeAction.EditorUuidChanged -> updateEditor { copy(uuid = action.value, validationError = null) }
+            is TunnelHomeAction.EditorRouteMasksChanged -> updateEditor { copy(routeMasksText = action.value, validationError = null) }
+            is TunnelHomeAction.EditorBypassMasksChanged -> updateEditor { copy(bypassMasksText = action.value, validationError = null) }
             TunnelHomeAction.SaveTunnelClicked -> saveEditor()
         }
     }
@@ -388,6 +398,10 @@ class TunnelHomeStore(
 
         val sourceUrl = editor.sourceUrl.trim()
         val useSourceManagedEndpoint = sourceUrl.isNotBlank()
+        val normalizedPolicy = works.relux.vless_tun_app.core.model.TunnelRoutingPolicy(
+            routeMasks = parseSuffixMaskText(editor.routeMasksText),
+            bypassMasks = parseSuffixMaskText(editor.bypassMasksText),
+        ).normalized()
         val savedProfile = TunnelProfile(
             id = editor.profileId ?: buildProfileId(editor.name),
             name = editor.name.trim(),
@@ -398,6 +412,8 @@ class TunnelHomeStore(
             sourceUrl = sourceUrl,
             serverName = if (useSourceManagedEndpoint) "" else editor.serverName.trim(),
             uuid = if (useSourceManagedEndpoint) "" else editor.uuid.trim(),
+            routeMasks = normalizedPolicy.routeMasks,
+            bypassMasks = normalizedPolicy.bypassMasks,
         )
 
         profiles = if (editor.mode == TunnelEditorMode.Create) {
@@ -483,6 +499,8 @@ class TunnelHomeStore(
             sourceUrl = seed?.sourceUrl ?: "https://subscription.example/path",
             serverName = seed?.serverName ?: "",
             uuid = seed?.uuid ?: "",
+            routeMasksText = seed?.routingPolicy()?.routeMasksText().orEmpty(),
+            bypassMasksText = seed?.routingPolicy()?.bypassMasksText().orEmpty(),
         )
     }
 
@@ -499,6 +517,8 @@ class TunnelHomeStore(
             sourceUrl = profile.sourceUrl,
             serverName = profile.serverName,
             uuid = profile.uuid,
+            routeMasksText = profile.routingPolicy().routeMasksText(),
+            bypassMasksText = profile.routingPolicy().bypassMasksText(),
         )
     }
 

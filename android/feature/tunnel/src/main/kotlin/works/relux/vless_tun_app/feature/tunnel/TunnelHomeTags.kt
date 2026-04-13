@@ -30,6 +30,8 @@ object TunnelHomeTags {
     const val EDITOR_TRANSPORT_INPUT = "Tunnel_Home_EditorTransport_input"
     const val EDITOR_SERVER_NAME_INPUT = "Tunnel_Home_EditorServerName_input"
     const val EDITOR_UUID_INPUT = "Tunnel_Home_EditorUuid_input"
+    const val EDITOR_ROUTE_MASKS_INPUT = "Tunnel_Home_EditorRouteMasks_input"
+    const val EDITOR_BYPASS_MASKS_INPUT = "Tunnel_Home_EditorBypassMasks_input"
     const val EDITOR_SAVE_BUTTON = "Tunnel_Home_EditorSave_button"
     const val EDITOR_CANCEL_BUTTON = "Tunnel_Home_EditorCancel_button"
     const val CONFIG_PREVIEW = "Tunnel_Home_ConfigPreview_card"
