@@ -25,6 +25,7 @@ const (
 )
 
 var cleanupOrphanedResolverStateOpenConnect = cleanupOrphanedResolverState
+var resolverDirOpenConnect = "/etc/resolver"
 
 type CurrentSession struct {
 	ID               string    `json:"id"`
@@ -883,7 +884,7 @@ func cleanupOrphanedResolverState(cacheDir string) (bool, error) {
 	if state, _, err := DetectState(); err == nil && state == StateConnected {
 		return false, nil
 	}
-	if !orphanedResolverArtifactsPresent() {
+	if !orphanedResolverArtifactsPresent(cacheDir) {
 		return false, nil
 	}
 
@@ -924,28 +925,52 @@ func cleanupOrphanedResolverState(cacheDir string) (bool, error) {
 		}
 	}
 
-	if orphanedResolverArtifactsPresent() {
+	if orphanedResolverArtifactsPresent(cacheDir) {
 		return true, fmt.Errorf("orphaned openconnect resolver artifacts still present after cleanup")
 	}
 	return true, nil
 }
 
-func orphanedResolverArtifactsPresent() bool {
-	for _, domain := range orphanedResolverArtifactDomains() {
-		if _, err := os.Stat(filepath.Join("/etc/resolver", domain)); err == nil {
+func orphanedResolverArtifactsPresent(cacheDir string) bool {
+	for _, domain := range orphanedResolverArtifactDomains(cacheDir) {
+		if _, err := os.Stat(filepath.Join(resolverDirOpenConnect, domain)); err == nil {
 			return true
 		}
 	}
 	return false
 }
 
-func orphanedResolverArtifactDomains() []string {
-	domains := []string{
-		"bypass.corp.example",
-		"vpn-gw2.corp.example",
+func orphanedResolverArtifactDomains(cacheDir string) []string {
+	entries, err := os.ReadDir(SessionsDir(ResolveCacheDir(cacheDir)))
+	if err != nil {
+		return nil
 	}
-	if spec := supplementalResolverSpecForServer("vpn-gw2.corp.example/outside"); spec != nil {
+
+	domains := make([]string, 0, 32)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), metadataFilePrefix) || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(SessionsDir(ResolveCacheDir(cacheDir)), entry.Name())
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var current CurrentSession
+		if err := json.Unmarshal(raw, &current); err != nil {
+			continue
+		}
+		spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
+			IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
+			VPNDomains:     append([]string(nil), current.VPNDomains...),
+			BypassSuffixes: append([]string(nil), current.BypassSuffixes...),
+			VPNNameservers: append([]string(nil), current.VPNNameservers...),
+		})
+		if spec == nil {
+			continue
+		}
 		domains = append(domains, spec.Domains...)
+		domains = append(domains, spec.BypassDomains...)
 	}
 	return uniqueStrings(domains)
 }
