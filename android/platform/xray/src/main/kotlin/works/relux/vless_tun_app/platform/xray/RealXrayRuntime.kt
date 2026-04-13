@@ -29,16 +29,15 @@ class RealXrayRuntime(
             LibXrayBridge.resetDns()
 
             val tunHandle = host.openTun(config.runtimeManifest)
-            val datDir = ensureRuntimeDataDir()
-            val mphCachePath = ensureRuntimeCachePath()
+            val runtimePaths = prepareRuntimePaths(host.context.filesDir)
             val dnsServer = config.runtimeManifest.dnsServers.firstOrNull().orEmpty().ifBlank { DEFAULT_DNS_SERVER }
 
             LibXrayBridge.registerControllers(dialerController)
             LibXrayBridge.initDns(dialerController, dnsServer)
             LibXrayBridge.setTunFd(tunHandle.fd)
             LibXrayBridge.runXrayFromJson(
-                datDir = datDir.absolutePath,
-                mphCachePath = mphCachePath.absolutePath,
+                datDir = runtimePaths.dataDir.absolutePath,
+                mphCachePath = runtimePaths.mphCachePath,
                 configJson = config.json,
             )
 
@@ -72,20 +71,25 @@ class RealXrayRuntime(
         )
     }
 
-    private fun ensureRuntimeDataDir(): File {
-        return File(host.context.filesDir, "xray/data").apply {
-            mkdirs()
-        }
-    }
-
-    private fun ensureRuntimeCachePath(): File {
-        return File(host.context.filesDir, "xray/cache/matcher.cache").apply {
-            parentFile?.mkdirs()
-        }
-    }
-
     private companion object {
         const val TAG = "RealXrayRuntime"
         const val DEFAULT_DNS_SERVER = "1.1.1.1"
     }
+}
+
+internal data class XrayRuntimePaths(
+    val dataDir: File,
+    val mphCachePath: String,
+)
+
+internal fun prepareRuntimePaths(filesDir: File): XrayRuntimePaths {
+    val dataDir = File(filesDir, "xray/data").apply {
+        mkdirs()
+    }
+
+    return XrayRuntimePaths(
+        dataDir = dataDir,
+        // libXray expects this to stay empty unless BuildMphCache created the file first.
+        mphCachePath = "",
+    )
 }
