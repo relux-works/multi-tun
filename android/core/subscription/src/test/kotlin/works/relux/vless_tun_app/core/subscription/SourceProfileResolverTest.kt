@@ -8,14 +8,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
-import works.relux.vless_tun_app.core.model.TunnelSourceMode
 
 class SourceProfileResolverTest {
     @Test
     fun resolveInline_parsesLiteralVlessUri() {
         val resolver = SourceProfileResolver()
         val profile = DefaultTunnelCatalog.defaultProfile.copy(
-            sourceMode = TunnelSourceMode.DirectVless,
             sourceUrl = "vless://11111111-1111-1111-1111-111111111111@edge.example.net:7443?type=ws&sni=cdn.example.net",
             host = "",
             serverName = "",

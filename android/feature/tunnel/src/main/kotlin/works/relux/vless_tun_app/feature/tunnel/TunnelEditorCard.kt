@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -19,7 +18,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import works.relux.vless_tun_app.core.model.TunnelSourceMode
 
 @Composable
 internal fun TunnelEditorCard(
@@ -31,6 +29,31 @@ internal fun TunnelEditorCard(
             .fillMaxWidth()
             .testTag(TunnelHomeTags.EDITOR_CARD),
     ) {
+        val trimmedSource = state.sourceUrl.trim()
+        val detectedSourceLabel = when {
+            trimmedSource.startsWith("vless://", ignoreCase = true) -> "Detected: inline VLESS URI"
+            trimmedSource.startsWith("http://", ignoreCase = true) ||
+                trimmedSource.startsWith("https://", ignoreCase = true) -> "Detected: subscription URL"
+            trimmedSource.isBlank() -> "Detected: manual endpoint"
+            else -> "Detected: source URL"
+        }
+        val sourcePlaceholder = if (trimmedSource.startsWith("vless://", ignoreCase = true)) {
+            "vless://uuid@host:port?type=grpc&sni=edge.example.com"
+        } else {
+            "https://subscription.example/path or vless://uuid@host:port?type=grpc"
+        }
+        val sourceDescription = when {
+            trimmedSource.startsWith("vless://", ignoreCase = true) -> {
+                "The app will parse this inline VLESS URI directly at preview/connect time."
+            }
+            trimmedSource.startsWith("http://", ignoreCase = true) ||
+                trimmedSource.startsWith("https://", ignoreCase = true) -> {
+                    "The app will fetch and resolve this subscription on every connect."
+                }
+            else -> {
+                "Paste one subscription URL or one direct `vless://` URI here. Leave it empty to use the manual endpoint fields below."
+            }
+        }
         Column(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -57,17 +80,8 @@ internal fun TunnelEditorCard(
                 text = "Connection Source",
                 style = MaterialTheme.typography.labelLarge,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TunnelSourceMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = state.sourceMode == mode,
-                        onClick = { onAction(TunnelHomeAction.EditorSourceModeChanged(mode)) },
-                        label = { Text(mode.title) },
-                    )
-                }
-            }
             Text(
-                text = state.sourceMode.subtitle,
+                text = detectedSourceLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -77,32 +91,12 @@ internal fun TunnelEditorCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(TunnelHomeTags.EDITOR_SOURCE_URL_INPUT),
-                label = {
-                    Text(
-                        if (state.sourceMode == TunnelSourceMode.ProxyResolver) {
-                            "Subscription URL"
-                        } else {
-                            "Direct VLESS URI"
-                        },
-                    )
-                },
-                placeholder = {
-                    Text(
-                        if (state.sourceMode == TunnelSourceMode.ProxyResolver) {
-                            "https://subscription.example/path"
-                        } else {
-                            "vless://uuid@host:port?type=grpc&sni=edge.example.com"
-                        },
-                    )
-                },
+                label = { Text("Source URL or inline VLESS") },
+                placeholder = { Text(sourcePlaceholder) },
                 singleLine = true,
             )
             Text(
-                text = if (state.sourceMode == TunnelSourceMode.ProxyResolver) {
-                    "This is the only field most people need. The app fetches this subscription on every connect."
-                } else {
-                    "Paste a direct `vless://` endpoint here. No subscription fetch will happen."
-                },
+                text = sourceDescription,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

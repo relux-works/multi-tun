@@ -8,7 +8,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
 import works.relux.vless_tun_app.core.model.TunnelProfile
-import works.relux.vless_tun_app.core.model.TunnelSourceMode
 
 class TunnelHomeStoreTest {
     @Test
@@ -17,7 +16,6 @@ class TunnelHomeStoreTest {
 
         store.dispatch(TunnelHomeAction.AddTunnelClicked)
         store.dispatch(TunnelHomeAction.EditorNameChanged("Lab Tunnel"))
-        store.dispatch(TunnelHomeAction.EditorSourceModeChanged(TunnelSourceMode.ProxyResolver))
         store.dispatch(TunnelHomeAction.EditorSourceUrlChanged("https://lab.vpn.example/bootstrap"))
         store.dispatch(TunnelHomeAction.SaveTunnelClicked)
 
@@ -98,7 +96,6 @@ class TunnelHomeStoreTest {
         store.dispatch(TunnelHomeAction.EditorHostChanged(""))
         store.dispatch(TunnelHomeAction.EditorServerNameChanged(""))
         store.dispatch(TunnelHomeAction.EditorUuidChanged(""))
-        store.dispatch(TunnelHomeAction.EditorSourceModeChanged(TunnelSourceMode.ProxyResolver))
         store.dispatch(TunnelHomeAction.EditorSourceUrlChanged("https://subscription.example/path"))
         store.dispatch(TunnelHomeAction.SaveTunnelClicked)
 
@@ -106,6 +103,24 @@ class TunnelHomeStoreTest {
         assertFalse(state.editor.isVisible)
         assertEquals("Source Driven", state.profileName)
         assertEquals("Subscription URL: subscription.example", state.profileSourceSummary)
+        assertEquals("Resolved on connect", state.profileEndpoint)
+    }
+
+    @Test
+    fun saveTunnel_autoDetectsInlineVlessSourceSummary() {
+        val store = buildStore()
+
+        store.dispatch(TunnelHomeAction.AddTunnelClicked)
+        store.dispatch(TunnelHomeAction.EditorNameChanged("Inline XHTTP"))
+        store.dispatch(
+            TunnelHomeAction.EditorSourceUrlChanged(
+                "vless://2536e4e4-c6f2-41d8-b2dd-24b72c12872a@213.176.73.234:8443?encryption=none&fp=chrome&host=investleaks.pro&mode=auto&path=%2Fcrypto-news&pbk=2CQCGkIWGGDkxqDkb7HhZ_er2hQh6jxlaT-MPZUkLxY&security=reality&sid=1f55d194dd059d&sni=www.investleaks.pro&type=xhttp#France-alexis",
+            ),
+        )
+        store.dispatch(TunnelHomeAction.SaveTunnelClicked)
+
+        val state = store.state.value
+        assertEquals("Inline VLESS URI: 213.176.73.234", state.profileSourceSummary)
         assertEquals("Resolved on connect", state.profileEndpoint)
     }
 

@@ -2,18 +2,11 @@ package works.relux.vless_tun_app.core.model
 
 import java.net.URI
 
-enum class TunnelSourceMode(
-    val title: String,
-    val subtitle: String,
-) {
-    ProxyResolver(
-        title = "Subscription",
-        subtitle = "Fetch and resolve your subscription URL on every connect.",
-    ),
-    DirectVless(
-        title = "Direct VLESS",
-        subtitle = "Paste one direct VLESS URI with no subscription fetch.",
-    ),
+enum class TunnelSourceKind {
+    Subscription,
+    InlineVless,
+    ManualEndpoint,
+    Unconfigured,
 }
 
 data class TunnelProfile(
@@ -22,7 +15,6 @@ data class TunnelProfile(
     val host: String,
     val port: Int,
     val transport: String,
-    val sourceMode: TunnelSourceMode,
     val sourceUrl: String,
     val serverName: String,
     val uuid: String,
@@ -48,9 +40,22 @@ fun TunnelProfile.transportLabel(): String = when {
     else -> "AUTO"
 }
 
-fun TunnelProfile.sourceSummary(): String = when (sourceMode) {
-    TunnelSourceMode.ProxyResolver -> sourceUrl.toResolverSummary()
-    TunnelSourceMode.DirectVless -> sourceUrl.toDirectSummary(serverName)
+fun TunnelProfile.sourceKind(): TunnelSourceKind {
+    val trimmedSource = sourceUrl.trim()
+    return when {
+        trimmedSource.startsWith("http://", ignoreCase = true) ||
+            trimmedSource.startsWith("https://", ignoreCase = true) -> TunnelSourceKind.Subscription
+        trimmedSource.startsWith("vless://", ignoreCase = true) -> TunnelSourceKind.InlineVless
+        host.isNotBlank() && serverName.isNotBlank() && uuid.isNotBlank() -> TunnelSourceKind.ManualEndpoint
+        else -> TunnelSourceKind.Unconfigured
+    }
+}
+
+fun TunnelProfile.sourceSummary(): String = when (sourceKind()) {
+    TunnelSourceKind.Subscription -> sourceUrl.toResolverSummary()
+    TunnelSourceKind.InlineVless -> sourceUrl.toInlineSummary(serverName)
+    TunnelSourceKind.ManualEndpoint -> "Manual endpoint configured"
+    TunnelSourceKind.Unconfigured -> "Connection source not configured"
 }
 
 fun TunnelProfile.routingPolicy(): TunnelRoutingPolicy {
@@ -75,15 +80,22 @@ private fun String.toResolverSummary(): String {
     }
 }
 
-private fun String.toDirectSummary(serverName: String): String {
+private fun String.toInlineSummary(serverName: String): String {
     val trimmed = trim()
-    if (trimmed.startsWith("vless://", ignoreCase = true)) {
-        return "Direct VLESS URI configured"
+    if (!trimmed.startsWith("vless://", ignoreCase = true)) {
+        return if (serverName.isNotBlank()) {
+            "Inline VLESS URI: $serverName"
+        } else {
+            "Inline VLESS URI configured"
+        }
     }
-    if (serverName.isNotBlank()) {
-        return "Manual endpoint configured"
+    val parsed = runCatching { URI(trimmed) }.getOrNull()
+    val host = parsed?.host?.takeIf { it.isNotBlank() } ?: serverName.takeIf { it.isNotBlank() }
+    return if (host != null) {
+        "Inline VLESS URI: $host"
+    } else {
+        "Inline VLESS URI configured"
     }
-    return "Direct VLESS URI not configured"
 }
 
 object DefaultTunnelCatalog {
@@ -93,7 +105,6 @@ object DefaultTunnelCatalog {
         host = "",
         port = 443,
         transport = "",
-        sourceMode = TunnelSourceMode.ProxyResolver,
         sourceUrl = "https://subscription.example/path",
         serverName = "",
         uuid = "",

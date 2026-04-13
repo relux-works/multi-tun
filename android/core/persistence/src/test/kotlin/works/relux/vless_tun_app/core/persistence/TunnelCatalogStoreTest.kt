@@ -6,7 +6,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
 import works.relux.vless_tun_app.core.model.TunnelProfile
-import works.relux.vless_tun_app.core.model.TunnelSourceMode
 
 class TunnelCatalogStoreTest {
     @Test
@@ -31,7 +30,6 @@ class TunnelCatalogStoreTest {
             host = "edge.example.net",
             port = 7443,
             transport = "ws",
-            sourceMode = TunnelSourceMode.DirectVless,
             sourceUrl = "",
             serverName = "edge.example.net",
             uuid = "11111111-1111-1111-1111-111111111111",
