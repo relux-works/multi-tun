@@ -34,17 +34,23 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import works.relux.vless_tun_app.core.model.TunnelProfile
 import works.relux.vless_tun_app.core.render.RenderedTunnelConfig
+import works.relux.vless_tun_app.core.runtime.TunnelRuntimeBackend
+import works.relux.vless_tun_app.core.runtime.TunnelRuntimeManifest
 import works.relux.vless_tun_app.core.runtime.TunnelPhase
 import works.relux.vless_tun_app.core.runtime.TunnelRuntimeSnapshot
+import works.relux.vless_tun_app.core.runtime.TunnelTunHandle
 import works.relux.vless_tun_app.platform.singbox.RealSingboxRuntime
 import works.relux.vless_tun_app.platform.singbox.SingboxRuntimeHost
-import works.relux.vless_tun_app.platform.singbox.TunOpenResult
+import works.relux.vless_tun_app.platform.xray.RealXrayRuntime
+import works.relux.vless_tun_app.platform.xray.XrayRuntimeHost
 
-class TunnelVpnService : VpnService(), SingboxRuntimeHost {
+class TunnelVpnService : VpnService(), SingboxRuntimeHost, XrayRuntimeHost {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val runtime by lazy { RealSingboxRuntime(this) }
+    private val singboxRuntime by lazy { RealSingboxRuntime(this) }
+    private val xrayRuntime by lazy { RealXrayRuntime(this) }
     private var tunInterface: ParcelFileDescriptor? = null
     private var activeConfig: RenderedTunnelConfig? = null
+    private var activeBackend: TunnelRuntimeBackend? = null
     private val snapshotFlow = MutableStateFlow(
         TunnelRuntimeSnapshot(
             detail = "TunnelVpnService is idle.",
@@ -103,7 +109,7 @@ class TunnelVpnService : VpnService(), SingboxRuntimeHost {
         }
     }
 
-    override fun openTun(options: TunOptions): TunOpenResult {
+    override fun openTun(options: TunOptions): TunnelTunHandle {
         Log.i(TAG, "openTun mtu=${options.getMTU()} autoRoute=${options.getAutoRoute()}")
         closeTunInterface()
 
@@ -221,7 +227,59 @@ class TunnelVpnService : VpnService(), SingboxRuntimeHost {
             }
         }
 
-        return TunOpenResult(
+        return TunnelTunHandle(
+            fd = descriptor.fd,
+            summary = summary,
+        )
+    }
+
+    override fun openTun(manifest: TunnelRuntimeManifest): TunnelTunHandle {
+        Log.i(TAG, "openTun manifest mtu=${manifest.mtu} session=${manifest.sessionName}")
+        closeTunInterface()
+
+        val builder = Builder()
+            .setSession(manifest.sessionName)
+            .setMtu(manifest.mtu)
+            .setBlocking(false)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setMetered(false)
+        }
+        if (manifest.allowBypass) {
+            builder.allowBypass()
+        }
+        currentUnderlyingNetworks()?.let(builder::setUnderlyingNetworks)
+
+        manifest.addresses.forEach { address ->
+            builder.addAddress(address.address, address.prefixLength)
+        }
+        manifest.dnsServers
+            .filter(String::isNotBlank)
+            .distinct()
+            .forEach(builder::addDnsServer)
+        manifest.routes.forEach { route ->
+            builder.addRoute(route.address, route.prefixLength)
+        }
+
+        val descriptor = builder.establish()
+            ?: error("VpnService.Builder.establish() returned null. The VPN permission was likely revoked.")
+        tunInterface = descriptor
+        Log.i(TAG, "VpnService establish returned fd=${descriptor.fd}")
+
+        val summary = buildString {
+            append("TUN interface established on fd=${descriptor.fd} with route set ")
+            append(
+                manifest.routes.joinToString { route ->
+                    "${route.address}/${route.prefixLength}"
+                }.ifBlank { "none" },
+            )
+            if (manifest.dnsServers.isNotEmpty()) {
+                append(". DNS=")
+                append(manifest.dnsServers.joinToString())
+            }
+        }
+
+        return TunnelTunHandle(
             fd = descriptor.fd,
             summary = summary,
         )
@@ -247,23 +305,28 @@ class TunnelVpnService : VpnService(), SingboxRuntimeHost {
             return
         }
         activeConfig = config
+        activeBackend = config.backend
         Log.i(TAG, "startTunnel profile=${profile.name}")
 
         snapshotFlow.value = TunnelRuntimeSnapshot(
             phase = TunnelPhase.Connecting,
             activeProfileName = profile.name,
-            detail = "Starting libbox-backed sing-box runtime with a real Android TUN data plane.",
+            detail = when (config.backend) {
+                TunnelRuntimeBackend.Xray -> "Starting Xray-backed runtime with the Android VpnService TUN data plane."
+                TunnelRuntimeBackend.Singbox -> "Starting libbox-backed sing-box runtime with a real Android TUN data plane."
+            },
             renderedConfigPreview = config.json.take(220),
         )
 
         serviceScope.launch {
-            val runtimeSnapshot = runtime.start(
-                profile = profile,
-                config = config,
-            )
+            val runtimeSnapshot = when (config.backend) {
+                TunnelRuntimeBackend.Xray -> xrayRuntime.start(profile = profile, config = config)
+                TunnelRuntimeBackend.Singbox -> singboxRuntime.start(profile = profile, config = config)
+            }
             Log.i(TAG, "runtime returned phase=${runtimeSnapshot.phase} detail=${runtimeSnapshot.detail}")
             if (runtimeSnapshot.phase != TunnelPhase.Connected) {
                 activeConfig = null
+                activeBackend = null
                 closeTunInterface()
             }
             snapshotFlow.value = runtimeSnapshot
@@ -282,8 +345,12 @@ class TunnelVpnService : VpnService(), SingboxRuntimeHost {
         )
 
         serviceScope.launch {
-            snapshotFlow.value = runtime.stop()
+            snapshotFlow.value = when (activeBackend) {
+                TunnelRuntimeBackend.Xray -> xrayRuntime.stop()
+                TunnelRuntimeBackend.Singbox, null -> singboxRuntime.stop()
+            }
             activeConfig = null
+            activeBackend = null
             closeTunInterface()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

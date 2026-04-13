@@ -11,6 +11,7 @@ import kotlinx.serialization.json.put
 import works.relux.vless_tun_app.core.model.TunnelProfile
 import works.relux.vless_tun_app.core.model.routingPolicy
 import works.relux.vless_tun_app.core.runtime.TunnelAddress
+import works.relux.vless_tun_app.core.runtime.TunnelRuntimeBackend
 import works.relux.vless_tun_app.core.runtime.TunnelRoute
 import works.relux.vless_tun_app.core.runtime.TunnelRuntimeManifest
 
@@ -19,6 +20,7 @@ data class RenderedTunnelConfig(
     val profileName: String,
     val json: String,
     val runtimeManifest: TunnelRuntimeManifest,
+    val backend: TunnelRuntimeBackend = TunnelRuntimeBackend.Singbox,
 )
 
 class TunnelConfigRenderer {

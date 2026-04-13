@@ -26,6 +26,7 @@ dependencies {
     api(project(":core:render"))
     api(project(":core:runtime-contract"))
     implementation(project(":platform:singbox"))
+    implementation(project(":platform:xray"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.core)
