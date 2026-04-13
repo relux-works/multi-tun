@@ -35,6 +35,8 @@ class TunnelCatalogStoreTest {
             sourceUrl = "",
             serverName = "edge.example.net",
             uuid = "11111111-1111-1111-1111-111111111111",
+            routeMasks = listOf("ipify.org"),
+            bypassMasks = listOf(".api64.ipify.org"),
         )
         val catalog = TunnelCatalog(
             profiles = defaultCatalog().profiles + extraProfile,
@@ -47,6 +49,8 @@ class TunnelCatalogStoreTest {
         assertEquals(extraProfile.id, loaded.selectedProfileId)
         assertEquals(2, loaded.profiles.size)
         assertEquals("Direct Custom", loaded.profiles.last().name)
+        assertEquals(listOf("ipify.org"), loaded.profiles.last().routeMasks)
+        assertEquals(listOf(".api64.ipify.org"), loaded.profiles.last().bypassMasks)
     }
 
     private fun defaultCatalog(): TunnelCatalog {
