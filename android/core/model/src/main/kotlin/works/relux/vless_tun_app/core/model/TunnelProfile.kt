@@ -32,6 +32,8 @@ data class TunnelProfile(
     val publicKey: String = "",
     val shortId: String = "",
     val flow: String = "",
+    val routeMasks: List<String> = emptyList(),
+    val bypassMasks: List<String> = emptyList(),
 )
 
 fun TunnelProfile.endpoint(): String = when {
@@ -49,6 +51,13 @@ fun TunnelProfile.transportLabel(): String = when {
 fun TunnelProfile.sourceSummary(): String = when (sourceMode) {
     TunnelSourceMode.ProxyResolver -> sourceUrl.toResolverSummary()
     TunnelSourceMode.DirectVless -> sourceUrl.toDirectSummary(serverName)
+}
+
+fun TunnelProfile.routingPolicy(): TunnelRoutingPolicy {
+    return TunnelRoutingPolicy(
+        routeMasks = routeMasks,
+        bypassMasks = bypassMasks,
+    ).normalized()
 }
 
 private fun String.toResolverSummary(): String {

@@ -87,6 +87,8 @@ private data class TunnelProfileDocument(
     val sourceUrl: String,
     val serverName: String,
     val uuid: String,
+    val routeMasks: List<String> = emptyList(),
+    val bypassMasks: List<String> = emptyList(),
 ) {
     fun toModel(): TunnelProfile {
         val resolvedSourceMode = runCatching {
@@ -102,6 +104,8 @@ private data class TunnelProfileDocument(
             sourceUrl = sourceUrl,
             serverName = serverName,
             uuid = uuid,
+            routeMasks = routeMasks,
+            bypassMasks = bypassMasks,
         )
     }
 
@@ -117,6 +121,8 @@ private data class TunnelProfileDocument(
                 sourceUrl = profile.sourceUrl,
                 serverName = profile.serverName,
                 uuid = profile.uuid,
+                routeMasks = profile.routeMasks,
+                bypassMasks = profile.bypassMasks,
             )
         }
     }
