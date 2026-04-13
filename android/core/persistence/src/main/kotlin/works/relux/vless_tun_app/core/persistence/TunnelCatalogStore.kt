@@ -4,7 +4,6 @@ import java.io.File
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import works.relux.vless_tun_app.core.model.TunnelProfile
-import works.relux.vless_tun_app.core.model.TunnelSourceMode
 
 data class TunnelCatalog(
     val profiles: List<TunnelProfile>,
@@ -83,7 +82,6 @@ private data class TunnelProfileDocument(
     val host: String,
     val port: Int,
     val transport: String,
-    val sourceMode: String,
     val sourceUrl: String,
     val serverName: String,
     val uuid: String,
@@ -91,16 +89,12 @@ private data class TunnelProfileDocument(
     val bypassMasks: List<String> = emptyList(),
 ) {
     fun toModel(): TunnelProfile {
-        val resolvedSourceMode = runCatching {
-            TunnelSourceMode.valueOf(sourceMode)
-        }.getOrDefault(TunnelSourceMode.ProxyResolver)
         return TunnelProfile(
             id = id,
             name = name,
             host = host,
             port = port,
             transport = transport,
-            sourceMode = resolvedSourceMode,
             sourceUrl = sourceUrl,
             serverName = serverName,
             uuid = uuid,
@@ -117,7 +111,6 @@ private data class TunnelProfileDocument(
                 host = profile.host,
                 port = profile.port,
                 transport = profile.transport,
-                sourceMode = profile.sourceMode.name,
                 sourceUrl = profile.sourceUrl,
                 serverName = profile.serverName,
                 uuid = profile.uuid,

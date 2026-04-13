@@ -6,7 +6,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import works.relux.vless_tun_app.core.mvi.MviStore
 import works.relux.vless_tun_app.core.model.TunnelProfile
-import works.relux.vless_tun_app.core.model.TunnelSourceMode
 import works.relux.vless_tun_app.core.model.endpoint
 import works.relux.vless_tun_app.core.model.parseSuffixMaskText
 import works.relux.vless_tun_app.core.model.routeMasksText
@@ -28,7 +27,6 @@ sealed interface TunnelHomeAction {
     data class EditorHostChanged(val value: String) : TunnelHomeAction
     data class EditorPortChanged(val value: String) : TunnelHomeAction
     data class EditorTransportChanged(val value: String) : TunnelHomeAction
-    data class EditorSourceModeChanged(val value: TunnelSourceMode) : TunnelHomeAction
     data class EditorSourceUrlChanged(val value: String) : TunnelHomeAction
     data class EditorServerNameChanged(val value: String) : TunnelHomeAction
     data class EditorUuidChanged(val value: String) : TunnelHomeAction
@@ -59,7 +57,6 @@ data class TunnelEditorState(
     val host: String = "",
     val port: String = "443",
     val transport: String = "grpc",
-    val sourceMode: TunnelSourceMode = TunnelSourceMode.ProxyResolver,
     val sourceUrl: String = "",
     val serverName: String = "",
     val uuid: String = "",
@@ -155,7 +152,7 @@ class TunnelHomeStore(
             profiles = profiles,
             selectedId = selectedProfileId,
             phase = TunnelPhase.Disconnected,
-            detail = "Edit the seeded tunnel profile, replace the placeholders with your own subscription or direct VLESS endpoint, then connect with the TUN-only runtime.",
+            detail = "Edit the seeded tunnel profile, replace the placeholders with your own subscription, inline VLESS URI, or manual endpoint, then connect with the TUN-only runtime.",
             requiresPermission = false,
             editor = TunnelEditorState(),
             egress = egressState,
@@ -178,12 +175,6 @@ class TunnelHomeStore(
             is TunnelHomeAction.EditorHostChanged -> updateEditor { copy(host = action.value, validationError = null) }
             is TunnelHomeAction.EditorPortChanged -> updateEditor { copy(port = action.value, validationError = null) }
             is TunnelHomeAction.EditorTransportChanged -> updateEditor { copy(transport = action.value, validationError = null) }
-            is TunnelHomeAction.EditorSourceModeChanged -> updateEditor {
-                copy(
-                    sourceMode = action.value,
-                    validationError = null,
-                )
-            }
             is TunnelHomeAction.EditorSourceUrlChanged -> updateEditor {
                 copy(
                     sourceUrl = action.value,
@@ -408,7 +399,6 @@ class TunnelHomeStore(
             host = if (useSourceManagedEndpoint) "" else editor.host.trim(),
             port = if (useSourceManagedEndpoint) 443 else editor.port.toInt(),
             transport = if (useSourceManagedEndpoint) "" else editor.transport.trim().ifBlank { "grpc" },
-            sourceMode = editor.sourceMode,
             sourceUrl = sourceUrl,
             serverName = if (useSourceManagedEndpoint) "" else editor.serverName.trim(),
             uuid = if (useSourceManagedEndpoint) "" else editor.uuid.trim(),
@@ -495,7 +485,6 @@ class TunnelHomeStore(
             host = seed?.host ?: "",
             port = seed?.port?.toString() ?: "443",
             transport = seed?.transport ?: "grpc",
-            sourceMode = seed?.sourceMode ?: TunnelSourceMode.ProxyResolver,
             sourceUrl = seed?.sourceUrl ?: "https://subscription.example/path",
             serverName = seed?.serverName ?: "",
             uuid = seed?.uuid ?: "",
@@ -513,7 +502,6 @@ class TunnelHomeStore(
             host = profile.host,
             port = profile.port.toString(),
             transport = profile.transport,
-            sourceMode = profile.sourceMode,
             sourceUrl = profile.sourceUrl,
             serverName = profile.serverName,
             uuid = profile.uuid,
@@ -530,9 +518,6 @@ class TunnelHomeStore(
         if (!hasSource && editor.host.isBlank()) return "Host is required when no source URL is provided."
         if (!hasSource && editor.serverName.isBlank()) return "Server name is required when no source URL is provided."
         if (!hasSource && editor.uuid.isBlank()) return "UUID is required when no source URL is provided."
-        if (editor.sourceMode == TunnelSourceMode.ProxyResolver && !hasSource && editor.host.isBlank()) {
-            return "Proxy Resolver mode requires a source URL or an explicit endpoint."
-        }
         return null
     }
 
