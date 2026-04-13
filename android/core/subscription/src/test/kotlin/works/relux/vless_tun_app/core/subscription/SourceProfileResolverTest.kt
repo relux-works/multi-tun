@@ -4,6 +4,8 @@ import java.nio.charset.StandardCharsets
 import java.util.Base64
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
 import works.relux.vless_tun_app.core.model.TunnelSourceMode
@@ -54,5 +56,26 @@ class SourceProfileResolverTest {
         assertEquals("qq", resolved.fingerprint)
         assertEquals("pubkey", resolved.publicKey)
         assertEquals("abcd", resolved.shortId)
+    }
+
+    @Test
+    fun resolve_rejectsUnsupportedXhttpTransportFromSubscriptionPayload() = runBlocking {
+        val vless = "vless://2536e4e4-c6f2-41d8-b2dd-24b72c12872a@213.176.73.234:8443?encryption=none&fp=chrome&host=investleaks.pro&mode=auto&path=%2Fcrypto-news&pbk=2CQCGkIWGGDkxqDkb7HhZ_er2hQh6jxlaT-MPZUkLxY&security=reality&sid=edda9843e1d0&sni=www.investleaks.pro&spx=%2FOPBnmzHndAthSR4&type=xhttp#France-alexis"
+        val payload = Base64.getEncoder().encodeToString(vless.toByteArray(StandardCharsets.UTF_8))
+        val resolver = SourceProfileResolver(fetchText = { payload })
+        val profile = DefaultTunnelCatalog.defaultProfile.copy(
+            sourceUrl = "https://213.176.73.234:7654/freedom/example",
+            host = "",
+            serverName = "",
+            uuid = "",
+        )
+
+        try {
+            resolver.resolve(profile)
+            fail("Expected xhttp payload to be rejected.")
+        } catch (error: IllegalArgumentException) {
+            assertTrue(error.message.orEmpty().contains("xhttp"))
+            assertTrue(error.message.orEmpty().contains("Android runtime"))
+        }
     }
 }

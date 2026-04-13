@@ -90,7 +90,15 @@ private fun VlessTunRoot() {
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            pendingPermissionProfile?.let { connector.connect(it, renderer.render(it)) }
+            pendingPermissionProfile?.let { profile ->
+                runCatching { renderer.render(profile) }
+                    .onSuccess { renderedConfig ->
+                        connector.connect(profile, renderedConfig)
+                    }
+                    .onFailure { error ->
+                        storeRef?.onConnectFailed(error.message ?: "Failed to build tunnel config.")
+                    }
+            }
         } else {
             storeRef?.onPermissionDenied()
         }
@@ -109,13 +117,18 @@ private fun VlessTunRoot() {
                             storeRef?.onConnectFailed(error.message ?: "Failed to resolve source URL.")
                             return@launch
                         }
+                    val renderedConfig = runCatching { renderer.render(resolvedProfile) }
+                        .getOrElse { error ->
+                            storeRef?.onConnectFailed(error.message ?: "Failed to build tunnel config.")
+                            return@launch
+                        }
                     val permissionIntent = connector.prepareVpnPermissionIntent()
                     if (permissionIntent != null) {
                         pendingPermissionProfile = resolvedProfile
                         permissionLauncher.launch(permissionIntent)
                         storeRef?.onPermissionRequired()
                     } else {
-                        connector.connect(resolvedProfile, renderer.render(resolvedProfile))
+                        connector.connect(resolvedProfile, renderedConfig)
                     }
                 }
             },
