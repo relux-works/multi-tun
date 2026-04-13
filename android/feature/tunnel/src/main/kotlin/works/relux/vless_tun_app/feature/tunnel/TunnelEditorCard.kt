@@ -167,6 +167,40 @@ internal fun TunnelEditorCard(
                     singleLine = true,
                 )
             }
+            Text(
+                text = "Routing Masks",
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Text(
+                text = "One mask per line. Example: corp.example or .ru. If this list is empty, the tunnel stays full-tunnel except for bypasses below.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = state.routeMasksText,
+                onValueChange = { onAction(TunnelHomeAction.EditorRouteMasksChanged(it)) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(TunnelHomeTags.EDITOR_ROUTE_MASKS_INPUT),
+                label = { Text("Route via Tunnel") },
+                placeholder = { Text("ipify.org\ncorp.example") },
+                minLines = 3,
+            )
+            Text(
+                text = "Bypass masks win when both lists match the same destination.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = state.bypassMasksText,
+                onValueChange = { onAction(TunnelHomeAction.EditorBypassMasksChanged(it)) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(TunnelHomeTags.EDITOR_BYPASS_MASKS_INPUT),
+                label = { Text("Bypass Tunnel") },
+                placeholder = { Text("api64.ipify.org\n.telegram.org") },
+                minLines = 3,
+            )
             state.validationError?.let { error ->
                 Text(
                     text = error,

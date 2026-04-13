@@ -130,6 +130,40 @@ class TunnelHomeStoreTest {
     }
 
     @Test
+    fun saveTunnel_normalizesRouteAndBypassMasks() {
+        var persistedProfiles: List<TunnelProfile> = emptyList()
+        val store = buildStore(
+            onCatalogChanged = { profiles, _ ->
+                persistedProfiles = profiles
+            },
+        )
+
+        store.dispatch(TunnelHomeAction.EditTunnelClicked(DefaultTunnelCatalog.defaultProfile.id))
+        store.dispatch(TunnelHomeAction.EditorRouteMasksChanged("inside.corp.example\nCorp.Example\ncorp.example"))
+        store.dispatch(TunnelHomeAction.EditorBypassMasksChanged(".API64.IPIFY.ORG\napi64.ipify.org"))
+        store.dispatch(TunnelHomeAction.SaveTunnelClicked)
+
+        val persisted = persistedProfiles.single()
+        assertEquals(listOf("corp.example"), persisted.routeMasks)
+        assertEquals(listOf(".api64.ipify.org"), persisted.bypassMasks)
+    }
+
+    @Test
+    fun editingTunnel_reloadsNormalizedRouteAndBypassMasks() {
+        val seededProfile = DefaultTunnelCatalog.defaultProfile.copy(
+            routeMasks = listOf("corp.example"),
+            bypassMasks = listOf(".api64.ipify.org"),
+        )
+        val store = buildStore(initialProfiles = listOf(seededProfile))
+
+        store.dispatch(TunnelHomeAction.EditTunnelClicked(seededProfile.id))
+
+        val editor = store.state.value.editor
+        assertEquals("corp.example", editor.routeMasksText)
+        assertEquals(".api64.ipify.org", editor.bypassMasksText)
+    }
+
+    @Test
     fun egressObservations_trackDirectAndTunnelSnapshots() {
         val store = buildStore()
 
@@ -153,11 +187,12 @@ class TunnelHomeStoreTest {
     }
 
     private fun buildStore(
+        initialProfiles: List<TunnelProfile> = DefaultTunnelCatalog.defaultProfiles,
         onConnectRequest: (TunnelProfile) -> Unit = {},
         onCatalogChanged: (List<TunnelProfile>, String?) -> Unit = { _, _ -> },
     ): TunnelHomeStore {
         return TunnelHomeStore(
-            initialProfiles = DefaultTunnelCatalog.defaultProfiles,
+            initialProfiles = initialProfiles,
             renderConfig = { profile ->
                 "{\"server\":\"${profile.host.ifBlank { profile.sourceUrl }}\"}"
             },
