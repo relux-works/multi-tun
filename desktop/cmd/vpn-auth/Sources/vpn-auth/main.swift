@@ -275,6 +275,59 @@ func loginFormScript(username: String, password: String) -> String {
     """
 }
 
+/// Username-only form: fill username/email, submit, then wait for the password page.
+func usernameOnlyFormScript(username: String) -> String {
+    return """
+    (function() {
+        function fillAndSubmit() {
+            var userInput = document.querySelector('#username')
+                         || document.querySelector('input[name="username"]')
+                         || document.querySelector('input[type="email"]')
+                         || document.querySelector('input[autocomplete="username"]');
+            if (!userInput) return false;
+
+            function setNativeValue(el, value) {
+                var proto = Object.getPrototypeOf(el);
+                var setter = Object.getOwnPropertyDescriptor(proto, 'value') ||
+                             Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                if (setter && setter.set) {
+                    setter.set.call(el, value);
+                } else {
+                    el.value = value;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+
+            setNativeValue(userInput, '\(username.replacingOccurrences(of: "'", with: "\\'"))');
+
+            setTimeout(function() {
+                var form = userInput.closest('form') || document.querySelector('form');
+                if (form) {
+                    var submitBtn = form.querySelector('button[type="submit"], input[type="submit"], .button');
+                    if (submitBtn) {
+                        submitBtn.click();
+                    } else {
+                        form.submit();
+                    }
+                }
+            }, 300);
+            return true;
+        }
+
+        if (!fillAndSubmit()) {
+            var attempts = 0;
+            var interval = setInterval(function() {
+                attempts++;
+                if (fillAndSubmit() || attempts > 20) {
+                    clearInterval(interval);
+                }
+            }, 500);
+        }
+    })();
+    """
+}
+
 /// OTP form: fill TOTP code, submit.
 func otpFormScript(code: String) -> String {
     return """
@@ -327,10 +380,18 @@ func otpFormScript(code: String) -> String {
     """
 }
 
-/// Detect what page we're on: 'login', 'otp', or 'unknown'.
+/// Detect what page we're on: 'login', 'username_only', 'otp', or 'unknown'.
 func pageDetectionScript() -> String {
     return """
     (function() {
+        var userInput = document.querySelector('#username')
+            || document.querySelector('input[name="username"]')
+            || document.querySelector('input[type="email"]')
+            || document.querySelector('input[autocomplete="username"]');
+        var hasSubmit = !!(document.querySelector('form')
+            || document.querySelector('button[type="submit"]')
+            || document.querySelector('input[type="submit"]')
+            || document.querySelector('button[name="login"]'));
         if (document.querySelector('#password')
             || document.querySelector('input[name="password"]')
             || document.querySelector('input[type="password"]')
@@ -339,7 +400,60 @@ func pageDetectionScript() -> String {
             || document.querySelector('input[name="totp"]')
             || document.querySelector('input[id="otp"]')
             || document.querySelector('input[autocomplete="one-time-code"]')) return 'otp';
+        if (userInput && hasSubmit) return 'username_only';
         return 'unknown';
+    })();
+    """
+}
+
+/// Emit a safe snapshot for pages we do not recognize yet.
+func unknownPageSnapshotScript() -> String {
+    return """
+    (function() {
+        function sanitizeURL(value) {
+            try {
+                var url = new URL(value, window.location.href);
+                return url.origin + url.pathname;
+            } catch (_) {
+                return value || '';
+            }
+        }
+
+        function truncate(value, limit) {
+            value = value || '';
+            return value.length > limit ? value.slice(0, limit) : value;
+        }
+
+        function summarizeInput(el) {
+            return {
+                type: el.type || '',
+                name: el.name || '',
+                id: el.id || '',
+                autocomplete: el.autocomplete || ''
+            };
+        }
+
+        function summarizeForm(el) {
+            return {
+                action: sanitizeURL(el.action || ''),
+                method: (el.method || '').toLowerCase()
+            };
+        }
+
+        function summarizeFrame(el) {
+            return truncate(sanitizeURL(el.src || ''), 160);
+        }
+
+        var payload = {
+            title: truncate(document.title || '', 160),
+            readyState: document.readyState || '',
+            url: sanitizeURL(window.location.href),
+            forms: Array.from(document.forms || []).slice(0, 6).map(summarizeForm),
+            inputs: Array.from(document.querySelectorAll('input')).slice(0, 12).map(summarizeInput),
+            iframes: Array.from(document.querySelectorAll('iframe')).slice(0, 6).map(summarizeFrame)
+        };
+
+        return JSON.stringify(payload);
     })();
     """
 }
@@ -355,7 +469,9 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
     let effectiveURL: String
     let samlFlow: SAMLFlowResult?
     private var loginAttempted = false
+    private var usernameOnlyAttempted = false
     private var lastSubmittedOTPCode = ""
+    private var lastUnknownSnapshot = ""
 
     init(args: CLIArgs, url: String, samlFlow: SAMLFlowResult?) {
         self.args = args
@@ -429,6 +545,7 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
 
             switch pageType {
             case "login":
+                self.lastUnknownSnapshot = ""
                 if !self.loginAttempted, let username = self.args.username, let password = self.args.password {
                     self.loginAttempted = true
                     printInfo("detected login page — auto-filling credentials")
@@ -438,7 +555,19 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
 
+            case "username_only":
+                self.lastUnknownSnapshot = ""
+                if !self.usernameOnlyAttempted, let username = self.args.username {
+                    self.usernameOnlyAttempted = true
+                    printInfo("detected username-only page — auto-filling username")
+                    let script = usernameOnlyFormScript(username: username)
+                    self.webView.evaluateJavaScript(script) { _, err in
+                        if let err = err { printError("username-only injection error: \(err)") }
+                    }
+                }
+
             case "otp":
+                self.lastUnknownSnapshot = ""
                 if let secret = self.args.totpSecret {
                     printInfo("detected OTP page — generating TOTP code")
                     guard let code = generateTOTP(secret: secret) else {
@@ -449,7 +578,7 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
                         return
                     }
                     self.lastSubmittedOTPCode = code
-                    printInfo("generated TOTP: \(code)")
+                    printInfo("generated TOTP code")
                     let script = otpFormScript(code: code)
                     self.webView.evaluateJavaScript(script) { _, err in
                         if let err = err { printError("OTP injection error: \(err)") }
@@ -457,6 +586,19 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
                 }
 
             default:
+                self.webView.evaluateJavaScript(unknownPageSnapshotScript()) { result, err in
+                    if let err = err {
+                        printError("unknown page snapshot error: \(err)")
+                        return
+                    }
+                    guard let snapshot = result as? String else {
+                        return
+                    }
+                    if snapshot != self.lastUnknownSnapshot {
+                        self.lastUnknownSnapshot = snapshot
+                        printInfo("unknown page snapshot: \(snapshot)")
+                    }
+                }
                 break
             }
         }
@@ -533,7 +675,7 @@ class AuthNavigationDelegate: NSObject, WKNavigationDelegate, WKHTTPCookieStoreO
     private func completeAuth(cookie: String, cookieName: String, host: String, url: String, cookies: [HTTPCookie] = []) {
         guard !completed else { return }
         completed = true
-        let cookieSummary = cookies.map { "\($0.name)=\($0.value) domain=\($0.domain) path=\($0.path)" }.joined(separator: " | ")
+        let cookieSummary = cookies.map { "\($0.name) domain=\($0.domain) path=\($0.path)" }.joined(separator: " | ")
         if !cookieSummary.isEmpty {
             printInfo("cookie inventory: \(cookieSummary)")
         }
