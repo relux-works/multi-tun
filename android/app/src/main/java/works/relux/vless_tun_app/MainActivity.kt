@@ -167,6 +167,10 @@ private fun VlessTunRoot() {
         storeRef = store
     }
 
+    LaunchedEffect(connector) {
+        connector.syncWithRunningService()
+    }
+
     LaunchedEffect(store, uiTestConfig, didApplyUiTestBootAction) {
         if (didApplyUiTestBootAction) return@LaunchedEffect
         when (uiTestConfig.action) {

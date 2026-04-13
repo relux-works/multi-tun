@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,15 +28,25 @@ class TunnelServiceConnector(
     private val appContext = context?.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val snapshotFlow = MutableStateFlow(TunnelRuntimeSnapshot())
+    private val pendingReadyCallbacks = mutableListOf<(TunnelVpnService.LocalBinder) -> Unit>()
 
     val snapshots: StateFlow<TunnelRuntimeSnapshot> = snapshotFlow.asStateFlow()
 
     private var serviceConnection: ServiceConnection? = null
     private var binder: TunnelVpnService.LocalBinder? = null
+    private var snapshotCollectionJob: Job? = null
 
     fun prepareVpnPermissionIntent(): Intent? {
         val context = appContext ?: return null
         return VpnService.prepare(context)
+    }
+
+    fun syncWithRunningService() {
+        val context = appContext ?: return
+        bind(
+            context = context,
+            createIfNeeded = false,
+        )
     }
 
     fun connect(
@@ -52,7 +63,7 @@ class TunnelServiceConnector(
         }
 
         Log.i(TAG, "connect requested for profile=${profile.name}")
-        ensureBound(context) { connectedBinder ->
+        bind(context = context, createIfNeeded = true) { connectedBinder ->
             Log.i(TAG, "service binder ready, forwarding connect")
             connectedBinder.connect(profile, config)
         }
@@ -77,40 +88,63 @@ class TunnelServiceConnector(
                 context.unbindService(connection)
             }
         }
+        snapshotCollectionJob?.cancel()
+        snapshotCollectionJob = null
         binder = null
         serviceConnection = null
+        pendingReadyCallbacks.clear()
         scope.cancel()
     }
 
-    private fun ensureBound(
+    private fun bind(
         context: Context,
-        onReady: (TunnelVpnService.LocalBinder) -> Unit,
+        createIfNeeded: Boolean,
+        onReady: ((TunnelVpnService.LocalBinder) -> Unit)? = null,
     ) {
-        binder?.let(onReady)
+        binder?.let { connectedBinder ->
+            onReady?.invoke(connectedBinder)
+        }
         if (binder != null) {
             return
         }
 
+        if (onReady != null) {
+            pendingReadyCallbacks += onReady
+        }
+        if (createIfNeeded) {
+            ContextCompat.startForegroundService(context, Intent(context, TunnelVpnService::class.java))
+        }
+        if (serviceConnection != null) {
+            return
+        }
+
         val intent = Intent(context, TunnelVpnService::class.java)
-        ContextCompat.startForegroundService(context, intent)
-        Log.i(TAG, "binding TunnelVpnService")
+        Log.i(TAG, "binding TunnelVpnService createIfNeeded=$createIfNeeded")
 
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val tunnelBinder = service as? TunnelVpnService.LocalBinder ?: return
                 binder = tunnelBinder
                 Log.i(TAG, "TunnelVpnService connected")
-                scope.launch {
+                snapshotCollectionJob?.cancel()
+                snapshotCollectionJob = scope.launch {
                     tunnelBinder.snapshots().collect { snapshot ->
                         Log.i(TAG, "snapshot phase=${snapshot.phase} detail=${snapshot.detail}")
                         snapshotFlow.value = snapshot
                     }
                 }
-                onReady(tunnelBinder)
+                val callbacks = pendingReadyCallbacks.toList()
+                pendingReadyCallbacks.clear()
+                callbacks.forEach { callback ->
+                    callback(tunnelBinder)
+                }
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
+                snapshotCollectionJob?.cancel()
+                snapshotCollectionJob = null
                 binder = null
+                serviceConnection = null
                 Log.i(TAG, "TunnelVpnService disconnected")
                 snapshotFlow.value = TunnelRuntimeSnapshot(
                     phase = TunnelPhase.Disconnected,
@@ -120,7 +154,25 @@ class TunnelServiceConnector(
         }
 
         serviceConnection = connection
-        context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        val flags = if (createIfNeeded) {
+            Context.BIND_AUTO_CREATE
+        } else {
+            0
+        }
+        val bound = context.bindService(intent, connection, flags)
+        if (!bound) {
+            Log.i(TAG, "TunnelVpnService bind skipped; no running service available.")
+            serviceConnection = null
+            if (createIfNeeded) {
+                pendingReadyCallbacks.clear()
+                snapshotFlow.value = TunnelRuntimeSnapshot(
+                    phase = TunnelPhase.Error,
+                    detail = "Failed to bind TunnelVpnService.",
+                )
+            } else {
+                pendingReadyCallbacks.clear()
+            }
+        }
     }
 
     private companion object {
