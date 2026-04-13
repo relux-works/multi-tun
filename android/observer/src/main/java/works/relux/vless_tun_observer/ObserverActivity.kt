@@ -195,7 +195,7 @@ private class ObserverProbeClient {
 
     fun probe(): ObserverObservation {
         val request = Request.Builder()
-            .url("http://$WHOAMI_HOST/json?fields=status,message,country,countryCode,query&ts=${System.currentTimeMillis()}")
+            .url("https://$WHOAMI_HOST?format=json&ts=${System.currentTimeMillis()}")
             .header("Accept", "application/json,text/plain,*/*")
             .header("Cache-Control", "no-cache")
             .build()
@@ -205,15 +205,14 @@ private class ObserverProbeClient {
             }
             val body = response.body?.string().orEmpty()
             val json = JSONObject(body)
-            val status = json.optString("status")
-            if (status.isNotBlank() && !status.equals("success", ignoreCase = true)) {
-                val message = json.optString("message").ifBlank { "status=$status" }
-                throw IOException("Observer whoami returned $message.")
+            val ip = json.optString("ip")
+            if (ip.isBlank()) {
+                throw IOException("Observer whoami response does not contain an IP.")
             }
             return ObserverObservation(
-                ip = json.optString("query").ifBlank { json.optString("ip") },
-                country = json.optString("country"),
-                countryCode = json.optString("countryCode").ifBlank { json.optString("cc") },
+                ip = ip,
+                country = "",
+                countryCode = "",
             )
         }
     }
@@ -257,4 +256,4 @@ private fun Throwable.toUiMessage(fallback: String): String {
 }
 
 private const val TAG = "ObserverActivity"
-private const val WHOAMI_HOST = "ip-api.com"
+private const val WHOAMI_HOST = "api.ipify.org"

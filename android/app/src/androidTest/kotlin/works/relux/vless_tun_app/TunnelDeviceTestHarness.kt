@@ -12,7 +12,6 @@ import java.io.File
 import java.util.Base64
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
 import works.relux.vless_tun_app.core.persistence.CrashLogWrite
-import works.relux.vless_tun_app.core.model.TunnelSourceMode
 import works.relux.vless_tun_app.core.persistence.TunnelCatalog
 import works.relux.vless_tun_app.core.persistence.TunnelCatalogStore
 
@@ -59,7 +58,6 @@ internal object TunnelDeviceTestHarness {
             storageFile = File(targetContext.filesDir, "config/tunnel-catalog.json"),
         )
         val seededProfile = DefaultTunnelCatalog.defaultProfile.copy(
-            sourceMode = TunnelSourceMode.ProxyResolver,
             sourceUrl = sourceUrl,
             host = "",
             serverName = "",
