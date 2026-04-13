@@ -25,4 +25,35 @@ class TunnelConfigRendererTest {
         assertFalse(rendered.json.contains("\"http\""))
         assertFalse(rendered.json.contains("\"experimental\""))
     }
+
+    @Test
+    fun render_withBypassMasks_keepsFullTunnelAndAddsDirectExceptions() {
+        val rendered = TunnelConfigRenderer().render(
+            DefaultTunnelCatalog.defaultProfile.copy(
+                bypassMasks = listOf(".api64.ipify.org"),
+            ),
+        )
+
+        assertTrue(rendered.json.contains("\"tag\": \"routing-bypass\""))
+        assertTrue(rendered.json.contains("\"api64.ipify.org\""))
+        assertTrue(rendered.json.contains("\"server\": \"dns-direct\""))
+        assertTrue(rendered.json.contains("\"final\": \"proxy\""))
+    }
+
+    @Test
+    fun render_withRouteMasks_switchesDefaultTrafficToDirect() {
+        val rendered = TunnelConfigRenderer().render(
+            DefaultTunnelCatalog.defaultProfile.copy(
+                routeMasks = listOf("ipify.org"),
+                bypassMasks = listOf("api64.ipify.org"),
+            ),
+        )
+
+        assertTrue(rendered.json.contains("\"tag\": \"routing-proxy\""))
+        assertTrue(rendered.json.contains("\"tag\": \"routing-bypass\""))
+        assertTrue(rendered.json.contains("\"domain_resolver\": \"dns-direct\""))
+        assertTrue(rendered.json.contains("\"server\": \"dns-direct\""))
+        assertTrue(rendered.json.contains("\"server\": \"dns-proxy\""))
+        assertTrue(rendered.json.contains("\"final\": \"direct\""))
+    }
 }
