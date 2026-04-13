@@ -76,6 +76,26 @@ func TestClassifyAuthStage_UsesTOTPVariantWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestClassifyAuthStage_RecognizesUsernameOnlyPage(t *testing.T) {
+	stage := classifyAuthStage("info: page type: username_only", false)
+	if stage != "username_page" {
+		t.Fatalf("stage = %q, want username_page", stage)
+	}
+}
+
+func TestRedactVPNAuthArgs_RedactsSensitiveFlags(t *testing.T) {
+	got := redactVPNAuthArgs([]string{
+		"--url", "https://vpn.example.test/sso",
+		"--username", "alice",
+		"--password", "secret-password",
+		"--totp-secret", "totp-secret",
+	})
+	want := "--url https://vpn.example.test/sso --username <provided> --password <redacted> --totp-secret <redacted>"
+	if got != want {
+		t.Fatalf("redactVPNAuthArgs() = %q, want %q", got, want)
+	}
+}
+
 func TestFindOpenConnectCSDPostScriptPrefersStableHomebrewOptPath(t *testing.T) {
 	root := t.TempDir()
 

@@ -1853,7 +1853,7 @@ func authenticateWithVPNAuthURL(loginURL string, creds Credentials, presetCookie
 		cmdArgs = append(cmdArgs, "--totp-secret", creds.TOTPSecret)
 	}
 
-	writeLogf(logWriter, "sso_browser_command: %s %s", vpnAuthPath, strings.Join(cmdArgs, " "))
+	writeLogf(logWriter, "sso_browser_command: %s %s", vpnAuthPath, redactVPNAuthArgs(cmdArgs))
 	writeProgressf(progressWriter, "auth_stage: vpn_auth")
 
 	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
@@ -2998,6 +2998,8 @@ func classifyAuthStage(line string, hasTOTP bool) string {
 		return "manual_login_required"
 	case strings.Contains(normalized, "auto-login mode"):
 		return "auto_login_enabled"
+	case strings.Contains(normalized, "page type: username_only"):
+		return "username_page"
 	case strings.Contains(normalized, "page type: login"):
 		return "login_page"
 	case strings.Contains(normalized, "auto-filling credentials"):
@@ -3009,6 +3011,29 @@ func classifyAuthStage(line string, hasTOTP bool) string {
 	default:
 		return ""
 	}
+}
+
+func redactVPNAuthArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	redacted := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		redacted = append(redacted, arg)
+		if i+1 >= len(args) {
+			continue
+		}
+		switch arg {
+		case "--username":
+			redacted = append(redacted, "<provided>")
+			i++
+		case "--password", "--totp-secret":
+			redacted = append(redacted, "<redacted>")
+			i++
+		}
+	}
+	return strings.Join(redacted, " ")
 }
 
 func logAuthResult(logWriter io.Writer, source string, result *authResult) {
