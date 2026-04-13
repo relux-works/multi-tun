@@ -9,6 +9,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import works.relux.vless_tun_app.core.model.TunnelProfile
+import works.relux.vless_tun_app.core.model.routingPolicy
 import works.relux.vless_tun_app.core.runtime.TunnelAddress
 import works.relux.vless_tun_app.core.runtime.TunnelRoute
 import works.relux.vless_tun_app.core.runtime.TunnelRuntimeManifest
@@ -22,23 +23,24 @@ data class RenderedTunnelConfig(
 
 class TunnelConfigRenderer {
     fun render(profile: TunnelProfile): RenderedTunnelConfig {
+        val routingPolicy = EffectiveRoutingPolicy.fromProfile(profile)
         val root = buildJsonObject {
             put("log", buildJsonObject {
                 put("level", "debug")
             })
-            put("dns", buildDnsConfig())
+            put("dns", buildDnsConfig(routingPolicy))
             put("inbounds", buildJsonArray {
                 add(buildTunInbound())
             })
             put("outbounds", buildJsonArray {
                 add(buildProxyOutbound(profile))
-                add(buildDirectOutbound())
+                add(buildDirectOutbound(routingPolicy))
                 add(buildJsonObject {
                     put("type", "block")
                     put("tag", "block")
                 })
             })
-            put("route", buildRouteConfig())
+            put("route", buildRouteConfig(routingPolicy))
         }
 
         val runtimeManifest = TunnelRuntimeManifest(
@@ -68,18 +70,39 @@ class TunnelConfigRenderer {
         )
     }
 
-    private fun buildDnsConfig(): JsonObject = buildJsonObject {
+    private fun buildDnsConfig(policy: EffectiveRoutingPolicy): JsonObject = buildJsonObject {
         put("servers", buildJsonArray {
+            if (policy.needsDirectDns) {
+                add(buildJsonObject {
+                    put("type", "local")
+                    put("tag", "dns-direct")
+                    put("detour", "direct")
+                })
+            }
             add(buildTlsDnsServer(tag = "dns-bootstrap", detour = "direct"))
             add(buildTlsDnsServer(tag = "dns-proxy", detour = "proxy"))
         })
         put("rules", buildJsonArray {
-            add(buildJsonObject {
-                put("action", "route")
-                put("server", "dns-proxy")
-            })
+            if (policy.bypassMasks.isNotEmpty()) {
+                add(buildJsonObject {
+                    put("rule_set", buildJsonArray {
+                        add(JsonPrimitive("routing-bypass"))
+                    })
+                    put("action", "route")
+                    put("server", "dns-direct")
+                })
+            }
+            if (policy.routeMasks.isNotEmpty()) {
+                add(buildJsonObject {
+                    put("rule_set", buildJsonArray {
+                        add(JsonPrimitive("routing-proxy"))
+                    })
+                    put("action", "route")
+                    put("server", "dns-proxy")
+                })
+            }
         })
-        put("final", "dns-proxy")
+        put("final", if (policy.usesRouteAllowList) "dns-direct" else "dns-proxy")
         put("strategy", "prefer_ipv4")
         put("reverse_mapping", true)
     }
@@ -111,17 +134,41 @@ class TunnelConfigRenderer {
         buildTransport(profile)?.let { put("transport", it) }
     }
 
-    private fun buildDirectOutbound(): JsonObject = buildJsonObject {
+    private fun buildDirectOutbound(policy: EffectiveRoutingPolicy): JsonObject = buildJsonObject {
         put("type", "direct")
         put("tag", "direct")
-        put("domain_resolver", "dns-bootstrap")
+        put("domain_resolver", if (policy.needsDirectDns) "dns-direct" else "dns-bootstrap")
     }
 
-    private fun buildRouteConfig(): JsonObject = buildJsonObject {
+    private fun buildRouteConfig(policy: EffectiveRoutingPolicy): JsonObject = buildJsonObject {
         put("auto_detect_interface", true)
         put("default_domain_resolver", buildJsonObject {
-            put("server", "dns-bootstrap")
+            put("server", if (policy.usesRouteAllowList) "dns-direct" else "dns-bootstrap")
             put("strategy", "prefer_ipv4")
+        })
+        put("rule_set", buildJsonArray {
+            if (policy.bypassMasks.isNotEmpty()) {
+                add(buildJsonObject {
+                    put("type", "inline")
+                    put("tag", "routing-bypass")
+                    put("rules", buildJsonArray {
+                        add(buildJsonObject {
+                            put("domain_suffix", policy.renderableBypassMasks())
+                        })
+                    })
+                })
+            }
+            if (policy.routeMasks.isNotEmpty()) {
+                add(buildJsonObject {
+                    put("type", "inline")
+                    put("tag", "routing-proxy")
+                    put("rules", buildJsonArray {
+                        add(buildJsonObject {
+                            put("domain_suffix", policy.renderableRouteMasks())
+                        })
+                    })
+                })
+            }
         })
         put("rules", buildJsonArray {
             add(buildJsonObject {
@@ -136,8 +183,26 @@ class TunnelConfigRenderer {
                 put("action", "route")
                 put("outbound", "direct")
             })
+            if (policy.bypassMasks.isNotEmpty()) {
+                add(buildJsonObject {
+                    put("rule_set", buildJsonArray {
+                        add(JsonPrimitive("routing-bypass"))
+                    })
+                    put("action", "route")
+                    put("outbound", "direct")
+                })
+            }
+            if (policy.routeMasks.isNotEmpty()) {
+                add(buildJsonObject {
+                    put("rule_set", buildJsonArray {
+                        add(JsonPrimitive("routing-proxy"))
+                    })
+                    put("action", "route")
+                    put("outbound", "proxy")
+                })
+            }
         })
-        put("final", "proxy")
+        put("final", if (policy.usesRouteAllowList) "direct" else "proxy")
     }
 
     private fun buildTlsDnsServer(
@@ -218,6 +283,35 @@ class TunnelConfigRenderer {
 
         val JSON = Json {
             prettyPrint = true
+        }
+    }
+}
+
+private data class EffectiveRoutingPolicy(
+    val routeMasks: List<String>,
+    val bypassMasks: List<String>,
+) {
+    val usesRouteAllowList: Boolean
+        get() = routeMasks.isNotEmpty()
+
+    val needsDirectDns: Boolean
+        get() = usesRouteAllowList || bypassMasks.isNotEmpty()
+
+    fun renderableRouteMasks(): JsonArray = buildJsonArray {
+        routeMasks.forEach { add(JsonPrimitive(it.trimStart('.'))) }
+    }
+
+    fun renderableBypassMasks(): JsonArray = buildJsonArray {
+        bypassMasks.forEach { add(JsonPrimitive(it.trimStart('.'))) }
+    }
+
+    companion object {
+        fun fromProfile(profile: TunnelProfile): EffectiveRoutingPolicy {
+            val routingPolicy = profile.routingPolicy()
+            return EffectiveRoutingPolicy(
+                routeMasks = routingPolicy.routeMasks,
+                bypassMasks = routingPolicy.bypassMasks,
+            )
         }
     }
 }
