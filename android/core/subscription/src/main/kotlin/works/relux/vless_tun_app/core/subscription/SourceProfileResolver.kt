@@ -58,10 +58,16 @@ class SourceProfileResolver(
         original: TunnelProfile,
         resolved: ResolvedTunnelSource,
     ): TunnelProfile {
+        val resolvedSourceUrl = if (resolved.transport.equals("xhttp", ignoreCase = true)) {
+            resolved.rawUri
+        } else {
+            original.sourceUrl
+        }
         return original.copy(
             host = resolved.host,
             port = resolved.port,
             transport = resolved.transport,
+            sourceUrl = resolvedSourceUrl,
             serverName = resolved.serverName,
             uuid = resolved.uuid,
             security = resolved.security,
@@ -105,6 +111,7 @@ private suspend fun defaultFetchText(url: String): String = withContext(Dispatch
 }
 
 private data class ResolvedTunnelSource(
+    val rawUri: String,
     val host: String,
     val port: Int,
     val transport: String,
@@ -134,7 +141,6 @@ private fun parseVlessUri(raw: String): ResolvedTunnelSource {
     val uuid = URLDecoder.decode(userInfo, StandardCharsets.UTF_8)
     val query = decodeQuery(parsed.rawQuery)
     val transport = query["type"] ?: query["network"] ?: "tcp"
-    validateTransportSupport(transport)
     val serverName = query["sni"] ?: query["serverName"] ?: host
     val security = query["security"] ?: ""
     val serviceName = query["serviceName"] ?: query["service_name"] ?: ""
@@ -144,6 +150,7 @@ private fun parseVlessUri(raw: String): ResolvedTunnelSource {
     val flow = query["flow"] ?: ""
 
     return ResolvedTunnelSource(
+        rawUri = raw.trim(),
         host = host,
         port = port,
         transport = transport,
@@ -156,14 +163,6 @@ private fun parseVlessUri(raw: String): ResolvedTunnelSource {
         shortId = shortId,
         flow = flow,
     )
-}
-
-private fun validateTransportSupport(transport: String) {
-    if (transport.equals("xhttp", ignoreCase = true)) {
-        throw IllegalArgumentException(
-            "Unsupported VLESS transport 'xhttp'. The current Android runtime uses sing-box/libbox and cannot start Xray XHTTP profiles yet.",
-        )
-    }
 }
 
 private fun normalizePayload(rawPayload: String): String {

@@ -40,6 +40,7 @@ import works.relux.vless_tun_app.diagnostics.shareCrashLogEntry
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeScreen
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeStore
 import works.relux.vless_tun_app.platform.vpnservice.TunnelServiceConnector
+import works.relux.vless_tun_app.platform.xray.XrayTunnelConfigRenderer
 import works.relux.vless_tun_app.ui.theme.VlessTunTheme
 
 class MainActivity : ComponentActivity() {
@@ -62,6 +63,7 @@ private fun VlessTunRoot() {
     val application = context.applicationContext as VlessTunApplication
     val scope = rememberCoroutineScope()
     val renderer = remember { TunnelConfigRenderer() }
+    val xrayRenderer = remember { XrayTunnelConfigRenderer() }
     val resolver = remember { SourceProfileResolver() }
     val egressProbe = remember { EgressProbeClient() }
     val connector = remember(context) { TunnelServiceConnector(context) }
@@ -92,7 +94,13 @@ private fun VlessTunRoot() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             pendingPermissionProfile?.let { profile ->
-                runCatching { renderer.render(profile) }
+                runCatching {
+                    if (profile.transport.equals("xhttp", ignoreCase = true)) {
+                        xrayRenderer.render(profile)
+                    } else {
+                        renderer.render(profile)
+                    }
+                }
                     .onSuccess { renderedConfig ->
                         connector.connect(profile, renderedConfig)
                     }
@@ -106,7 +114,7 @@ private fun VlessTunRoot() {
         pendingPermissionProfile = null
     }
 
-    val store = remember(connector, renderer, resolver, initialCatalog, catalogStore) {
+    val store = remember(connector, renderer, xrayRenderer, resolver, initialCatalog, catalogStore) {
         TunnelHomeStore(
             initialProfiles = initialCatalog.profiles,
             initialSelectedProfileId = initialCatalog.selectedProfileId,
@@ -118,7 +126,13 @@ private fun VlessTunRoot() {
                             storeRef?.onConnectFailed(error.message ?: "Failed to resolve source URL.")
                             return@launch
                         }
-                    val renderedConfig = runCatching { renderer.render(resolvedProfile) }
+                    val renderedConfig = runCatching {
+                        if (resolvedProfile.transport.equals("xhttp", ignoreCase = true)) {
+                            xrayRenderer.render(resolvedProfile)
+                        } else {
+                            renderer.render(resolvedProfile)
+                        }
+                    }
                         .getOrElse { error ->
                             storeRef?.onConnectFailed(error.message ?: "Failed to build tunnel config.")
                             return@launch
@@ -280,6 +294,16 @@ private fun previewConfig(
     resolver: SourceProfileResolver,
 ): String {
     val resolvedInline = resolver.resolveInline(profile)
+    if (resolvedInline?.transport.equals("xhttp", ignoreCase = true)) {
+        return """
+        {
+          "note": "Config preview is deferred until connect time because this tunnel uses the Xray-backed xhttp transport path.",
+          "source_url": "${resolvedInline?.sourceUrl?.replace("\"", "\\\"") ?: ""}",
+          "resolved_on_connect": true,
+          "runtime_backend": "xray"
+        }
+        """.trimIndent()
+    }
     if (resolvedInline != null) {
         return renderer.render(resolvedInline).json
     }
