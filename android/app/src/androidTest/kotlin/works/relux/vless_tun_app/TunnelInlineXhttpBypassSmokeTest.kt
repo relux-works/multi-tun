@@ -1,6 +1,7 @@
 package works.relux.vless_tun_app
 
 import android.util.Log
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -8,11 +9,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
-import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.AnnotatedString
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
-import androidx.test.uiautomator.UiDevice
+import com.uitesttools.uitest.pageobject.BaseUiTestSuite
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Before
@@ -23,34 +22,37 @@ import works.relux.vless_tun_app.core.runtime.TunnelPhase
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeTags
 
 @RunWith(AndroidJUnit4::class)
-class TunnelRoutingPolicySmokeTest {
-    private val instrumentation = InstrumentationRegistry.getInstrumentation()
-    private val device = UiDevice.getInstance(instrumentation)
+class TunnelInlineXhttpBypassSmokeTest : BaseUiTestSuite() {
+    override val packageName = "works.relux.android.vlesstun.app"
 
     @get:Rule
     val composeRule = createEmptyComposeRule()
 
     @Before
-    fun setUp() {
+    override fun setUp() {
+        super.setUp()
         TunnelDeviceTestHarness.seedCatalog(
             sourceUrl = TunnelDeviceTestHarness.requiredSourceUrl(),
         )
     }
 
     @Test
-    fun routeMasksAndBypassMasksAffectRealTraffic() {
+    fun xhttpTunnelKeepsBypassTrafficDirect() {
         val directRoutedIp = IpifyProbeClient.probe(ROUTED_HOST)
         val directBypassIp = IpifyProbeClient.probe(BYPASS_HOST)
+        logProbe("direct_route", directRoutedIp)
+        logProbe("direct_bypass", directBypassIp)
 
         TunnelDeviceTestHarness.launchApp(
             device = device,
-            packageName = PACKAGE_NAME,
-            launchTimeout = LAUNCH_TIMEOUT,
+            packageName = packageName,
+            launchTimeout = launchTimeout,
             stringExtras = mapOf(
                 UiTestLaunchContract.EXTRA_ACTION to UiTestLaunchContract.ACTION_OPEN_EDIT_SELECTED_EDITOR,
                 UiTestLaunchContract.EXTRA_LAYOUT to UiTestLaunchContract.LAYOUT_EDITOR_PINNED_TOP,
             ),
         )
+        screenshot(1, "xhttp_editor_opened")
 
         composeRule.onNodeWithTag(TunnelHomeTags.SCREEN, useUnmergedTree = true)
             .assertIsDisplayed()
@@ -61,20 +63,22 @@ class TunnelRoutingPolicySmokeTest {
             .performTextReplacement("ipify.org")
         composeRule.onNodeWithTag(TunnelHomeTags.EDITOR_BYPASS_MASKS_INPUT, useUnmergedTree = true)
             .performScrollTo()
-            .performTextReplacement("api64.ipify.org")
+            .performTextReplacement(BYPASS_HOST)
         composeRule.onNodeWithTag(TunnelHomeTags.EDITOR_SAVE_BUTTON, useUnmergedTree = true)
             .performScrollTo()
             .performClick()
-        composeRule.waitUntil(timeoutMillis = 5_000) {
+        composeRule.waitUntil(timeoutMillis = EDITOR_TIMEOUT) {
             composeRule
                 .onAllNodesWithTag(TunnelHomeTags.EDITOR_CARD, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isEmpty()
         }
+        screenshot(2, "xhttp_bypass_policy_saved")
 
         composeRule.onNodeWithTag(TunnelHomeTags.PRIMARY_BUTTON, useUnmergedTree = true)
             .performScrollTo()
             .performClick()
+        screenshot(3, "xhttp_connect_requested")
         TunnelDeviceTestHarness.maybeApproveVpnConsent(
             device = device,
             timeout = VPN_CONSENT_TIMEOUT,
@@ -83,16 +87,15 @@ class TunnelRoutingPolicySmokeTest {
         val phaseText = semanticsText(TunnelHomeTags.STATUS_PHASE)
         val detailText = semanticsText(TunnelHomeTags.STATUS_DETAIL)
         assertEquals(
-            "Expected routed profile to connect successfully. phase='$phaseText' detail='$detailText'",
+            "Expected XHTTP bypass profile to connect successfully. phase='$phaseText' detail='$detailText'",
             TunnelPhase.Connected.name,
             phaseText,
         )
         waitForDetailContains("TUN interface established", CONNECT_TIMEOUT)
+        screenshot(4, "xhttp_tunnel_connected")
 
         val tunneledRoutedIp = IpifyProbeClient.probe(ROUTED_HOST)
         val bypassAfterConnectIp = IpifyProbeClient.probe(BYPASS_HOST)
-        logProbe("direct_route", directRoutedIp)
-        logProbe("direct_bypass", directBypassIp)
         logProbe("connected_route", tunneledRoutedIp)
         logProbe("connected_bypass", bypassAfterConnectIp)
 
@@ -102,15 +105,16 @@ class TunnelRoutingPolicySmokeTest {
             tunneledRoutedIp,
         )
         assertEquals(
-            "Expected bypass host $BYPASS_HOST to stay on direct egress even while $ROUTED_HOST is routed.",
+            "Expected bypass host $BYPASS_HOST to stay on direct egress while the broader ipify.org suffix is routed.",
             directBypassIp,
             bypassAfterConnectIp,
         )
         assertNotEquals(
-            "Expected bypass host $BYPASS_HOST to override the broader routed suffix ipify.org.",
+            "Expected bypass host $BYPASS_HOST to override the routed ipify.org suffix.",
             tunneledRoutedIp,
             bypassAfterConnectIp,
         )
+        screenshot(5, "xhttp_bypass_verified")
 
         composeRule.onNodeWithTag(TunnelHomeTags.PRIMARY_BUTTON, useUnmergedTree = true)
             .performScrollTo()
@@ -118,10 +122,11 @@ class TunnelRoutingPolicySmokeTest {
         composeRule.waitUntil(timeoutMillis = DISCONNECT_TIMEOUT) {
             semanticsText(TunnelHomeTags.STATUS_PHASE) == TunnelPhase.Disconnected.name
         }
+        screenshot(6, "xhttp_tunnel_disconnected")
     }
 
     private fun logProbe(label: String, value: String) {
-        val message = "ROUTING_PROBE_${label.uppercase()}=$value"
+        val message = "XHTTP_BYPASS_${label.uppercase()}=$value"
         Log.i(TAG, message)
         println(message)
     }
@@ -158,11 +163,10 @@ class TunnelRoutingPolicySmokeTest {
     }
 
     private companion object {
-        const val PACKAGE_NAME = "works.relux.android.vlesstun.app"
-        const val LAUNCH_TIMEOUT = 5_000L
-        const val TAG = "TunnelRoutingPolicySmoke"
+        const val TAG = "TunnelXhttpBypassSmoke"
         const val ROUTED_HOST = "api.ipify.org"
         const val BYPASS_HOST = "api64.ipify.org"
+        const val EDITOR_TIMEOUT = 5_000L
         const val VPN_CONSENT_TIMEOUT = 10_000L
         const val CONNECT_TIMEOUT = 30_000L
         const val DISCONNECT_TIMEOUT = 10_000L
