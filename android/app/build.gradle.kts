@@ -133,6 +133,7 @@ dependencies {
     implementation(project(":core:subscription"))
     implementation(project(":feature:tunnel"))
     implementation(project(":platform:singbox"))
+    implementation(project(":platform:xray"))
     implementation(project(":platform:vpnservice"))
 
     implementation(libs.androidx.activity.compose)

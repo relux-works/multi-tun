@@ -5,7 +5,6 @@ import java.util.Base64
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
 
@@ -57,7 +56,7 @@ class SourceProfileResolverTest {
     }
 
     @Test
-    fun resolve_rejectsUnsupportedXhttpTransportFromSubscriptionPayload() = runBlocking {
+    fun resolve_acceptsXhttpTransportFromSubscriptionPayloadAndKeepsResolvedShareLink() = runBlocking {
         val vless = "vless://2536e4e4-c6f2-41d8-b2dd-24b72c12872a@213.176.73.234:8443?encryption=none&fp=chrome&host=investleaks.pro&mode=auto&path=%2Fcrypto-news&pbk=2CQCGkIWGGDkxqDkb7HhZ_er2hQh6jxlaT-MPZUkLxY&security=reality&sid=edda9843e1d0&sni=www.investleaks.pro&spx=%2FOPBnmzHndAthSR4&type=xhttp#France-alexis"
         val payload = Base64.getEncoder().encodeToString(vless.toByteArray(StandardCharsets.UTF_8))
         val resolver = SourceProfileResolver(fetchText = { payload })
@@ -68,12 +67,14 @@ class SourceProfileResolverTest {
             uuid = "",
         )
 
-        try {
-            resolver.resolve(profile)
-            fail("Expected xhttp payload to be rejected.")
-        } catch (error: IllegalArgumentException) {
-            assertTrue(error.message.orEmpty().contains("xhttp"))
-            assertTrue(error.message.orEmpty().contains("Android runtime"))
-        }
+        val resolved = resolver.resolve(profile)
+
+        assertEquals("213.176.73.234", resolved.host)
+        assertEquals(8443, resolved.port)
+        assertEquals("xhttp", resolved.transport)
+        assertEquals("www.investleaks.pro", resolved.serverName)
+        assertEquals("2536e4e4-c6f2-41d8-b2dd-24b72c12872a", resolved.uuid)
+        assertEquals("reality", resolved.security)
+        assertTrue(resolved.sourceUrl.startsWith("vless://2536e4e4-c6f2-41d8-b2dd-24b72c12872a@213.176.73.234:8443"))
     }
 }
