@@ -19,7 +19,8 @@ Runs the stable real-device Android regression suite in layers:
   2. TunnelHomeEditorStateTest
   3. TunnelConnectSmokeTest
   4. TunnelInlineXhttpBypassSmokeTest
-  5. TunnelEgressSmokeTest
+  5. TunnelInlineXhttpObserverVisibilitySmokeTest
+  6. TunnelEgressSmokeTest
 
 Runtime checks (3-5) require a tunnel source. If none is provided, only
 the UI-only subset (1-2) runs.
@@ -126,6 +127,11 @@ run_case \
 run_case \
     "xhttp bypass smoke" \
     "works.relux.vless_tun_app.TunnelInlineXhttpBypassSmokeTest" \
+    "${RUNTIME_ARGS[@]}"
+
+run_case \
+    "observer visibility smoke" \
+    "works.relux.vless_tun_app.TunnelInlineXhttpObserverVisibilitySmokeTest" \
     "${RUNTIME_ARGS[@]}"
 
 run_case \

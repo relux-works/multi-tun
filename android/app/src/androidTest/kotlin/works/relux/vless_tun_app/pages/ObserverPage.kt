@@ -52,6 +52,37 @@ class ObserverPage(
             ?: ""
     }
 
+    fun waitForNetworkSnapshot(timeout: Long): ObserverPage {
+        val deadline = System.currentTimeMillis() + timeout
+        while (System.currentTimeMillis() < deadline) {
+            val error = errorText().trim()
+            if (error.isNotBlank()) {
+                throw AssertionError("Observer probe failed: $error")
+            }
+            if (hasCapturedVpnVisibility(vpnTransportVisibleText())) {
+                return this
+            }
+            Thread.sleep(200)
+        }
+        throw AssertionError(
+            "Expected observer network visibility within ${timeout}ms. " +
+                "Current network='${networkText().trim()}'. vpn='${vpnTransportVisibleText().trim()}'. " +
+                "Error='${errorText().trim()}'.",
+        )
+    }
+
+    fun networkText(): String {
+        return device.findObject(By.res(NETWORK_RESULT_TAG))?.text.orEmpty()
+    }
+
+    fun vpnTransportVisibleText(): String {
+        return device.findObject(By.res(VPN_VISIBLE_TAG))?.text.orEmpty()
+    }
+
+    fun vpnTransportVisible(): Boolean {
+        return vpnTransportVisibleText().trim().equals("true", ignoreCase = true)
+    }
+
     private fun errorText(): String {
         return device.findObject(By.res(ERROR_TAG))?.text.orEmpty()
     }
@@ -63,10 +94,18 @@ class ObserverPage(
         return IP_LIKE_REGEX.containsMatchIn(text)
     }
 
+    private fun hasCapturedVpnVisibility(text: String): Boolean {
+        return text.trim().let { value ->
+            value.equals("true", ignoreCase = true) || value.equals("false", ignoreCase = true)
+        }
+    }
+
     private companion object {
         const val TITLE_TAG = "Observer_Home_Title_text"
         const val REFRESH_BUTTON_TAG = "Observer_Home_Refresh_button"
         const val RESULT_TAG = "Observer_Home_Result_text"
+        const val NETWORK_RESULT_TAG = "Observer_Home_NetworkResult_text"
+        const val VPN_VISIBLE_TAG = "Observer_Home_VpnVisible_text"
         const val ERROR_TAG = "Observer_Home_Error_text"
         val IP_LIKE_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b|[0-9a-fA-F:]{2,}""")
     }
