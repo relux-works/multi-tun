@@ -1,5 +1,9 @@
 package works.relux.vless_tun_app.core.render
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -69,7 +73,10 @@ class TunnelConfigRendererTest {
 
         assertEquals(listOf("works.relux.vless_tun_observer"), rendered.runtimeManifest.includePackages)
         assertTrue(rendered.runtimeManifest.excludePackages.isEmpty())
-        assertTrue(rendered.json.contains("\"include_package\":[\"works.relux.vless_tun_observer\"]"))
+        assertEquals(
+            listOf("works.relux.vless_tun_observer"),
+            rendered.tunInboundPackages("include_package"),
+        )
     }
 
     @Test
@@ -83,6 +90,18 @@ class TunnelConfigRendererTest {
 
         assertEquals(listOf("works.relux.vless_tun_observer"), rendered.runtimeManifest.excludePackages)
         assertTrue(rendered.runtimeManifest.includePackages.isEmpty())
-        assertTrue(rendered.json.contains("\"exclude_package\":[\"works.relux.vless_tun_observer\"]"))
+        assertEquals(
+            listOf("works.relux.vless_tun_observer"),
+            rendered.tunInboundPackages("exclude_package"),
+        )
+    }
+
+    private fun RenderedTunnelConfig.tunInboundPackages(field: String): List<String> {
+        val root = Json.parseToJsonElement(json).jsonObject
+        val inbound = root.getValue("inbounds").jsonArray.first().jsonObject
+        return inbound[field]
+            ?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+            .orEmpty()
     }
 }
