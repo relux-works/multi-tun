@@ -9,6 +9,11 @@ enum class TunnelSourceKind {
     Unconfigured,
 }
 
+enum class TunnelAppScopeMode {
+    Blacklist,
+    Whitelist,
+}
+
 data class TunnelProfile(
     val id: String,
     val name: String,
@@ -26,6 +31,8 @@ data class TunnelProfile(
     val flow: String = "",
     val routeMasks: List<String> = emptyList(),
     val bypassMasks: List<String> = emptyList(),
+    val appScopeMode: TunnelAppScopeMode = TunnelAppScopeMode.Blacklist,
+    val appPackages: List<String> = emptyList(),
 )
 
 fun TunnelProfile.endpoint(): String = when {
@@ -63,6 +70,42 @@ fun TunnelProfile.routingPolicy(): TunnelRoutingPolicy {
         routeMasks = routeMasks,
         bypassMasks = bypassMasks,
     ).normalized()
+}
+
+fun TunnelProfile.normalizedAppPackages(): List<String> {
+    return appPackages
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .distinct()
+}
+
+fun TunnelProfile.includePackages(): List<String> {
+    val normalizedPackages = normalizedAppPackages()
+    return if (appScopeMode == TunnelAppScopeMode.Whitelist) {
+        normalizedPackages
+    } else {
+        emptyList()
+    }
+}
+
+fun TunnelProfile.excludePackages(): List<String> {
+    val normalizedPackages = normalizedAppPackages()
+    return if (appScopeMode == TunnelAppScopeMode.Blacklist) {
+        normalizedPackages
+    } else {
+        emptyList()
+    }
+}
+
+fun TunnelProfile.appScopeSummary(): String {
+    val normalizedPackages = normalizedAppPackages()
+    if (normalizedPackages.isEmpty()) {
+        return "All apps use this tunnel."
+    }
+    return when (appScopeMode) {
+        TunnelAppScopeMode.Blacklist -> "All apps except ${normalizedPackages.size} selected app(s) use this tunnel."
+        TunnelAppScopeMode.Whitelist -> "Only ${normalizedPackages.size} selected app(s) use this tunnel."
+    }
 }
 
 private fun String.toResolverSummary(): String {

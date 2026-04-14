@@ -9,6 +9,8 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import works.relux.vless_tun_app.core.model.TunnelProfile
+import works.relux.vless_tun_app.core.model.excludePackages
+import works.relux.vless_tun_app.core.model.includePackages
 import works.relux.vless_tun_app.core.model.routingPolicy
 import works.relux.vless_tun_app.core.runtime.TunnelAddress
 import works.relux.vless_tun_app.core.runtime.TunnelRuntimeBackend
@@ -32,7 +34,7 @@ class TunnelConfigRenderer {
             })
             put("dns", buildDnsConfig(routingPolicy))
             put("inbounds", buildJsonArray {
-                add(buildTunInbound())
+                add(buildTunInbound(profile))
             })
             put("outbounds", buildJsonArray {
                 add(buildProxyOutbound(profile))
@@ -60,6 +62,8 @@ class TunnelConfigRenderer {
                 "1.1.1.1",
                 "2606:4700:4700::1111",
             ),
+            includePackages = profile.includePackages(),
+            excludePackages = profile.excludePackages(),
             allowBypass = true,
             isMockDataPlane = false,
         )
@@ -109,7 +113,7 @@ class TunnelConfigRenderer {
         put("reverse_mapping", true)
     }
 
-    private fun buildTunInbound(): JsonObject = buildJsonObject {
+    private fun buildTunInbound(profile: TunnelProfile): JsonObject = buildJsonObject {
         put("type", "tun")
         put("tag", "tun-in")
         put("interface_name", "android-tun")
@@ -120,6 +124,24 @@ class TunnelConfigRenderer {
         put("auto_route", true)
         put("strict_route", true)
         put("mtu", DEFAULT_MTU)
+        profile.includePackages()
+            .takeIf(List<String>::isNotEmpty)
+            ?.let { packages ->
+                put("include_package", buildJsonArray {
+                    packages.forEach { packageName ->
+                        add(JsonPrimitive(packageName))
+                    }
+                })
+            }
+        profile.excludePackages()
+            .takeIf(List<String>::isNotEmpty)
+            ?.let { packages ->
+                put("exclude_package", buildJsonArray {
+                    packages.forEach { packageName ->
+                        add(JsonPrimitive(packageName))
+                    }
+                })
+            }
     }
 
     private fun buildProxyOutbound(profile: TunnelProfile): JsonObject = buildJsonObject {

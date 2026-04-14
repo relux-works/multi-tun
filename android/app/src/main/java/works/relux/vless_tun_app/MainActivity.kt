@@ -1,7 +1,10 @@
 package works.relux.vless_tun_app
 
 import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Build
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,7 +26,9 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import works.relux.vless_tun_app.core.model.appScopeSummary
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.model.normalizedAppPackages
 import works.relux.vless_tun_app.core.model.routingPolicy
 import works.relux.vless_tun_app.core.persistence.CrashLogEntry
 import works.relux.vless_tun_app.core.persistence.TunnelCatalog
@@ -39,6 +44,7 @@ import works.relux.vless_tun_app.diagnostics.buildAppDebugInfo
 import works.relux.vless_tun_app.diagnostics.shareCrashLogEntry
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeScreen
 import works.relux.vless_tun_app.feature.tunnel.TunnelHomeStore
+import works.relux.vless_tun_app.feature.tunnel.TunnelInstalledApp
 import works.relux.vless_tun_app.platform.vpnservice.TunnelServiceConnector
 import works.relux.vless_tun_app.platform.xray.XrayTunnelConfigRenderer
 import works.relux.vless_tun_app.ui.theme.VlessTunTheme
@@ -186,6 +192,13 @@ private fun VlessTunRoot() {
         connector.syncWithRunningService()
     }
 
+    LaunchedEffect(store) {
+        val installedApps = withContext(Dispatchers.IO) {
+            loadLaunchableApps(context.packageManager)
+        }
+        store.syncInstalledApps(installedApps)
+    }
+
     LaunchedEffect(store, uiTestConfig, didApplyUiTestBootAction) {
         if (didApplyUiTestBootAction) return@LaunchedEffect
         when (uiTestConfig.action) {
@@ -310,6 +323,7 @@ private fun previewConfig(
     return if (profile.sourceUrl.isNotBlank()) {
         val sourceSummary = profile.sourceUrl.lineSequence().firstOrNull()?.trim().orEmpty()
         val routingPolicy = profile.routingPolicy()
+        val appScopeSummary = profile.appScopeSummary()
         """
         {
           "note": "Config preview is deferred until connect time because this tunnel resolves from a source URL.",
@@ -317,6 +331,11 @@ private fun previewConfig(
           "routing": {
             "route_masks": [${routingPolicy.routeMasks.joinToString(", ") { "\"${it.replace("\"", "\\\"")}\"" }}],
             "bypass_masks": [${routingPolicy.bypassMasks.joinToString(", ") { "\"${it.replace("\"", "\\\"")}\"" }}]
+          },
+          "apps": {
+            "summary": "${appScopeSummary.replace("\"", "\\\"")}",
+            "mode": "${profile.appScopeMode.name.lowercase()}",
+            "packages": [${profile.normalizedAppPackages().joinToString(", ") { "\"${it.replace("\"", "\\\"")}\"" }}]
           },
           "resolved_on_connect": true
         }
@@ -331,4 +350,32 @@ private fun previewConfig(
     } else {
         renderer.render(profile).json
     }
+}
+
+private fun loadLaunchableApps(packageManager: PackageManager): List<TunnelInstalledApp> {
+    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+    val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        packageManager.queryIntentActivities(
+            intent,
+            PackageManager.ResolveInfoFlags.of(0),
+        )
+    } else {
+        @Suppress("DEPRECATION")
+        packageManager.queryIntentActivities(intent, 0)
+    }
+    return activities
+        .mapNotNull { resolveInfo ->
+            val packageName = resolveInfo.activityInfo?.packageName?.trim().orEmpty()
+            val label = resolveInfo.loadLabel(packageManager)?.toString()?.trim().orEmpty()
+            if (packageName.isBlank() || label.isBlank()) {
+                null
+            } else {
+                TunnelInstalledApp(
+                    packageName = packageName,
+                    label = label,
+                )
+            }
+        }
+        .distinctBy(TunnelInstalledApp::packageName)
+        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, TunnelInstalledApp::label).thenBy(TunnelInstalledApp::packageName))
 }

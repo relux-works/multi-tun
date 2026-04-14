@@ -3,6 +3,7 @@ package works.relux.vless_tun_app.core.persistence
 import java.io.File
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 import works.relux.vless_tun_app.core.model.TunnelProfile
 
 data class TunnelCatalog(
@@ -87,6 +88,8 @@ private data class TunnelProfileDocument(
     val uuid: String,
     val routeMasks: List<String> = emptyList(),
     val bypassMasks: List<String> = emptyList(),
+    val appScopeMode: String = TunnelAppScopeMode.Blacklist.name,
+    val appPackages: List<String> = emptyList(),
 ) {
     fun toModel(): TunnelProfile {
         return TunnelProfile(
@@ -100,6 +103,8 @@ private data class TunnelProfileDocument(
             uuid = uuid,
             routeMasks = routeMasks,
             bypassMasks = bypassMasks,
+            appScopeMode = parseAppScopeMode(appScopeMode),
+            appPackages = appPackages,
         )
     }
 
@@ -116,7 +121,15 @@ private data class TunnelProfileDocument(
                 uuid = profile.uuid,
                 routeMasks = profile.routeMasks,
                 bypassMasks = profile.bypassMasks,
+                appScopeMode = profile.appScopeMode.name,
+                appPackages = profile.appPackages,
             )
+        }
+
+        private fun parseAppScopeMode(raw: String): TunnelAppScopeMode {
+            return TunnelAppScopeMode.entries.firstOrNull { mode ->
+                mode.name.equals(raw.trim(), ignoreCase = true)
+            } ?: TunnelAppScopeMode.Blacklist
         }
     }
 }

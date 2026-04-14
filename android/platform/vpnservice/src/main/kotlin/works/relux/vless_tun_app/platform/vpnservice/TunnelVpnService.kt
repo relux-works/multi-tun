@@ -260,6 +260,24 @@ class TunnelVpnService : VpnService(), SingboxRuntimeHost, XrayRuntimeHost {
         manifest.routes.forEach { route ->
             builder.addRoute(route.address, route.prefixLength)
         }
+        manifest.includePackages.forEach { packageName ->
+            runCatching {
+                builder.addAllowedApplication(packageName)
+            }.onFailure { error ->
+                if (error !is PackageManager.NameNotFoundException) {
+                    throw error
+                }
+            }
+        }
+        manifest.excludePackages.forEach { packageName ->
+            runCatching {
+                builder.addDisallowedApplication(packageName)
+            }.onFailure { error ->
+                if (error !is PackageManager.NameNotFoundException) {
+                    throw error
+                }
+            }
+        }
 
         val descriptor = builder.establish()
             ?: error("VpnService.Builder.establish() returned null. The VPN permission was likely revoked.")
@@ -276,6 +294,14 @@ class TunnelVpnService : VpnService(), SingboxRuntimeHost, XrayRuntimeHost {
             if (manifest.dnsServers.isNotEmpty()) {
                 append(". DNS=")
                 append(manifest.dnsServers.joinToString())
+            }
+            if (manifest.includePackages.isNotEmpty()) {
+                append(". Allowed apps=")
+                append(manifest.includePackages.joinToString())
+            }
+            if (manifest.excludePackages.isNotEmpty()) {
+                append(". Excluded apps=")
+                append(manifest.excludePackages.joinToString())
             }
         }
 

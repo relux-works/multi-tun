@@ -3,12 +3,20 @@ package works.relux.vless_tun_app.feature.tunnel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -18,7 +26,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun TunnelEditorCard(
     state: TunnelEditorState,
@@ -195,6 +205,69 @@ internal fun TunnelEditorCard(
                 placeholder = { Text("api64.ipify.org\n.telegram.org") },
                 minLines = 3,
             )
+            Text(
+                text = "Apps",
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Text(
+                text = "Choose whether selected apps bypass the tunnel or are the only apps that use it. If no apps are selected, the tunnel applies to all apps.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = state.appScopeMode == TunnelAppScopeMode.Blacklist,
+                    onClick = { onAction(TunnelHomeAction.EditorAppScopeModeChanged(TunnelAppScopeMode.Blacklist)) },
+                    label = { Text("Blacklist") },
+                    modifier = Modifier.testTag(TunnelHomeTags.EDITOR_APP_SCOPE_MODE_BLACKLIST),
+                )
+                FilterChip(
+                    selected = state.appScopeMode == TunnelAppScopeMode.Whitelist,
+                    onClick = { onAction(TunnelHomeAction.EditorAppScopeModeChanged(TunnelAppScopeMode.Whitelist)) },
+                    label = { Text("Whitelist") },
+                    modifier = Modifier.testTag(TunnelHomeTags.EDITOR_APP_SCOPE_MODE_WHITELIST),
+                )
+            }
+            Text(
+                text = state.appScopeSummary,
+                modifier = Modifier.testTag(TunnelHomeTags.EDITOR_APP_SCOPE_SUMMARY),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (state.normalizedAppPackages.isNotEmpty()) {
+                val packageToLabel = state.installedApps.associateBy(
+                    keySelector = { app -> app.packageName },
+                    valueTransform = { app -> app.label },
+                )
+                Text(
+                    text = state.normalizedAppPackages.joinToString(separator = "\n") { packageName ->
+                        packageToLabel[packageName]?.let { label -> "$label\n$packageName" } ?: packageName
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(modifier = Modifier.weight(1f)) {
+                    Button(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(TunnelHomeTags.EDITOR_APP_SCOPE_PICKER_BUTTON),
+                        onClick = { onAction(TunnelHomeAction.EditorOpenAppPickerClicked) },
+                    ) {
+                        Text(if (state.normalizedAppPackages.isEmpty()) "Choose Apps" else "Edit Apps")
+                    }
+                }
+                Box(modifier = Modifier.weight(1f)) {
+                    TextButton(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(TunnelHomeTags.EDITOR_APP_SCOPE_CLEAR_BUTTON),
+                        onClick = { onAction(TunnelHomeAction.EditorClearSelectedAppsClicked) },
+                    ) {
+                        Text("Clear")
+                    }
+                }
+            }
             state.validationError?.let { error ->
                 Text(
                     text = error,
@@ -223,6 +296,143 @@ internal fun TunnelEditorCard(
                         Text("Cancel")
                     }
                 }
+            }
+        }
+    }
+    if (state.isAppPickerVisible) {
+        TunnelAppPickerSheet(
+            state = state,
+            onAction = onAction,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TunnelAppPickerSheet(
+    state: TunnelEditorState,
+    onAction: (TunnelHomeAction) -> Unit,
+) {
+    val query = state.appPickerQuery.trim()
+    val filteredApps = if (query.isBlank()) {
+        state.installedApps
+    } else {
+        state.installedApps.filter { app ->
+            app.label.contains(query, ignoreCase = true) ||
+                app.packageName.contains(query, ignoreCase = true)
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = { onAction(TunnelHomeAction.EditorDismissAppPickerClicked) },
+        modifier = Modifier.testTag(TunnelHomeTags.EDITOR_APP_PICKER_SHEET),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Choose Apps",
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            Text(
+                text = when (state.appScopeMode) {
+                    TunnelAppScopeMode.Blacklist -> "Selected apps stay direct and bypass the tunnel."
+                    TunnelAppScopeMode.Whitelist -> "Only selected apps use the tunnel."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = state.appPickerQuery,
+                onValueChange = { onAction(TunnelHomeAction.EditorAppPickerQueryChanged(it)) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(TunnelHomeTags.EDITOR_APP_PICKER_QUERY),
+                label = { Text("Search apps") },
+                singleLine = true,
+            )
+            when {
+                state.isLoadingInstalledApps -> {
+                    Text(
+                        text = "Loading installed apps...",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+
+                filteredApps.isEmpty() -> {
+                    Text(
+                        text = if (state.installedApps.isEmpty()) {
+                            "No launchable apps found."
+                        } else {
+                            "No apps match the current search."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 520.dp)
+                            .testTag(TunnelHomeTags.EDITOR_APP_PICKER_LIST),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(
+                            items = filteredApps,
+                            key = { app -> app.packageName },
+                        ) { app ->
+                            val isSelected = state.normalizedAppPackages.contains(app.packageName)
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag(TunnelHomeTags.editorAppPickerItem(app.packageName))
+                                    .clickable {
+                                        onAction(TunnelHomeAction.EditorAppSelectionToggled(app.packageName))
+                                    },
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Text(
+                                            text = app.label,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                        )
+                                        Text(
+                                            text = app.packageName,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Checkbox(
+                                        checked = isSelected,
+                                        onCheckedChange = {
+                                            onAction(TunnelHomeAction.EditorAppSelectionToggled(app.packageName))
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            TextButton(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(TunnelHomeTags.EDITOR_APP_PICKER_DONE_BUTTON),
+                onClick = { onAction(TunnelHomeAction.EditorDismissAppPickerClicked) },
+            ) {
+                Text("Done")
             }
         }
     }

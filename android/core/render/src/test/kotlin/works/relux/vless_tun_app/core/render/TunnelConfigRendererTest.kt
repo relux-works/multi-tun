@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 
 class TunnelConfigRendererTest {
     @Test
@@ -55,5 +56,33 @@ class TunnelConfigRendererTest {
         assertTrue(rendered.json.contains("\"server\": \"dns-direct\""))
         assertTrue(rendered.json.contains("\"server\": \"dns-proxy\""))
         assertTrue(rendered.json.contains("\"final\": \"direct\""))
+    }
+
+    @Test
+    fun render_withWhitelistPackages_setsAllowedAppsInRuntimeManifest() {
+        val rendered = TunnelConfigRenderer().render(
+            DefaultTunnelCatalog.defaultProfile.copy(
+                appScopeMode = TunnelAppScopeMode.Whitelist,
+                appPackages = listOf("works.relux.vless_tun_observer"),
+            ),
+        )
+
+        assertEquals(listOf("works.relux.vless_tun_observer"), rendered.runtimeManifest.includePackages)
+        assertTrue(rendered.runtimeManifest.excludePackages.isEmpty())
+        assertTrue(rendered.json.contains("\"include_package\":[\"works.relux.vless_tun_observer\"]"))
+    }
+
+    @Test
+    fun render_withBlacklistPackages_setsExcludedAppsInTunInbound() {
+        val rendered = TunnelConfigRenderer().render(
+            DefaultTunnelCatalog.defaultProfile.copy(
+                appScopeMode = TunnelAppScopeMode.Blacklist,
+                appPackages = listOf("works.relux.vless_tun_observer"),
+            ),
+        )
+
+        assertEquals(listOf("works.relux.vless_tun_observer"), rendered.runtimeManifest.excludePackages)
+        assertTrue(rendered.runtimeManifest.includePackages.isEmpty())
+        assertTrue(rendered.json.contains("\"exclude_package\":[\"works.relux.vless_tun_observer\"]"))
     }
 }

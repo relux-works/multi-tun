@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 import works.relux.vless_tun_app.core.model.TunnelProfile
 
 class TunnelCatalogStoreTest {
@@ -35,6 +36,8 @@ class TunnelCatalogStoreTest {
             uuid = "11111111-1111-1111-1111-111111111111",
             routeMasks = listOf("ipify.org"),
             bypassMasks = listOf(".api64.ipify.org"),
+            appScopeMode = TunnelAppScopeMode.Whitelist,
+            appPackages = listOf("works.relux.vless_tun_observer"),
         )
         val catalog = TunnelCatalog(
             profiles = defaultCatalog().profiles + extraProfile,
@@ -49,6 +52,8 @@ class TunnelCatalogStoreTest {
         assertEquals("Direct Custom", loaded.profiles.last().name)
         assertEquals(listOf("ipify.org"), loaded.profiles.last().routeMasks)
         assertEquals(listOf(".api64.ipify.org"), loaded.profiles.last().bypassMasks)
+        assertEquals(TunnelAppScopeMode.Whitelist, loaded.profiles.last().appScopeMode)
+        assertEquals(listOf("works.relux.vless_tun_observer"), loaded.profiles.last().appPackages)
     }
 
     private fun defaultCatalog(): TunnelCatalog {

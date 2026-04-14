@@ -7,6 +7,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 import works.relux.vless_tun_app.core.model.TunnelProfile
 
 class TunnelHomeStoreTest {
@@ -176,6 +177,49 @@ class TunnelHomeStoreTest {
         val editor = store.state.value.editor
         assertEquals("corp.example", editor.routeMasksText)
         assertEquals(".api64.ipify.org", editor.bypassMasksText)
+    }
+
+    @Test
+    fun saveTunnel_persistsAppScopeModeAndPackages() {
+        var persistedProfiles: List<TunnelProfile> = emptyList()
+        val store = buildStore(
+            onCatalogChanged = { profiles, _ ->
+                persistedProfiles = profiles
+            },
+        )
+
+        store.syncInstalledApps(
+            listOf(
+                TunnelInstalledApp(packageName = "works.relux.vless_tun_observer", label = "Tunnel Observer"),
+            ),
+        )
+        store.dispatch(TunnelHomeAction.EditTunnelClicked(DefaultTunnelCatalog.defaultProfile.id))
+        store.dispatch(TunnelHomeAction.EditorAppScopeModeChanged(TunnelAppScopeMode.Whitelist))
+        store.dispatch(TunnelHomeAction.EditorAppSelectionToggled("works.relux.vless_tun_observer"))
+        store.dispatch(TunnelHomeAction.SaveTunnelClicked)
+
+        val persisted = persistedProfiles.single()
+        assertEquals(TunnelAppScopeMode.Whitelist, persisted.appScopeMode)
+        assertEquals(listOf("works.relux.vless_tun_observer"), persisted.appPackages)
+    }
+
+    @Test
+    fun syncInstalledApps_populatesVisibleEditorPickerData() {
+        val store = buildStore()
+
+        store.dispatch(TunnelHomeAction.EditTunnelClicked(DefaultTunnelCatalog.defaultProfile.id))
+        store.syncInstalledApps(
+            listOf(
+                TunnelInstalledApp(packageName = "works.relux.vless_tun_observer", label = "Tunnel Observer"),
+            ),
+        )
+        store.dispatch(TunnelHomeAction.EditorOpenAppPickerClicked)
+
+        val editor = store.state.value.editor
+        assertFalse(editor.isLoadingInstalledApps)
+        assertTrue(editor.isAppPickerVisible)
+        assertEquals(1, editor.installedApps.size)
+        assertEquals("Tunnel Observer", editor.installedApps.single().label)
     }
 
     @Test

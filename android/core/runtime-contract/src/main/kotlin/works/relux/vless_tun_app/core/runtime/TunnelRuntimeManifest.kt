@@ -16,6 +16,8 @@ data class TunnelRuntimeManifest(
     val addresses: List<TunnelAddress>,
     val routes: List<TunnelRoute>,
     val dnsServers: List<String>,
+    val includePackages: List<String> = emptyList(),
+    val excludePackages: List<String> = emptyList(),
     val allowBypass: Boolean,
     val isMockDataPlane: Boolean,
 )
