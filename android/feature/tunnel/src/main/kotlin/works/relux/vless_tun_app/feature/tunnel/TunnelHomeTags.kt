@@ -32,8 +32,21 @@ object TunnelHomeTags {
     const val EDITOR_UUID_INPUT = "Tunnel_Home_EditorUuid_input"
     const val EDITOR_ROUTE_MASKS_INPUT = "Tunnel_Home_EditorRouteMasks_input"
     const val EDITOR_BYPASS_MASKS_INPUT = "Tunnel_Home_EditorBypassMasks_input"
+    const val EDITOR_APP_SCOPE_SUMMARY = "Tunnel_Home_EditorAppScopeSummary_text"
+    const val EDITOR_APP_SCOPE_MODE_BLACKLIST = "Tunnel_Home_EditorAppScopeModeBlacklist_chip"
+    const val EDITOR_APP_SCOPE_MODE_WHITELIST = "Tunnel_Home_EditorAppScopeModeWhitelist_chip"
+    const val EDITOR_APP_SCOPE_PICKER_BUTTON = "Tunnel_Home_EditorAppScopePicker_button"
+    const val EDITOR_APP_SCOPE_CLEAR_BUTTON = "Tunnel_Home_EditorAppScopeClear_button"
+    const val EDITOR_APP_PICKER_SHEET = "Tunnel_Home_EditorAppPicker_sheet"
+    const val EDITOR_APP_PICKER_QUERY = "Tunnel_Home_EditorAppPickerQuery_input"
+    const val EDITOR_APP_PICKER_LIST = "Tunnel_Home_EditorAppPickerList_list"
+    const val EDITOR_APP_PICKER_DONE_BUTTON = "Tunnel_Home_EditorAppPickerDone_button"
     const val EDITOR_SAVE_BUTTON = "Tunnel_Home_EditorSave_button"
     const val EDITOR_CANCEL_BUTTON = "Tunnel_Home_EditorCancel_button"
     const val CONFIG_PREVIEW = "Tunnel_Home_ConfigPreview_card"
     const val CONFIG_PREVIEW_TOGGLE = "Tunnel_Home_ConfigPreviewToggle_button"
+
+    fun editorAppPickerItem(packageName: String): String {
+        return "Tunnel_Home_EditorAppPickerItem_${packageName.trim().replace('.', '_')}"
+    }
 }

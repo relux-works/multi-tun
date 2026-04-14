@@ -6,6 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
+import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 import works.relux.vless_tun_app.core.runtime.TunnelRuntimeBackend
 
 class XrayTunnelConfigRendererTest {
@@ -63,6 +64,22 @@ class XrayTunnelConfigRendererTest {
 
         assertTrue(rendered.json.contains("\"outboundTag\":\"proxy\""))
         assertFalse(rendered.json.contains("\"domain\":[\"domain:ipify.org\"]"))
+    }
+
+    @Test
+    fun render_withBlacklistPackages_setsExcludedAppsInRuntimeManifest() {
+        val rendered = renderer.render(
+            DefaultTunnelCatalog.defaultProfile.copy(
+                sourceUrl = SAMPLE_XHTTP_URI,
+                transport = "xhttp",
+                appScopeMode = TunnelAppScopeMode.Blacklist,
+                appPackages = listOf("works.relux.vless_tun_observer"),
+            ),
+        )
+
+        assertEquals(TunnelRuntimeBackend.Xray, rendered.backend)
+        assertEquals(listOf("works.relux.vless_tun_observer"), rendered.runtimeManifest.excludePackages)
+        assertTrue(rendered.runtimeManifest.includePackages.isEmpty())
     }
 
     private companion object {

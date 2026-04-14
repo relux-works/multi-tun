@@ -10,6 +10,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import works.relux.vless_tun_app.core.model.excludePackages
+import works.relux.vless_tun_app.core.model.includePackages
 import works.relux.vless_tun_app.core.model.TunnelProfile
 import works.relux.vless_tun_app.core.model.TunnelRoutingPolicy
 import works.relux.vless_tun_app.core.model.routingPolicy
@@ -196,6 +198,8 @@ class XrayTunnelConfigRenderer {
                 "1.1.1.1",
                 "2606:4700:4700::1111",
             ),
+            includePackages = profile.includePackages(),
+            excludePackages = profile.excludePackages(),
             allowBypass = true,
             isMockDataPlane = false,
         )

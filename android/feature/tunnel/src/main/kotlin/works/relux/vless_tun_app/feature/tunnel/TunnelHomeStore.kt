@@ -5,7 +5,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import works.relux.vless_tun_app.core.mvi.MviStore
+import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 import works.relux.vless_tun_app.core.model.TunnelProfile
+import works.relux.vless_tun_app.core.model.normalizedAppPackages
 import works.relux.vless_tun_app.core.model.endpoint
 import works.relux.vless_tun_app.core.model.parseSuffixMaskText
 import works.relux.vless_tun_app.core.model.routeMasksText
@@ -32,6 +34,12 @@ sealed interface TunnelHomeAction {
     data class EditorUuidChanged(val value: String) : TunnelHomeAction
     data class EditorRouteMasksChanged(val value: String) : TunnelHomeAction
     data class EditorBypassMasksChanged(val value: String) : TunnelHomeAction
+    data class EditorAppScopeModeChanged(val value: TunnelAppScopeMode) : TunnelHomeAction
+    data object EditorOpenAppPickerClicked : TunnelHomeAction
+    data object EditorDismissAppPickerClicked : TunnelHomeAction
+    data class EditorAppPickerQueryChanged(val value: String) : TunnelHomeAction
+    data class EditorAppSelectionToggled(val packageName: String) : TunnelHomeAction
+    data object EditorClearSelectedAppsClicked : TunnelHomeAction
     data object SaveTunnelClicked : TunnelHomeAction
 }
 
@@ -49,6 +57,11 @@ enum class TunnelEditorMode {
     Edit,
 }
 
+data class TunnelInstalledApp(
+    val packageName: String,
+    val label: String,
+)
+
 data class TunnelEditorState(
     val isVisible: Boolean = false,
     val mode: TunnelEditorMode = TunnelEditorMode.Create,
@@ -62,6 +75,12 @@ data class TunnelEditorState(
     val uuid: String = "",
     val routeMasksText: String = "",
     val bypassMasksText: String = "",
+    val appScopeMode: TunnelAppScopeMode = TunnelAppScopeMode.Blacklist,
+    val appPackages: List<String> = emptyList(),
+    val installedApps: List<TunnelInstalledApp> = emptyList(),
+    val isLoadingInstalledApps: Boolean = false,
+    val isAppPickerVisible: Boolean = false,
+    val appPickerQuery: String = "",
     val validationError: String? = null,
 ) {
     val title: String
@@ -69,6 +88,22 @@ data class TunnelEditorState(
 
     val showManualEndpointFields: Boolean
         get() = sourceUrl.isBlank()
+
+    val normalizedAppPackages: List<String>
+        get() = appPackages
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+
+    val appScopeSummary: String
+        get() = if (normalizedAppPackages.isEmpty()) {
+            "No apps selected. Tunnel applies to all apps."
+        } else {
+            when (appScopeMode) {
+                TunnelAppScopeMode.Blacklist -> "${normalizedAppPackages.size} app(s) bypass the tunnel."
+                TunnelAppScopeMode.Whitelist -> "Only ${normalizedAppPackages.size} app(s) use the tunnel."
+            }
+        }
 }
 
 data class EgressObservation(
@@ -144,6 +179,8 @@ class TunnelHomeStore(
 ) : MviStore<TunnelHomeState, TunnelHomeAction> {
     private var profiles: List<TunnelProfile> = initialProfiles
     private var egressState = TunnelEgressState()
+    private var installedApps: List<TunnelInstalledApp> = emptyList()
+    private var installedAppsLoaded = false
     private var selectedProfileId: String? = initialSelectedProfileId
         ?.takeIf { selectedId -> initialProfiles.any { it.id == selectedId } }
         ?: initialProfiles.firstOrNull()?.id
@@ -185,8 +222,55 @@ class TunnelHomeStore(
             is TunnelHomeAction.EditorUuidChanged -> updateEditor { copy(uuid = action.value, validationError = null) }
             is TunnelHomeAction.EditorRouteMasksChanged -> updateEditor { copy(routeMasksText = action.value, validationError = null) }
             is TunnelHomeAction.EditorBypassMasksChanged -> updateEditor { copy(bypassMasksText = action.value, validationError = null) }
+            is TunnelHomeAction.EditorAppScopeModeChanged -> updateEditor { copy(appScopeMode = action.value, validationError = null) }
+            TunnelHomeAction.EditorOpenAppPickerClicked -> updateEditor { copy(isAppPickerVisible = true) }
+            TunnelHomeAction.EditorDismissAppPickerClicked -> updateEditor { copy(isAppPickerVisible = false, appPickerQuery = "") }
+            is TunnelHomeAction.EditorAppPickerQueryChanged -> updateEditor { copy(appPickerQuery = action.value) }
+            is TunnelHomeAction.EditorAppSelectionToggled -> updateEditor {
+                val normalizedPackages = normalizedAppPackages
+                val updatedPackages = if (normalizedPackages.contains(action.packageName)) {
+                    normalizedPackages.filterNot { it == action.packageName }
+                } else {
+                    normalizedPackages + action.packageName
+                }
+                copy(appPackages = updatedPackages, validationError = null)
+            }
+            TunnelHomeAction.EditorClearSelectedAppsClicked -> updateEditor {
+                copy(appPackages = emptyList(), validationError = null)
+            }
             TunnelHomeAction.SaveTunnelClicked -> saveEditor()
         }
+    }
+
+    fun syncInstalledApps(apps: List<TunnelInstalledApp>) {
+        installedApps = apps
+            .map { app ->
+                TunnelInstalledApp(
+                    packageName = app.packageName.trim(),
+                    label = app.label.trim(),
+                )
+            }
+            .filter { app -> app.packageName.isNotBlank() && app.label.isNotBlank() }
+            .distinctBy(TunnelInstalledApp::packageName)
+            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, TunnelInstalledApp::label).thenBy(TunnelInstalledApp::packageName))
+        installedAppsLoaded = true
+        val current = stateFlow.value
+        if (!current.editor.isVisible) {
+            return
+        }
+        val nextEditor = current.editor.copy(
+            installedApps = installedApps,
+            isLoadingInstalledApps = false,
+        )
+        stateFlow.value = buildState(
+            profiles = profiles,
+            selectedId = selectedProfileId,
+            phase = current.phase,
+            detail = current.detail,
+            requiresPermission = current.requiresPermission,
+            editor = nextEditor,
+            egress = egressState,
+        )
     }
 
     fun syncRuntime(snapshot: TunnelRuntimeSnapshot) {
@@ -404,6 +488,8 @@ class TunnelHomeStore(
             uuid = if (useSourceManagedEndpoint) "" else editor.uuid.trim(),
             routeMasks = normalizedPolicy.routeMasks,
             bypassMasks = normalizedPolicy.bypassMasks,
+            appScopeMode = editor.appScopeMode,
+            appPackages = editor.normalizedAppPackages,
         )
 
         profiles = if (editor.mode == TunnelEditorMode.Create) {
@@ -490,6 +576,10 @@ class TunnelHomeStore(
             uuid = seed?.uuid ?: "",
             routeMasksText = seed?.routingPolicy()?.routeMasksText().orEmpty(),
             bypassMasksText = seed?.routingPolicy()?.bypassMasksText().orEmpty(),
+            appScopeMode = seed?.appScopeMode ?: TunnelAppScopeMode.Blacklist,
+            appPackages = seed?.normalizedAppPackages().orEmpty(),
+            installedApps = installedApps,
+            isLoadingInstalledApps = !installedAppsLoaded,
         )
     }
 
@@ -507,6 +597,10 @@ class TunnelHomeStore(
             uuid = profile.uuid,
             routeMasksText = profile.routingPolicy().routeMasksText(),
             bypassMasksText = profile.routingPolicy().bypassMasksText(),
+            appScopeMode = profile.appScopeMode,
+            appPackages = profile.normalizedAppPackages(),
+            installedApps = installedApps,
+            isLoadingInstalledApps = !installedAppsLoaded,
         )
     }
 
