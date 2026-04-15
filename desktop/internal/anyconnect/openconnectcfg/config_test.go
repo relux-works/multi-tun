@@ -104,6 +104,37 @@ func TestResolveServerURLForProfileRejectsAmbiguousNestedProfiles(t *testing.T) 
 	}
 }
 
+func TestEffectiveAuthUsesServerSpecificOverrideWithGlobalFallback(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Auth: AuthConfig{
+			UsernameKeychainAccount: "global/username",
+			PasswordKeychainAccount: "global/password",
+			TOTPKeychainAccount:     "global/totp_secret",
+		},
+		Servers: map[string]ServerConfig{
+			"vpn-gw2.corp.example/outside": {
+				Auth: &AuthConfig{
+					UsernameKeychainAccount: "server/username",
+					PasswordKeychainAccount: "server/password",
+				},
+			},
+		},
+	}
+
+	got := cfg.EffectiveAuth("vpn-gw2.corp.example/outside")
+	if got.UsernameKeychainAccount != "server/username" {
+		t.Fatalf("UsernameKeychainAccount = %q, want %q", got.UsernameKeychainAccount, "server/username")
+	}
+	if got.PasswordKeychainAccount != "server/password" {
+		t.Fatalf("PasswordKeychainAccount = %q, want %q", got.PasswordKeychainAccount, "server/password")
+	}
+	if got.TOTPKeychainAccount != "global/totp_secret" {
+		t.Fatalf("TOTPKeychainAccount = %q, want %q", got.TOTPKeychainAccount, "global/totp_secret")
+	}
+}
+
 func TestInitWritesFullModeScaffold(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +163,25 @@ func TestInitWritesFullModeScaffold(t *testing.T) {
 	}
 	if got, want := cfg.EffectiveMode(selection.ServerURL, selection.Profile), "full"; got != want {
 		t.Fatalf("EffectiveMode() = %q, want %q", got, want)
+	}
+	serverCfg, ok := cfg.Servers[selection.ServerURL]
+	if !ok {
+		t.Fatalf("cfg.Servers missing %q", selection.ServerURL)
+	}
+	if cfg.Auth != (AuthConfig{}) {
+		t.Fatalf("cfg.Auth = %#v, want empty legacy fallback for new scaffold", cfg.Auth)
+	}
+	if serverCfg.Auth == nil {
+		t.Fatal("serverCfg.Auth = nil, want populated auth")
+	}
+	if got, want := serverCfg.Auth.UsernameKeychainAccount, "vpn-example-com-engineering/username"; got != want {
+		t.Fatalf("serverCfg.Auth.UsernameKeychainAccount = %q, want %q", got, want)
+	}
+	if got, want := serverCfg.Auth.PasswordKeychainAccount, "vpn-example-com-engineering/password"; got != want {
+		t.Fatalf("serverCfg.Auth.PasswordKeychainAccount = %q, want %q", got, want)
+	}
+	if got, want := serverCfg.Auth.TOTPKeychainAccount, "vpn-example-com-engineering/totp_secret"; got != want {
+		t.Fatalf("serverCfg.Auth.TOTPKeychainAccount = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("Stat(path) error = %v", err)

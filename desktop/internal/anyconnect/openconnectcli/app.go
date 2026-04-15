@@ -402,11 +402,6 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		return runOptions{}, 1, err
 	}
 
-	resolvedUsername, resolvedPassword, resolvedTOTP, err := resolveCredentials(*username, *password, *totpSecret, cfg.Auth, *dryRun)
-	if err != nil {
-		return runOptions{}, 1, err
-	}
-
 	defaultSelection := cfg.DefaultSelection()
 	resolvedServer := firstNonEmpty(*server, defaultSelection.ServerURL)
 	resolvedProfile := firstNonEmpty(*profile, defaultSelection.Profile)
@@ -428,6 +423,11 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 			return runOptions{}, 1, resolveErr
 		}
 		effectiveServer = host.Address
+	}
+	resolvedAuthCfg := cfg.EffectiveAuth(firstNonEmpty(effectiveServer, resolvedServer))
+	resolvedUsername, resolvedPassword, resolvedTOTP, err := resolveCredentials(*username, *password, *totpSecret, resolvedAuthCfg, *dryRun)
+	if err != nil {
+		return runOptions{}, 1, err
 	}
 	resolvedSplitInclude := cfg.EffectiveSplitInclude(effectiveServer, resolvedProfile)
 	resolvedMode := firstNonEmpty(*mode, cfg.EffectiveMode(effectiveServer, resolvedProfile), openconnect.ConnectModeFull)

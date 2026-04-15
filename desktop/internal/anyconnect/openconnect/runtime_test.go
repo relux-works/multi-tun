@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1149,6 +1150,137 @@ func TestWaitForHostScanFollowsRedirectChain(t *testing.T) {
 	}
 	if state.RequestURL != server.URL+"/complete" {
 		t.Fatalf("RequestURL = %q, want %q", state.RequestURL, server.URL+"/complete")
+	}
+}
+
+func TestFetchSAMLAuthStateWithJarPreservesPOSTAcrossRedirect(t *testing.T) {
+	var sawRedirectPOST bool
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/outside":
+			if r.Method != http.MethodPost {
+				t.Fatalf("initial method = %s, want POST", r.Method)
+			}
+			http.Redirect(w, r, "/redirected/outside", http.StatusFound)
+		case "/redirected/outside":
+			if r.Method != http.MethodPost {
+				t.Fatalf("redirected method = %s, want POST", r.Method)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("ReadAll(r.Body) error = %v", err)
+			}
+			if !strings.Contains(string(body), `<config-auth client="vpn" type="init"`) {
+				t.Fatalf("redirected body = %q, want aggregate init XML", string(body))
+			}
+			sawRedirectPOST = true
+			w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+			_, _ = io.WriteString(w, fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="auth-request" aggregate-auth-version="2">
+<opaque is-for="sg"><tunnel-group>TG-Corp</tunnel-group><auth-method>single-sign-on-v2</auth-method><group-alias>outside</group-alias></opaque>
+<auth id="main"><sso-v2-login>%s/+CSCOE+/saml/sp/login?tgname=TG</sso-v2-login></auth>
+</config-auth>`, server.URL))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	prevClientFactory := newSAMLHTTPClient
+	newSAMLHTTPClient = func(jar http.CookieJar, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
+		client := server.Client()
+		client.Timeout = authTimeout
+		client.Jar = jar
+		client.CheckRedirect = checkRedirect
+		return client
+	}
+	defer func() {
+		newSAMLHTTPClient = prevClientFactory
+	}()
+
+	var logBuf bytes.Buffer
+	state, err := fetchSAMLAuthStateWithJar(server.URL+"/outside", "vpn-gw2.corp.example/outside", nil, aggregateAuthClientProfile{
+		Version:  "4.10.07061",
+		DeviceID: "mac-intel",
+	}, &logBuf)
+	if err != nil {
+		t.Fatalf("fetchSAMLAuthStateWithJar() error = %v", err)
+	}
+	if !sawRedirectPOST {
+		t.Fatal("redirect target did not receive preserved POST")
+	}
+	if got, want := state.RequestURL, server.URL+"/redirected/outside"; got != want {
+		t.Fatalf("state.RequestURL = %q, want %q", got, want)
+	}
+	if got := logBuf.String(); !strings.Contains(got, "aggregate_auth_redirect:") {
+		t.Fatalf("redirect log missing, got %q", got)
+	}
+}
+
+func TestCompleteSAMLAuthUsesRedirectedTargetForConnectURL(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error = %v", err)
+	}
+
+	var sawRedirectPOST bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/outside":
+			http.Redirect(w, r, "/redirected/outside", http.StatusFound)
+		case "/redirected/outside":
+			if r.Method != http.MethodPost {
+				t.Fatalf("redirected method = %s, want POST", r.Method)
+			}
+			sawRedirectPOST = true
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="complete" aggregate-auth-version="2">
+<session-token>SESSION123</session-token>
+</config-auth>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	prevClientFactory := newSAMLHTTPClient
+	newSAMLHTTPClient = func(jar http.CookieJar, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
+		client := server.Client()
+		client.Timeout = authTimeout
+		client.Jar = jar
+		client.CheckRedirect = checkRedirect
+		return client
+	}
+	defer func() {
+		newSAMLHTTPClient = prevClientFactory
+	}()
+
+	state := &samlAuthState{
+		BaseHost:    "vpn-ra-2.mts.ru",
+		RequestURL:  server.URL,
+		ReplyURL:    server.URL + "/outside",
+		GroupAccess: "vpn-ra.mts.ru/outside",
+		OpaqueXML:   "<opaque><tunnel-group>outside</tunnel-group></opaque>",
+		CookieJar:   jar,
+	}
+
+	result, err := completeSAMLAuth(state, "vpn-ra.mts.ru/outside", "ABC123TOKEN", io.Discard)
+	if err != nil {
+		t.Fatalf("completeSAMLAuth() error = %v", err)
+	}
+	if !sawRedirectPOST {
+		t.Fatal("redirect target did not receive preserved POST")
+	}
+	if result.Cookie != "SESSION123" {
+		t.Fatalf("Cookie = %q, want %q", result.Cookie, "SESSION123")
+	}
+	if result.ConnectURL != server.URL+"/redirected/outside" {
+		t.Fatalf("ConnectURL = %q, want %q", result.ConnectURL, server.URL+"/redirected/outside")
+	}
+	if result.Host == "" {
+		t.Fatal("Host is empty, want redirected host")
 	}
 }
 
