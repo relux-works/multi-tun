@@ -21,6 +21,11 @@ This repo also keeps live notes from previous VPN investigations:
 - `v2raytun-dancevpn-routing.md`
 - `corp-vpn-wifi-bypass.md`
 
+Operational instructions live under [`instructions/`](instructions/README.md):
+
+- [`instructions/docker-desktop-private-registry.md`](instructions/docker-desktop-private-registry.md)
+- [`instructions/colima-private-registry.md`](instructions/colima-private-registry.md)
+
 ## Platform Layout
 
 - `desktop/`: current shipped codebase
@@ -158,7 +163,7 @@ Operational notes:
 - `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
 - `--profile` resolves against local AnyConnect XML `HostEntry` values and automatically deduplicates the same server repeated across `/opt/cisco/...` and `~/Downloads/...`.
 - the canonical lifecycle commands are now `start`, `reconnect`, `status`, and `stop`; `run`, `connect`, and `disconnect` remain as compatibility aliases.
-- `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. The shipped example bootstrap convention is fully keychain-backed: `auth.username_keychain_account=corp-vpn/username` and `auth.password_keychain_account=corp-vpn/password`. Plain `auth.username` remains as a compatibility fallback. `totp_secret_keychain_account` stays optional and is intentionally not wired by default.
+- `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. The preferred shape is `servers.<url>.auth`, so credentials are selected from the server being used. The legacy root-level `auth` block still works as a compatibility fallback. The shipped bootstrap convention is fully keychain-backed: `servers.<url>.auth.username_keychain_account=corp-vpn/username` and `servers.<url>.auth.password_keychain_account=corp-vpn/password`. Plain `username` remains as a compatibility fallback. `totp_secret_keychain_account` stays optional and is intentionally not wired by default.
 - live auth now defaults to `--auth aggregate`, which is the only path that currently completes the example SSO+CSD flow on this machine; `--auth openconnect` remains available as the direct `openconnect --authenticate` path for debugging. `vpn-auth` is used for the browser-assisted SAML steps in aggregate mode, with preset-cookie support for follow-up pages.
 - `./scripts/setup.sh` now treats the full live runtime as part of the shipped toolchain: it ensures `sing-box` for `vless-tun`, `totp-cli` for `vpn-auth`, builds `desktop/cmd/vpn-auth`, installs the resulting binary into `~/.local/bin`, and `./scripts/deinit.sh` removes that managed binary link again.
 - the CSD helper is resolved from the active OpenConnect install, preferring native Cisco `libcsd.dylib` when it is available under `~/.cisco/...`; otherwise it falls back to Homebrew's stable `opt/openconnect/libexec/openconnect/csd-post.sh` path instead of versioned `Cellar/...` paths. The fallback `csd-post.sh` path is still wrapped with tiny macOS shims for `pidof` and GNU-style `stat -c %Y`.
@@ -172,6 +177,7 @@ Operational notes:
 - live `start` now resolves the privileged backend automatically: shared `vpn-core` first when it is installed, otherwise the old `sudo -v` + `sudo -n` path so the privileged password prompt still does not compete with the cookie being piped into `--cookie-on-stdin`.
 - `--mode full` uses the stock `vpnc-script`, so OpenConnect will own default route and global DNS. Treat it as a smoke-test path, not a coexistence-safe mode.
 - `--mode split-include` uses `vpn-slice`. On macOS that means scoped `/etc/resolver/<domain>` files for VPN DNS instead of replacing the global resolver stack, which is the direction we want for split-include coexistence next to `vless-tun`.
+- host trust and guest trust are separate concerns. A macOS host may trust a corporate CA in Keychain while a Colima or Docker VM still rejects the same internal registry with `x509: certificate signed by unknown authority`. If an internal registry is reachable from the host but `docker pull` fails inside the guest, install the corporate CA into the guest trust store or into `/etc/docker/certs.d/<registry>/ca.crt` on the daemon host.
 
 ### `openconnect-tun setup`
 
@@ -203,6 +209,10 @@ Example config:
   },
   "servers": {
     "vpn-gw2.corp.example/outside": {
+      "auth": {
+        "username_keychain_account": "corp-vpn/username",
+        "password_keychain_account": "corp-vpn/password"
+      },
       "profiles": {
         "Ural Outside extended": {
           "mode": "split-include",
@@ -237,10 +247,6 @@ Example config:
         }
       }
     }
-  },
-  "auth": {
-    "username_keychain_account": "corp-vpn/username",
-    "password_keychain_account": "corp-vpn/password"
   }
 }
 ```
@@ -256,7 +262,9 @@ Field reference:
 - `default.profile`: the default user-facing profile selector when `start|reconnect` runs without an explicit `--profile`
 - `default` pairing: these two fields are meant to point at the same configured VPN choice, so the config reads as one default selection instead of separate root-level knobs
 - `servers.<url>`: configuration bucket for one concrete ASA endpoint such as `vpn-gw2.corp.example/outside`
+- `servers.<url>.auth`: preferred auth override for that concrete server. Use this when different ASA endpoints require different keychain entries or usernames
 - `servers.<url>.profiles.<profile>`: one user-facing profile variant under that server; this is where `mode` and `split_include` live
+- legacy auth fallback: root-level `auth` is still accepted for older configs, but new configs should prefer `servers.<url>.auth`
 - `servers.<url>.profiles.<profile>.mode`: default connect mode for that profile. Use `split-include` for coexistence-safe split routing or `full` for stock full-tunnel behavior
 - `servers.<url>.profiles.<profile>.split_include.routes`: included CIDRs, hosts, or aliases passed to `vpn-slice` in split-include mode
 - `servers.<url>.profiles.<profile>.split_include.nameservers`: scoped VPN DNS servers to use for that profile

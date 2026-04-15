@@ -46,6 +46,7 @@ type VPNConfig struct {
 }
 
 type ServerConfig struct {
+	Auth         *AuthConfig             `json:"auth,omitempty"`
 	SplitInclude *SplitIncludeConfig      `json:"split_include,omitempty"`
 	Profiles     map[string]ProfileConfig `json:"profiles,omitempty"`
 }
@@ -116,6 +117,7 @@ func Init(path string, options SetupOptions) (Config, string, error) {
 	}
 	cfg.Servers = map[string]ServerConfig{
 		serverURL: {
+			Auth: &options.Auth,
 			Profiles: map[string]ProfileConfig{
 				profile: {
 					Mode: "full",
@@ -123,7 +125,6 @@ func Init(path string, options SetupOptions) (Config, string, error) {
 			},
 		},
 	}
-	cfg.Auth = options.Auth
 
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
 		return Config{}, resolved, err
@@ -203,6 +204,18 @@ func (c Config) EffectiveSplitInclude(server string, profile string) SplitInclud
 	}
 	if override, ok := c.Profiles[profile]; ok {
 		result = mergeSplitIncludeOverride(result, override.SplitInclude)
+	}
+	return result
+}
+
+func (c Config) EffectiveAuth(server string) AuthConfig {
+	result := c.Auth
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return result
+	}
+	if override, ok := c.Servers[server]; ok {
+		result = mergeAuthConfigOverride(result, override.Auth)
 	}
 	return result
 }
@@ -298,6 +311,26 @@ func cloneStrings(values []string) []string {
 		return nil
 	}
 	return append([]string(nil), values...)
+}
+
+func mergeAuthConfigOverride(base AuthConfig, override *AuthConfig) AuthConfig {
+	if override == nil {
+		return base
+	}
+	result := base
+	if strings.TrimSpace(override.UsernameKeychainAccount) != "" {
+		result.UsernameKeychainAccount = override.UsernameKeychainAccount
+	}
+	if strings.TrimSpace(override.Username) != "" {
+		result.Username = override.Username
+	}
+	if strings.TrimSpace(override.PasswordKeychainAccount) != "" {
+		result.PasswordKeychainAccount = override.PasswordKeychainAccount
+	}
+	if strings.TrimSpace(override.TOTPKeychainAccount) != "" {
+		result.TOTPKeychainAccount = override.TOTPKeychainAccount
+	}
+	return result
 }
 
 func firstNonEmpty(values ...string) string {

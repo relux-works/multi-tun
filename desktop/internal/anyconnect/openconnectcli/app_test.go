@@ -488,6 +488,72 @@ func TestParseRunOptionsUsesServerSpecificSplitIncludeOverrides(t *testing.T) {
 	}
 }
 
+func TestParseRunOptionsUsesServerSpecificAuthOverrides(t *testing.T) {
+	original := keychainGet
+	t.Cleanup(func() {
+		keychainGet = original
+	})
+
+	values := map[string]string{
+		"server/username": "alice",
+		"server/password": "secret-password",
+		"global/totp":     "totp-secret",
+	}
+	keychainGet = func(account string) (string, error) {
+		value, ok := values[account]
+		if !ok {
+			return "", fmt.Errorf("missing %s", account)
+		}
+		return value, nil
+	}
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "auth": {
+    "username_keychain_account": "global/username",
+    "password_keychain_account": "global/password",
+    "totp_secret_keychain_account": "global/totp"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "auth": {
+        "username_keychain_account": "server/username",
+        "password_keychain_account": "server/password"
+      },
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.username != "alice" {
+		t.Fatalf("username = %q, want %q", options.username, "alice")
+	}
+	if options.password != "secret-password" {
+		t.Fatalf("password = %q, want %q", options.password, "secret-password")
+	}
+	if options.totpSecret != "totp-secret" {
+		t.Fatalf("totpSecret = %q, want %q", options.totpSecret, "totp-secret")
+	}
+}
+
 func TestParseRunOptionsProfileOverridesBeatServerOverrides(t *testing.T) {
 	t.Parallel()
 

@@ -1694,6 +1694,59 @@ func authenticateWithOpenConnect(server string, options ConnectOptions, ocPath s
 	return result, nil
 }
 
+func doSAMLPostWithRedirects(requestURL string, body string, jar http.CookieJar, logWriter io.Writer) (*http.Response, string, error) {
+	currentURL := requestURL
+	for redirectCount := 0; redirectCount < 5; redirectCount++ {
+		req, err := http.NewRequest(http.MethodPost, currentURL, strings.NewReader(body))
+		if err != nil {
+			return nil, currentURL, fmt.Errorf("build SAML request: %w", err)
+		}
+		req.Header.Set("User-Agent", "AnyConnect")
+		req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+		req.Header.Set("X-Aggregate-Auth", "1")
+		req.Header.Set("X-Transcend-Version", "1")
+
+		resp, err := newSAMLHTTPClient(jar, func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}).Do(req)
+		if err != nil {
+			return nil, currentURL, err
+		}
+		switch resp.StatusCode {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+			location := strings.TrimSpace(resp.Header.Get("Location"))
+			if location == "" {
+				return resp, currentURL, nil
+			}
+			nextURL, err := resolveSAMLRedirectURL(currentURL, location)
+			if err != nil {
+				_ = resp.Body.Close()
+				return nil, currentURL, fmt.Errorf("parse SAML redirect location: %w", err)
+			}
+			writeLogf(logWriter, "aggregate_auth_redirect: %s -> %s (status=%d)", currentURL, nextURL, resp.StatusCode)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			currentURL = nextURL
+			continue
+		default:
+			return resp, currentURL, nil
+		}
+	}
+	return nil, currentURL, fmt.Errorf("SAML request exceeded redirect limit")
+}
+
+func resolveSAMLRedirectURL(currentURL string, location string) (string, error) {
+	base, err := url.Parse(currentURL)
+	if err != nil {
+		return "", err
+	}
+	target, err := url.Parse(location)
+	if err != nil {
+		return "", err
+	}
+	return base.ResolveReference(target).String(), nil
+}
+
 func detectOpenConnectLocalHostname(profile aggregateAuthClientProfile) string {
 	if value := strings.TrimSpace(commandOutput("scutil", "--get", "LocalHostName")); value != "" {
 		return value
@@ -1736,16 +1789,7 @@ func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar htt
 		}
 	}
 
-	req, err := http.NewRequest(http.MethodPost, requestURL, strings.NewReader(initXML))
-	if err != nil {
-		return nil, fmt.Errorf("build SAML init request: %w", err)
-	}
-	req.Header.Set("User-Agent", "AnyConnect")
-	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
-	req.Header.Set("X-Aggregate-Auth", "1")
-	req.Header.Set("X-Transcend-Version", "1")
-
-	resp, err := newSAMLHTTPClient(jar, nil).Do(req)
+	resp, finalURL, err := doSAMLPostWithRedirects(requestURL, initXML, jar, logWriter)
 	if err != nil {
 		return nil, fmt.Errorf("SAML init request failed: %w", err)
 	}
@@ -1760,7 +1804,7 @@ func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar htt
 	}
 
 	response := string(body)
-	state, err := parseSAMLAuthStateFromResponse(response, requestURL, groupAccess, clientProfile, jar)
+	state, err := parseSAMLAuthStateFromResponse(response, finalURL, groupAccess, clientProfile, jar)
 	if err != nil {
 		return nil, err
 	}
@@ -1956,16 +2000,7 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 	writeLogf(logWriter, "aggregate_auth_reply_variant: target=%s name=%s", targetURL, replyVariant.Name)
 	writeLogf(logWriter, "aggregate_auth_reply_cookies: %s", describeCookiesForURL(state.CookieJar, targetURL))
 
-	req, err := http.NewRequest(http.MethodPost, targetURL, strings.NewReader(replyVariant.XML))
-	if err != nil {
-		return nil, fmt.Errorf("build SAML auth-reply request: %w", err)
-	}
-	req.Header.Set("User-Agent", "AnyConnect")
-	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
-	req.Header.Set("X-Aggregate-Auth", "1")
-	req.Header.Set("X-Transcend-Version", "1")
-
-	resp, err := newSAMLHTTPClient(state.CookieJar, nil).Do(req)
+	resp, finalTargetURL, err := doSAMLPostWithRedirects(targetURL, replyVariant.XML, state.CookieJar, logWriter)
 	if err != nil {
 		return nil, fmt.Errorf("SAML auth-reply failed: %w", err)
 	}
@@ -1980,21 +2015,21 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 	if len(snippet) > 400 {
 		snippet = snippet[:400]
 	}
-	writeLogf(logWriter, "aggregate_auth_reply_status: target=%s status=%s", targetURL, resp.Status)
+	writeLogf(logWriter, "aggregate_auth_reply_status: target=%s status=%s", finalTargetURL, resp.Status)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		writeLogf(logWriter, "aggregate_auth_reply_error: target=%s snippet=%s", targetURL, snippet)
+		writeLogf(logWriter, "aggregate_auth_reply_error: target=%s snippet=%s", finalTargetURL, snippet)
 		return nil, fmt.Errorf("SAML auth-reply failed with HTTP %d", resp.StatusCode)
 	}
 
 	sessionToken := extractXMLTag(response, "session-token")
 	if sessionToken == "" {
-		writeLogf(logWriter, "aggregate_auth_reply_error: target=%s snippet=%s", targetURL, snippet)
+		writeLogf(logWriter, "aggregate_auth_reply_error: target=%s snippet=%s", finalTargetURL, snippet)
 		if strings.Contains(response, "type=\"auth-request\"") {
-			followupState, err := parseSAMLAuthStateFromResponse(response, targetURL, state.GroupAccess, state.ClientProfile, state.CookieJar)
+			followupState, err := parseSAMLAuthStateFromResponse(response, finalTargetURL, state.GroupAccess, state.ClientProfile, state.CookieJar)
 			if err == nil {
 				return nil, &samlAuthReplyFollowup{State: followupState, Snippet: snippet}
 			}
-			continuationState, continuationErr := parseSAMLAuthContinuationState(response, targetURL, state.GroupAccess, state.ClientProfile, state.CookieJar)
+			continuationState, continuationErr := parseSAMLAuthContinuationState(response, finalTargetURL, state.GroupAccess, state.ClientProfile, state.CookieJar)
 			if continuationErr == nil {
 				return nil, &samlAuthReplyContinue{State: continuationState, Snippet: snippet}
 			}
@@ -2002,11 +2037,19 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 		return nil, fmt.Errorf("ASA auth-reply did not return session-token: %s", snippet)
 	}
 
+	resultHost := strings.TrimSpace(state.BaseHost)
+	if parsed, err := url.Parse(finalTargetURL); err == nil && strings.TrimSpace(parsed.Host) != "" {
+		resultHost = strings.TrimSpace(parsed.Host)
+	}
+	resultConnectURL := strings.TrimSpace(finalTargetURL)
+	if resultConnectURL == "" {
+		resultConnectURL = fmt.Sprintf("https://%s", server)
+	}
 	result := &authResult{
 		Cookie:     sessionToken,
-		Host:       state.BaseHost,
-		ConnectURL: fmt.Sprintf("https://%s", server),
-		Resolve:    resolveOpenConnectResolve(server),
+		Host:       resultHost,
+		ConnectURL: resultConnectURL,
+		Resolve:    resolveOpenConnectResolve(resultConnectURL),
 	}
 	logAuthResult(logWriter, "aggregate_auth", result)
 	return result, nil
