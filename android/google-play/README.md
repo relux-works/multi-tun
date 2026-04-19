@@ -2,6 +2,9 @@
 
 Upload-ready assets for the `vless-tun Android` Play Console listing live in `assets/`.
 
+Policy and submission notes:
+- `vpnservice-declaration.md` - Play Console checklist and suggested answers for the app's required `VpnService` declaration
+
 Files:
 - `assets/app-icon/vless-tun-play-icon-512.png` — app icon, 512x512 PNG
 - `assets/feature-graphic/vless-tun-feature-graphic-1024x500.png` — feature graphic, 1024x500 PNG
