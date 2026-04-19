@@ -213,6 +213,19 @@ Example config:
         "username_keychain_account": "corp-vpn/username",
         "password_keychain_account": "corp-vpn/password"
       },
+      "client_mimicry": {
+        "user_agent": "AnyConnect",
+        "version": "4.10.08029",
+        "os": "mac-intel",
+        "local_hostname": "corp-macbook",
+        "auth_methods": [
+          "single-sign-on-v2",
+          "single-sign-on-external-browser"
+        ],
+        "http_headers": {
+          "X-Support-HTTP-Auth": "true"
+        }
+      },
       "profiles": {
         "Ural Outside extended": {
           "mode": "split-include",
@@ -263,6 +276,14 @@ Field reference:
 - `default` pairing: these two fields are meant to point at the same configured VPN choice, so the config reads as one default selection instead of separate root-level knobs
 - `servers.<url>`: configuration bucket for one concrete ASA endpoint such as `vpn-gw2.corp.example/outside`
 - `servers.<url>.auth`: preferred auth override for that concrete server. Use this when different ASA endpoints require different keychain entries or usernames
+- `servers.<url>.client_mimicry`: optional AnyConnect client identity for that concrete server. It is applied to aggregate-auth init/reply requests and to the final `openconnect` command, so endpoint-specific ASA/LB behavior can be reproduced without provider-specific code.
+- `servers.<url>.client_mimicry.user_agent`: User-Agent for aggregate-auth HTTP requests and `openconnect --useragent`. Defaults to `AnyConnect` when omitted.
+- `servers.<url>.client_mimicry.version`: client version for aggregate-auth XML `<version>` and `openconnect --version-string`. Defaults to the locally detected Cisco Secure Client version, then `4.10.07061`.
+- `servers.<url>.client_mimicry.os`: OS value for `openconnect --os`; it is also used as aggregate-auth `<device-id>` when `device_id` is omitted.
+- `servers.<url>.client_mimicry.device_id`: explicit aggregate-auth XML `<device-id>` override when it should differ from `os`.
+- `servers.<url>.client_mimicry.local_hostname`: local hostname passed to `openconnect --local-hostname`; omitted values still use the host-detected name.
+- `servers.<url>.client_mimicry.auth_methods`: aggregate-auth `<capabilities>` auth methods. Omit the field to keep the Cisco-like default method list.
+- `servers.<url>.client_mimicry.http_headers`: extra or overriding aggregate-auth HTTP headers by name. Values are logged only by header name, not by value.
 - `servers.<url>.profiles.<profile>`: one user-facing profile variant under that server; this is where `mode` and `split_include` live
 - legacy auth fallback: root-level `auth` is still accepted for older configs, but new configs should prefer `servers.<url>.auth`
 - `servers.<url>.profiles.<profile>.mode`: default connect mode for that profile. Use `split-include` for coexistence-safe split routing or `full` for stock full-tunnel behavior
