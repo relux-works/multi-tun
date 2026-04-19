@@ -33,17 +33,20 @@ import works.relux.vless_tun_app.core.model.TunnelAppScopeMode
 internal fun TunnelEditorCard(
     state: TunnelEditorState,
     onAction: (TunnelHomeAction) -> Unit,
+    modifier: Modifier = Modifier,
+    showTitle: Boolean = true,
+    showCancelButton: Boolean = true,
 ) {
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .testTag(TunnelHomeTags.EDITOR_CARD),
     ) {
         val trimmedSource = state.sourceUrl.trim()
         val detectedSourceLabel = when {
             trimmedSource.startsWith("vless://", ignoreCase = true) -> "Detected: inline VLESS URI"
-            trimmedSource.startsWith("http://", ignoreCase = true) ||
-                trimmedSource.startsWith("https://", ignoreCase = true) -> "Detected: subscription URL"
+            trimmedSource.startsWith("https://", ignoreCase = true) -> "Detected: subscription URL"
+            trimmedSource.startsWith("http://", ignoreCase = true) -> "Detected: insecure source URL"
             trimmedSource.isBlank() -> "Detected: manual endpoint"
             else -> "Detected: source URL"
         }
@@ -56,22 +59,26 @@ internal fun TunnelEditorCard(
             trimmedSource.startsWith("vless://", ignoreCase = true) -> {
                 "The app will parse this inline VLESS URI directly at preview/connect time."
             }
-            trimmedSource.startsWith("http://", ignoreCase = true) ||
-                trimmedSource.startsWith("https://", ignoreCase = true) -> {
+            trimmedSource.startsWith("https://", ignoreCase = true) -> {
                     "The app will fetch and resolve this subscription on every connect."
                 }
+            trimmedSource.startsWith("http://", ignoreCase = true) -> {
+                "HTTP source URLs are not supported. Use https:// or a direct vless:// URI."
+            }
             else -> {
-                "Paste one subscription URL or one direct `vless://` URI here. Leave it empty to use the manual endpoint fields below."
+                "Paste one HTTPS subscription URL or one direct `vless://` URI here. Leave it empty to use the manual endpoint fields below."
             }
         }
         Column(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                text = state.title,
-                style = MaterialTheme.typography.titleMedium,
-            )
+            if (showTitle) {
+                Text(
+                    text = state.title,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
             Text(
                 text = "Normal flow: paste one subscription URL or one direct `vless://` URI, save, then connect.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -112,15 +119,20 @@ internal fun TunnelEditorCard(
             )
             if (state.sourceUrl.isBlank()) {
                 Text(
-                    text = "Source field is empty, so manual endpoint fields are shown below.",
+                    text = "Source field is empty, so manual endpoint fields are shown below. TLS is enabled automatically for manual endpoints.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.tertiary,
                 )
             }
             if (state.showManualEndpointFields) {
                 Text(
-                    text = "Manual Endpoint",
+                    text = "Manual Endpoint (TLS)",
                     style = MaterialTheme.typography.labelLarge,
+                )
+                Text(
+                    text = "Manual endpoints are saved with TLS enabled. Use server name / SNI that matches the endpoint certificate.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
                     value = state.host,
@@ -286,14 +298,16 @@ internal fun TunnelEditorCard(
                         Text("Save")
                     }
                 }
-                Box(modifier = Modifier.weight(1f)) {
-                    TextButton(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag(TunnelHomeTags.EDITOR_CANCEL_BUTTON),
-                        onClick = { onAction(TunnelHomeAction.DismissEditorClicked) },
-                    ) {
-                        Text("Cancel")
+                if (showCancelButton) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        TextButton(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag(TunnelHomeTags.EDITOR_CANCEL_BUTTON),
+                            onClick = { onAction(TunnelHomeAction.DismissEditorClicked) },
+                        ) {
+                            Text("Cancel")
+                        }
                     }
                 }
             }

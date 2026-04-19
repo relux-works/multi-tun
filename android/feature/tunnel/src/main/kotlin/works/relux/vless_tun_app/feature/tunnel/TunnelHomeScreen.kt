@@ -26,15 +26,22 @@ fun TunnelHomeScreen(
             .fillMaxSize()
             .semantics { testTagsAsResourceId = true },
     ) {
-        Scaffold(
-            topBar = { TunnelTopBar(onHeaderTap = onHeaderTap) },
-        ) { contentPadding ->
-            TunnelHomePage(
-                state = state,
+        if (state.editor.isVisible && !editorPinnedTop) {
+            TunnelEditorScreen(
+                state = state.editor,
                 onAction = onAction,
-                editorPinnedTop = editorPinnedTop,
-                contentPadding = contentPadding,
             )
+        } else {
+            Scaffold(
+                topBar = { TunnelTopBar(onHeaderTap = onHeaderTap) },
+            ) { contentPadding ->
+                TunnelHomePage(
+                    state = state,
+                    onAction = onAction,
+                    editorPinnedTop = editorPinnedTop,
+                    contentPadding = contentPadding,
+                )
+            }
         }
     }
 }

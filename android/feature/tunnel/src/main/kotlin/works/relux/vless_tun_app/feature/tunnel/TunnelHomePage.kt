@@ -40,9 +40,6 @@ internal fun TunnelHomePage(
             TunnelPrimaryActions(state = state, onAction = onAction)
             TunnelEgressCard(state = state, onAction = onAction)
             TunnelCatalogCard(state = state, onAction = onAction)
-            if (state.editor.isVisible) {
-                TunnelEditorCard(state = state.editor, onAction = onAction)
-            }
             TunnelConfigPreviewCard(state = state)
         }
     }

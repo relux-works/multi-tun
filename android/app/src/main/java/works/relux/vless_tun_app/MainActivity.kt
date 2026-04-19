@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Build
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -183,6 +184,10 @@ private fun VlessTunRoot() {
 
     val snapshot by connector.snapshots.collectAsState()
     val state by store.state.collectAsState()
+
+    BackHandler(enabled = state.editor.isVisible && !uiTestConfig.editorPinnedTop) {
+        store.dispatch(works.relux.vless_tun_app.feature.tunnel.TunnelHomeAction.DismissEditorClicked)
+    }
 
     LaunchedEffect(store) {
         storeRef = store

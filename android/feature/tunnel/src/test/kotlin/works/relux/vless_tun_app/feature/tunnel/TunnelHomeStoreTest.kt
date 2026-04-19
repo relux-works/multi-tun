@@ -146,6 +146,41 @@ class TunnelHomeStoreTest {
     }
 
     @Test
+    fun saveTunnel_manualEndpointDefaultsToTls() {
+        var persistedProfiles: List<TunnelProfile> = emptyList()
+        val store = buildStore(
+            onCatalogChanged = { profiles, _ ->
+                persistedProfiles = profiles
+            },
+        )
+
+        store.dispatch(TunnelHomeAction.AddTunnelClicked)
+        store.dispatch(TunnelHomeAction.EditorNameChanged("Manual TLS"))
+        store.dispatch(TunnelHomeAction.EditorSourceUrlChanged(""))
+        store.dispatch(TunnelHomeAction.EditorHostChanged("edge.example.net"))
+        store.dispatch(TunnelHomeAction.EditorServerNameChanged("cdn.example.net"))
+        store.dispatch(TunnelHomeAction.EditorUuidChanged("11111111-1111-1111-1111-111111111111"))
+        store.dispatch(TunnelHomeAction.SaveTunnelClicked)
+
+        val persisted = persistedProfiles.last()
+        assertEquals("tls", persisted.security)
+    }
+
+    @Test
+    fun saveTunnel_rejectsHttpSourceUrl() {
+        val store = buildStore()
+
+        store.dispatch(TunnelHomeAction.AddTunnelClicked)
+        store.dispatch(TunnelHomeAction.EditorSourceUrlChanged("http://subscription.example/path"))
+        store.dispatch(TunnelHomeAction.SaveTunnelClicked)
+
+        assertEquals(
+            "Source URL must use https:// or be a vless:// URI.",
+            store.state.value.editor.validationError,
+        )
+    }
+
+    @Test
     fun saveTunnel_normalizesRouteAndBypassMasks() {
         var persistedProfiles: List<TunnelProfile> = emptyList()
         val store = buildStore(
@@ -201,6 +236,54 @@ class TunnelHomeStoreTest {
         val persisted = persistedProfiles.single()
         assertEquals(TunnelAppScopeMode.Whitelist, persisted.appScopeMode)
         assertEquals(listOf("works.relux.vless_tun_observer"), persisted.appPackages)
+    }
+
+    @Test
+    fun deleteEditedTunnel_removesProfileAndSelectsFallback() {
+        var persistedProfiles: List<TunnelProfile> = emptyList()
+        var persistedSelection: String? = null
+        val secondaryProfile = DefaultTunnelCatalog.defaultProfile.copy(
+            id = "backup-profile",
+            name = "Backup",
+            sourceUrl = "https://backup.example/path",
+        )
+        val store = buildStore(
+            initialProfiles = listOf(DefaultTunnelCatalog.defaultProfile, secondaryProfile),
+            onCatalogChanged = { profiles, selectedProfileId ->
+                persistedProfiles = profiles
+                persistedSelection = selectedProfileId
+            },
+        )
+
+        store.dispatch(TunnelHomeAction.SelectTunnelClicked(secondaryProfile.id))
+        store.dispatch(TunnelHomeAction.EditTunnelClicked(secondaryProfile.id))
+        store.dispatch(TunnelHomeAction.DeleteEditedTunnelClicked)
+
+        val state = store.state.value
+        assertFalse(state.editor.isVisible)
+        assertEquals(1, state.profiles.size)
+        assertEquals(DefaultTunnelCatalog.defaultProfile.id, state.selectedProfileId)
+        assertEquals(DefaultTunnelCatalog.defaultProfile.id, persistedSelection)
+        assertEquals(listOf(DefaultTunnelCatalog.defaultProfile.id), persistedProfiles.map(TunnelProfile::id))
+    }
+
+    @Test
+    fun deleteEditedTunnel_allowsEmptyCatalog() {
+        var persistedProfiles: List<TunnelProfile> = emptyList()
+        val store = buildStore(
+            onCatalogChanged = { profiles, _ ->
+                persistedProfiles = profiles
+            },
+        )
+
+        store.dispatch(TunnelHomeAction.EditTunnelClicked(DefaultTunnelCatalog.defaultProfile.id))
+        store.dispatch(TunnelHomeAction.DeleteEditedTunnelClicked)
+
+        val state = store.state.value
+        assertTrue(state.profiles.isEmpty())
+        assertEquals("No tunnels configured", state.profileName)
+        assertEquals("Tunnel deleted. Add a new tunnel to continue.", state.detail)
+        assertTrue(persistedProfiles.isEmpty())
     }
 
     @Test
