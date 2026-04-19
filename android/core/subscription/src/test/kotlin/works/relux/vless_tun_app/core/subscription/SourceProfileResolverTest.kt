@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets
 import java.util.Base64
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import works.relux.vless_tun_app.core.model.DefaultTunnelCatalog
@@ -13,7 +14,7 @@ class SourceProfileResolverTest {
     fun resolveInline_parsesLiteralVlessUri() {
         val resolver = SourceProfileResolver()
         val profile = DefaultTunnelCatalog.defaultProfile.copy(
-            sourceUrl = "vless://11111111-1111-1111-1111-111111111111@edge.example.net:7443?type=ws&sni=cdn.example.net",
+            sourceUrl = "vless://11111111-1111-1111-1111-111111111111@edge.example.net:7443?security=tls&type=ws&sni=cdn.example.net",
             host = "",
             serverName = "",
             uuid = "",
@@ -27,6 +28,22 @@ class SourceProfileResolverTest {
         assertEquals("ws", resolved.transport)
         assertEquals("cdn.example.net", resolved.serverName)
         assertEquals("11111111-1111-1111-1111-111111111111", resolved.uuid)
+        assertEquals("tls", resolved.security)
+    }
+
+    @Test
+    fun resolveInline_rejectsLiteralVlessUriWithoutSecureTransport() {
+        val resolver = SourceProfileResolver()
+        val profile = DefaultTunnelCatalog.defaultProfile.copy(
+            sourceUrl = "vless://11111111-1111-1111-1111-111111111111@edge.example.net:7443?type=ws&sni=cdn.example.net",
+            host = "",
+            serverName = "",
+            uuid = "",
+        )
+
+        val resolved = resolver.resolveInline(profile)
+
+        assertNull(resolved)
     }
 
     @Test
@@ -76,5 +93,41 @@ class SourceProfileResolverTest {
         assertEquals("2536e4e4-c6f2-41d8-b2dd-24b72c12872a", resolved.uuid)
         assertEquals("reality", resolved.security)
         assertTrue(resolved.sourceUrl.startsWith("vless://2536e4e4-c6f2-41d8-b2dd-24b72c12872a@213.176.73.234:8443"))
+    }
+
+    @Test
+    fun resolve_rejectsHttpSubscriptionUrl() = runBlocking {
+        val resolver = SourceProfileResolver(fetchText = { error("fetchText should not be called for http:// sources") })
+        val profile = DefaultTunnelCatalog.defaultProfile.copy(
+            sourceUrl = "http://subscription.example/path",
+            host = "",
+            serverName = "",
+            uuid = "",
+        )
+
+        try {
+            resolver.resolve(profile)
+            error("Expected http:// source to be rejected.")
+        } catch (error: IllegalArgumentException) {
+            assertEquals("Subscription URL must use https://.", error.message)
+        }
+    }
+
+    @Test
+    fun resolve_defaultsExplicitManualProfileToTls() = runBlocking {
+        val resolver = SourceProfileResolver()
+        val profile = DefaultTunnelCatalog.defaultProfile.copy(
+            sourceUrl = "",
+            host = "edge.example.net",
+            port = 443,
+            transport = "grpc",
+            serverName = "cdn.example.net",
+            uuid = "11111111-1111-1111-1111-111111111111",
+            security = "",
+        )
+
+        val resolved = resolver.resolve(profile)
+
+        assertEquals("tls", resolved.security)
     }
 }

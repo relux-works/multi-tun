@@ -23,8 +23,7 @@ class SourceProfileResolver(
             trimmedSource.startsWith("vless://", ignoreCase = true) -> {
                 mergeResolved(profile, parseVlessUri(trimmedSource))
             }
-            trimmedSource.startsWith("http://", ignoreCase = true) ||
-                trimmedSource.startsWith("https://", ignoreCase = true) -> {
+            trimmedSource.startsWith("https://", ignoreCase = true) -> {
                 val payload = fetchText(trimmedSource)
                 val normalizedPayload = normalizePayload(payload)
                 val resolvedUri = normalizedPayload
@@ -38,7 +37,10 @@ class SourceProfileResolver(
                     ?: throw IllegalArgumentException("Subscription payload does not contain any VLESS profiles.")
                 mergeResolved(profile, parseVlessUri(resolvedUri))
             }
-            hasExplicitEndpoint(profile) -> profile
+            trimmedSource.startsWith("http://", ignoreCase = true) -> {
+                throw IllegalArgumentException("Subscription URL must use https://.")
+            }
+            hasExplicitEndpoint(profile) -> requireExplicitProfile(profile)
             else -> throw IllegalArgumentException("Unsupported source URL format. Use https://... or vless://...")
         }
     }
@@ -49,7 +51,7 @@ class SourceProfileResolver(
             trimmedSource.startsWith("vless://", ignoreCase = true) -> {
                 runCatching { mergeResolved(profile, parseVlessUri(trimmedSource)) }.getOrNull()
             }
-            hasExplicitEndpoint(profile) -> profile
+            hasExplicitEndpoint(profile) -> runCatching { requireExplicitProfile(profile) }.getOrNull()
             else -> null
         }
     }
@@ -81,7 +83,9 @@ class SourceProfileResolver(
 
     private fun requireExplicitProfile(profile: TunnelProfile): TunnelProfile {
         if (hasExplicitEndpoint(profile)) {
-            return profile
+            val normalizedSecurity = normalizeExplicitSecurity(profile.security)
+            validateSecureTransport(normalizedSecurity, profile.publicKey)
+            return profile.copy(security = normalizedSecurity)
         }
         throw IllegalArgumentException("Tunnel configuration is incomplete. Add a source URL or fill in host, server name, and UUID.")
     }
@@ -148,6 +152,7 @@ private fun parseVlessUri(raw: String): ResolvedTunnelSource {
     val publicKey = query["pbk"] ?: query["publicKey"] ?: ""
     val shortId = query["sid"] ?: query["shortId"] ?: ""
     val flow = query["flow"] ?: ""
+    validateSecureTransport(security, publicKey)
 
     return ResolvedTunnelSource(
         rawUri = raw.trim(),
@@ -163,6 +168,28 @@ private fun parseVlessUri(raw: String): ResolvedTunnelSource {
         shortId = shortId,
         flow = flow,
     )
+}
+
+private fun normalizeExplicitSecurity(security: String): String {
+    val trimmed = security.trim()
+    return if (trimmed.isBlank() || trimmed.equals("none", ignoreCase = true)) {
+        "tls"
+    } else {
+        trimmed
+    }
+}
+
+private fun validateSecureTransport(
+    security: String,
+    publicKey: String,
+) {
+    val trimmedSecurity = security.trim()
+    if (trimmedSecurity.isBlank() || trimmedSecurity.equals("none", ignoreCase = true)) {
+        throw IllegalArgumentException("VLESS profile must use a secure transport. Set security=tls or security=reality.")
+    }
+    if (trimmedSecurity.equals("reality", ignoreCase = true) && publicKey.isBlank()) {
+        throw IllegalArgumentException("Reality VLESS profile must include a public key.")
+    }
 }
 
 private fun normalizePayload(rawPayload: String): String {
