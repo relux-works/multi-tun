@@ -46,14 +46,25 @@ type VPNConfig struct {
 }
 
 type ServerConfig struct {
-	Auth         *AuthConfig             `json:"auth,omitempty"`
-	SplitInclude *SplitIncludeConfig      `json:"split_include,omitempty"`
-	Profiles     map[string]ProfileConfig `json:"profiles,omitempty"`
+	Auth          *AuthConfig              `json:"auth,omitempty"`
+	ClientMimicry *ClientMimicryConfig     `json:"client_mimicry,omitempty"`
+	SplitInclude  *SplitIncludeConfig      `json:"split_include,omitempty"`
+	Profiles      map[string]ProfileConfig `json:"profiles,omitempty"`
 }
 
 type ProfileConfig struct {
 	Mode         string              `json:"mode,omitempty"`
 	SplitInclude *SplitIncludeConfig `json:"split_include,omitempty"`
+}
+
+type ClientMimicryConfig struct {
+	UserAgent     string            `json:"user_agent,omitempty"`
+	Version       string            `json:"version,omitempty"`
+	OS            string            `json:"os,omitempty"`
+	DeviceID      string            `json:"device_id,omitempty"`
+	LocalHostname string            `json:"local_hostname,omitempty"`
+	AuthMethods   []string          `json:"auth_methods,omitempty"`
+	HTTPHeaders   map[string]string `json:"http_headers,omitempty"`
 }
 
 type AuthConfig struct {
@@ -220,6 +231,17 @@ func (c Config) EffectiveAuth(server string) AuthConfig {
 	return result
 }
 
+func (c Config) EffectiveClientMimicry(server string) ClientMimicryConfig {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return ClientMimicryConfig{}
+	}
+	if override, ok := c.Servers[server]; ok {
+		return cloneClientMimicryConfig(override.ClientMimicry)
+	}
+	return ClientMimicryConfig{}
+}
+
 func (c Config) ResolveServerURLForProfile(profile string) (string, bool, error) {
 	profile = strings.TrimSpace(profile)
 	if profile == "" {
@@ -311,6 +333,21 @@ func cloneStrings(values []string) []string {
 		return nil
 	}
 	return append([]string(nil), values...)
+}
+
+func cloneClientMimicryConfig(value *ClientMimicryConfig) ClientMimicryConfig {
+	if value == nil {
+		return ClientMimicryConfig{}
+	}
+	result := *value
+	result.AuthMethods = cloneStrings(value.AuthMethods)
+	if value.HTTPHeaders != nil {
+		result.HTTPHeaders = make(map[string]string, len(value.HTTPHeaders))
+		for key, headerValue := range value.HTTPHeaders {
+			result.HTTPHeaders[key] = headerValue
+		}
+	}
+	return result
 }
 
 func mergeAuthConfigOverride(base AuthConfig, override *AuthConfig) AuthConfig {

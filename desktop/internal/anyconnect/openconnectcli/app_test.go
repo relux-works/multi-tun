@@ -554,6 +554,63 @@ func TestParseRunOptionsUsesServerSpecificAuthOverrides(t *testing.T) {
 	}
 }
 
+func TestParseRunOptionsUsesServerSpecificClientMimicry(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "client_mimicry": {
+        "user_agent": "AnyConnect",
+        "version": "4.10.08029",
+        "os": "mac-intel",
+        "local_hostname": "Alexis-M1-Max",
+        "auth_methods": ["single-sign-on-v2", "single-sign-on-external-browser"],
+        "http_headers": {
+          "X-Support-HTTP-Auth": "true"
+        }
+      },
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.clientMimicry.UserAgent != "AnyConnect" {
+		t.Fatalf("UserAgent = %q, want AnyConnect", options.clientMimicry.UserAgent)
+	}
+	if options.clientMimicry.Version != "4.10.08029" {
+		t.Fatalf("Version = %q, want 4.10.08029", options.clientMimicry.Version)
+	}
+	if options.clientMimicry.LocalHostname != "Alexis-M1-Max" {
+		t.Fatalf("LocalHostname = %q, want Alexis-M1-Max", options.clientMimicry.LocalHostname)
+	}
+	if !reflect.DeepEqual(options.clientMimicry.AuthMethods, []string{"single-sign-on-v2", "single-sign-on-external-browser"}) {
+		t.Fatalf("AuthMethods = %#v", options.clientMimicry.AuthMethods)
+	}
+	if options.clientMimicry.HTTPHeaders["X-Support-HTTP-Auth"] != "true" {
+		t.Fatalf("HTTPHeaders = %#v, want configured header", options.clientMimicry.HTTPHeaders)
+	}
+}
+
 func TestParseRunOptionsProfileOverridesBeatServerOverrides(t *testing.T) {
 	t.Parallel()
 

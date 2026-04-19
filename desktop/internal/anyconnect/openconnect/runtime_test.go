@@ -454,7 +454,7 @@ func TestAppendOpenConnectClientIdentityArgsIncludesCiscoLikeFlags(t *testing.T)
 		Version:      "4.10.07061",
 		DeviceID:     "mac-intel",
 		ComputerName: "Alexis M1 Max",
-	}, "Alexis-M1-Max")
+	}, "Alexis-M1-Max", ClientMimicry{})
 
 	for _, needle := range []string{
 		"--useragent=AnyConnect",
@@ -463,6 +463,33 @@ func TestAppendOpenConnectClientIdentityArgsIncludesCiscoLikeFlags(t *testing.T)
 		"4.10.07061",
 		"--local-hostname",
 		"Alexis-M1-Max",
+	} {
+		if !containsString(args, needle) {
+			t.Fatalf("args = %#v, want %q", args, needle)
+		}
+	}
+}
+
+func TestAppendOpenConnectClientIdentityArgsUsesClientMimicry(t *testing.T) {
+	clientMimicry := ClientMimicry{
+		UserAgent:     "Cisco AnyConnect VPN Agent for Mac OS X 4.10.08029",
+		Version:       "4.10.08029",
+		OS:            "mac-arm64",
+		LocalHostname: "Configured-Host",
+	}
+	profile := aggregateAuthClientProfileForMimicry(aggregateAuthClientProfile{
+		Version:  "4.10.07061",
+		DeviceID: "mac-intel",
+	}, clientMimicry)
+	args := appendOpenConnectClientIdentityArgs([]string{"--protocol=anyconnect"}, profile, openConnectLocalHostname(profile, clientMimicry), clientMimicry)
+
+	for _, needle := range []string{
+		"--useragent=Cisco AnyConnect VPN Agent for Mac OS X 4.10.08029",
+		"--os=mac-arm64",
+		"--version-string",
+		"4.10.08029",
+		"--local-hostname",
+		"Configured-Host",
 	} {
 		if !containsString(args, needle) {
 			t.Fatalf("args = %#v, want %q", args, needle)
@@ -760,7 +787,7 @@ func TestParseSAMLAuthStateFromResponse(t *testing.T) {
 	state, err := parseSAMLAuthStateFromResponse(response, "https://vpn-gw2.corp.example/", "vpn-gw2.corp.example/outside", aggregateAuthClientProfile{
 		Version:  "4.10.07061",
 		DeviceID: "mac-intel",
-	}, nil)
+	}, ClientMimicry{}, nil)
 	if err != nil {
 		t.Fatalf("parseSAMLAuthStateFromResponse() error = %v", err)
 	}
@@ -1203,7 +1230,7 @@ func TestFetchSAMLAuthStateWithJarPreservesPOSTAcrossRedirect(t *testing.T) {
 	state, err := fetchSAMLAuthStateWithJar(server.URL+"/outside", "vpn-gw2.corp.example/outside", nil, aggregateAuthClientProfile{
 		Version:  "4.10.07061",
 		DeviceID: "mac-intel",
-	}, &logBuf)
+	}, ClientMimicry{}, &logBuf)
 	if err != nil {
 		t.Fatalf("fetchSAMLAuthStateWithJar() error = %v", err)
 	}
@@ -1215,6 +1242,137 @@ func TestFetchSAMLAuthStateWithJarPreservesPOSTAcrossRedirect(t *testing.T) {
 	}
 	if got := logBuf.String(); !strings.Contains(got, "aggregate_auth_redirect:") {
 		t.Fatalf("redirect log missing, got %q", got)
+	}
+}
+
+func TestFetchSAMLAuthStateWithJarUsesClientMimicryHeadersAndProfile(t *testing.T) {
+	clientMimicry := ClientMimicry{
+		UserAgent: "Cisco AnyConnect VPN Agent for Mac OS X 4.10.08029",
+		Version:   "4.10.08029",
+		DeviceID:  "mac-arm64",
+		AuthMethods: []string{
+			"single-sign-on-v2",
+			"single-sign-on-external-browser",
+		},
+		HTTPHeaders: map[string]string{
+			"X-Support-HTTP-Auth": "true",
+			"X-Pad":               "00000",
+		},
+	}
+
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/outside" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("User-Agent"); got != "Cisco AnyConnect VPN Agent for Mac OS X 4.10.08029" {
+			t.Fatalf("User-Agent = %q", got)
+		}
+		if got := r.Header.Get("X-Support-HTTP-Auth"); got != "true" {
+			t.Fatalf("X-Support-HTTP-Auth = %q", got)
+		}
+		if got := r.Header.Get("X-Pad"); got != "00000" {
+			t.Fatalf("X-Pad = %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll(r.Body) error = %v", err)
+		}
+		bodyText := string(body)
+		for _, want := range []string{
+			"<version who=\"vpn\">4.10.08029</version>",
+			"<device-id>mac-arm64</device-id>",
+			"<auth-method>single-sign-on-v2</auth-method>",
+			"<auth-method>single-sign-on-external-browser</auth-method>",
+		} {
+			if !strings.Contains(bodyText, want) {
+				t.Fatalf("request body missing %q: %s", want, bodyText)
+			}
+		}
+		if strings.Contains(bodyText, "<auth-method>multiple-cert</auth-method>") {
+			t.Fatalf("request body kept default auth methods despite mimicry override: %s", bodyText)
+		}
+
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		_, _ = io.WriteString(w, fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="auth-request" aggregate-auth-version="2">
+<opaque is-for="sg"><tunnel-group>TG-Corp</tunnel-group><auth-method>single-sign-on-v2</auth-method><group-alias>outside</group-alias></opaque>
+<auth id="main"><sso-v2-login>%s/+CSCOE+/saml/sp/login?tgname=TG</sso-v2-login></auth>
+</config-auth>`, server.URL))
+	}))
+	defer server.Close()
+
+	prevClientFactory := newSAMLHTTPClient
+	newSAMLHTTPClient = func(jar http.CookieJar, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
+		client := server.Client()
+		client.Timeout = authTimeout
+		client.Jar = jar
+		client.CheckRedirect = checkRedirect
+		return client
+	}
+	defer func() {
+		newSAMLHTTPClient = prevClientFactory
+	}()
+
+	profile := aggregateAuthClientProfileForMimicry(aggregateAuthClientProfile{}, clientMimicry)
+	state, err := fetchSAMLAuthStateWithJar(server.URL+"/outside", "vpn-gw2.corp.example/outside", nil, profile, clientMimicry, io.Discard)
+	if err != nil {
+		t.Fatalf("fetchSAMLAuthStateWithJar() error = %v", err)
+	}
+	if state.ClientMimicry.UserAgent != clientMimicry.UserAgent {
+		t.Fatalf("state.ClientMimicry.UserAgent = %q", state.ClientMimicry.UserAgent)
+	}
+}
+
+func TestFetchSAMLAuthStateWithJarLogsClientCertRequestWhenSSOMissing(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/outside" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="auth-request" aggregate-auth-version="2">
+<client-cert-request></client-cert-request>
+</config-auth>`)
+	}))
+	defer server.Close()
+
+	prevClientFactory := newSAMLHTTPClient
+	newSAMLHTTPClient = func(jar http.CookieJar, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
+		client := server.Client()
+		client.Timeout = authTimeout
+		client.Jar = jar
+		client.CheckRedirect = checkRedirect
+		return client
+	}
+	defer func() {
+		newSAMLHTTPClient = prevClientFactory
+	}()
+
+	var logBuf bytes.Buffer
+	_, err := fetchSAMLAuthStateWithJar(server.URL+"/outside", "vpn-gw2.corp.example/outside", nil, aggregateAuthClientProfile{
+		Version:  "4.10.07061",
+		DeviceID: "mac-intel",
+	}, ClientMimicry{}, &logBuf)
+	if err == nil {
+		t.Fatal("fetchSAMLAuthStateWithJar() error = nil, want missing SSO error")
+	}
+	if !strings.Contains(err.Error(), "missing sso-v2-login") {
+		t.Fatalf("fetchSAMLAuthStateWithJar() error = %v, want missing SSO", err)
+	}
+	log := logBuf.String()
+	for _, want := range []string{
+		"aggregate_auth_init_response: target=" + server.URL + "/outside status=200 OK",
+		"type=auth-request",
+		"aggregate-auth-version=2",
+		"client-cert-request",
+		"aggregate_auth_init_response_snippet:",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q, got %q", want, log)
+		}
 	}
 }
 

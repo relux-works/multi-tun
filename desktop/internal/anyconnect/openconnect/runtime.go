@@ -89,6 +89,16 @@ type Credentials struct {
 	TOTPSecret string
 }
 
+type ClientMimicry struct {
+	UserAgent     string
+	Version       string
+	OS            string
+	DeviceID      string
+	LocalHostname string
+	AuthMethods   []string
+	HTTPHeaders   map[string]string
+}
+
 type ConnectOptions struct {
 	Server         string
 	Profile        string
@@ -100,6 +110,7 @@ type ConnectOptions struct {
 	BypassSuffixes []string
 	VPNNameservers []string
 	Credentials    Credentials
+	ClientMimicry  ClientMimicry
 	ProfilePaths   []string
 	CacheDir       string
 	ProgressWriter io.Writer
@@ -262,7 +273,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		if err != nil {
 			return ConnectResult{}, err
 		}
-		command := buildOpenConnectCommandPreview(ocPath, server, script, privilegedMode)
+		command := buildOpenConnectCommandPreview(ocPath, server, script, privilegedMode, options.ClientMimicry)
 		return ConnectResult{
 			Server:         server,
 			Mode:           mode,
@@ -301,7 +312,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	} else if strings.TrimSpace(wrappedScript) != "" {
 		scriptExec = wrappedScript
 	}
-	command := buildOpenConnectCommandPreview(ocPath, server, scriptExec, privilegedMode)
+	command := buildOpenConnectCommandPreview(ocPath, server, scriptExec, privilegedMode, options.ClientMimicry)
 
 	current := CurrentSession{
 		ID:             sessionID,
@@ -354,7 +365,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	}
 
 	writeProgressf(options.ProgressWriter, "phase: connecting to %s", server)
-	pid, iface, err := connectWithCookie(auth, ocPath, scriptExec, logFile, privilegedMode, helperCfg)
+	pid, iface, err := connectWithCookie(auth, ocPath, scriptExec, logFile, privilegedMode, helperCfg, options.ClientMimicry)
 	if err != nil {
 		_ = ClearCurrent(cacheDir)
 		return ConnectResult{}, formatConnectError(err, logPath)
@@ -1481,6 +1492,7 @@ type samlAuthState struct {
 	GroupAccess     string
 	AuthMethod      string
 	ClientProfile   aggregateAuthClientProfile
+	ClientMimicry   ClientMimicry
 	CookieJar       http.CookieJar
 }
 
@@ -1488,8 +1500,10 @@ func authenticateWithSAML(server string, options ConnectOptions, ocPath string, 
 	writeLogf(logWriter, "auth_backend: aggregate-auth + vpn-auth + native-csd")
 	writeProgressf(progressWriter, "auth_stage: fetching_saml_config")
 
-	clientProfile := detectAggregateAuthClientProfile()
-	state, err := fetchSAMLAuthState(server, clientProfile, logWriter)
+	clientMimicry := cloneClientMimicry(options.ClientMimicry)
+	clientProfile := aggregateAuthClientProfileForMimicry(detectAggregateAuthClientProfile(), clientMimicry)
+	logClientMimicry(logWriter, clientMimicry)
+	state, err := fetchSAMLAuthState(server, clientProfile, clientMimicry, logWriter)
 	if err != nil {
 		return nil, err
 	}
@@ -1516,7 +1530,7 @@ func authenticateWithSAML(server string, options ConnectOptions, ocPath string, 
 		scannedHostScanToken = state.HostScanToken
 		seenHostScanTokens[state.HostScanToken] = struct{}{}
 
-		refreshedState, err := fetchSAMLAuthStateWithJar(firstNonEmpty(state.RequestURL, state.ReplyURL, server), server, state.CookieJar, clientProfile, logWriter)
+		refreshedState, err := fetchSAMLAuthStateWithJar(firstNonEmpty(state.RequestURL, state.ReplyURL, server), server, state.CookieJar, clientProfile, clientMimicry, logWriter)
 		if err != nil {
 			return nil, err
 		}
@@ -1647,12 +1661,14 @@ func authenticateWithOpenConnect(server string, options ConnectOptions, ocPath s
 	}
 
 	targetURL, usergroup := resolveOpenConnectAuthTarget(server)
-	clientProfile := detectAggregateAuthClientProfile()
-	localHostname := detectOpenConnectLocalHostname(clientProfile)
+	clientMimicry := cloneClientMimicry(options.ClientMimicry)
+	clientProfile := aggregateAuthClientProfileForMimicry(detectAggregateAuthClientProfile(), clientMimicry)
+	localHostname := openConnectLocalHostname(clientProfile, clientMimicry)
+	logClientMimicry(logWriter, clientMimicry)
 	cmdArgs := appendOpenConnectClientIdentityArgs([]string{
 		"--authenticate",
 		"--protocol=anyconnect",
-	}, clientProfile, localHostname)
+	}, clientProfile, localHostname, clientMimicry)
 	if strings.TrimSpace(os.Getenv("OPENCONNECT_TUN_DEBUG_HTTP")) == "1" {
 		cmdArgs = append(cmdArgs, "--verbose", "--verbose", "--verbose", "--dump-http-traffic")
 		writeLogf(logWriter, "authenticate_debug_http: enabled")
@@ -1694,17 +1710,14 @@ func authenticateWithOpenConnect(server string, options ConnectOptions, ocPath s
 	return result, nil
 }
 
-func doSAMLPostWithRedirects(requestURL string, body string, jar http.CookieJar, logWriter io.Writer) (*http.Response, string, error) {
+func doSAMLPostWithRedirects(requestURL string, body string, jar http.CookieJar, clientMimicry ClientMimicry, logWriter io.Writer) (*http.Response, string, error) {
 	currentURL := requestURL
 	for redirectCount := 0; redirectCount < 5; redirectCount++ {
 		req, err := http.NewRequest(http.MethodPost, currentURL, strings.NewReader(body))
 		if err != nil {
 			return nil, currentURL, fmt.Errorf("build SAML request: %w", err)
 		}
-		req.Header.Set("User-Agent", "AnyConnect")
-		req.Header.Set("Content-Type", "application/xml; charset=utf-8")
-		req.Header.Set("X-Aggregate-Auth", "1")
-		req.Header.Set("X-Transcend-Version", "1")
+		applyAggregateAuthPostHeaders(req.Header, clientMimicry)
 
 		resp, err := newSAMLHTTPClient(jar, func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -1756,9 +1769,143 @@ func detectOpenConnectLocalHostname(profile aggregateAuthClientProfile) string {
 	return value
 }
 
-func appendOpenConnectClientIdentityArgs(args []string, profile aggregateAuthClientProfile, localHostname string) []string {
-	args = append(args, "--useragent=AnyConnect")
-	if osType := firstNonEmpty(strings.TrimSpace(profile.DeviceID), "mac-intel"); osType != "" {
+func openConnectLocalHostname(profile aggregateAuthClientProfile, clientMimicry ClientMimicry) string {
+	if value := strings.TrimSpace(clientMimicry.LocalHostname); value != "" {
+		return value
+	}
+	return detectOpenConnectLocalHostname(profile)
+}
+
+func aggregateAuthClientProfileForMimicry(profile aggregateAuthClientProfile, clientMimicry ClientMimicry) aggregateAuthClientProfile {
+	profile = defaultAggregateAuthClientProfile(profile)
+	if version := strings.TrimSpace(clientMimicry.Version); version != "" {
+		profile.Version = version
+	}
+	if deviceID := firstNonEmpty(strings.TrimSpace(clientMimicry.DeviceID), strings.TrimSpace(clientMimicry.OS)); deviceID != "" {
+		profile.DeviceID = deviceID
+	}
+	if authMethods := cloneTrimmedStrings(clientMimicry.AuthMethods); len(authMethods) > 0 {
+		profile.AuthMethods = authMethods
+	}
+	return profile
+}
+
+func cloneClientMimicry(value ClientMimicry) ClientMimicry {
+	result := value
+	result.AuthMethods = cloneTrimmedStrings(value.AuthMethods)
+	if value.HTTPHeaders != nil {
+		result.HTTPHeaders = make(map[string]string, len(value.HTTPHeaders))
+		for key, headerValue := range value.HTTPHeaders {
+			result.HTTPHeaders[key] = headerValue
+		}
+	}
+	return result
+}
+
+func cloneTrimmedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func userAgentForClientMimicry(clientMimicry ClientMimicry) string {
+	return firstNonEmpty(strings.TrimSpace(clientMimicry.UserAgent), "AnyConnect")
+}
+
+func applyAggregateAuthPostHeaders(headers http.Header, clientMimicry ClientMimicry) {
+	headers.Set("User-Agent", userAgentForClientMimicry(clientMimicry))
+	headers.Set("Content-Type", "application/xml; charset=utf-8")
+	headers.Set("X-Aggregate-Auth", "1")
+	headers.Set("X-Transcend-Version", "1")
+	applyConfiguredHTTPHeaders(headers, clientMimicry.HTTPHeaders)
+}
+
+func applyConfiguredHTTPHeaders(headers http.Header, configured map[string]string) {
+	for name, value := range configured {
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" || !isSafeHTTPHeaderName(name) {
+			continue
+		}
+		headers.Set(name, value)
+	}
+}
+
+func isSafeHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func logClientMimicry(logWriter io.Writer, clientMimicry ClientMimicry) {
+	clientMimicry = cloneClientMimicry(clientMimicry)
+	if strings.TrimSpace(clientMimicry.UserAgent) == "" &&
+		strings.TrimSpace(clientMimicry.Version) == "" &&
+		strings.TrimSpace(clientMimicry.OS) == "" &&
+		strings.TrimSpace(clientMimicry.DeviceID) == "" &&
+		strings.TrimSpace(clientMimicry.LocalHostname) == "" &&
+		len(clientMimicry.AuthMethods) == 0 &&
+		len(clientMimicry.HTTPHeaders) == 0 {
+		return
+	}
+
+	parts := []string{}
+	if value := strings.TrimSpace(clientMimicry.UserAgent); value != "" {
+		parts = append(parts, "user_agent="+value)
+	}
+	if value := strings.TrimSpace(clientMimicry.Version); value != "" {
+		parts = append(parts, "version="+value)
+	}
+	if value := strings.TrimSpace(clientMimicry.OS); value != "" {
+		parts = append(parts, "os="+value)
+	}
+	if value := strings.TrimSpace(clientMimicry.DeviceID); value != "" {
+		parts = append(parts, "device_id="+value)
+	}
+	if value := strings.TrimSpace(clientMimicry.LocalHostname); value != "" {
+		parts = append(parts, "local_hostname="+value)
+	}
+	if len(clientMimicry.AuthMethods) > 0 {
+		parts = append(parts, "auth_methods="+strings.Join(clientMimicry.AuthMethods, ","))
+	}
+	if len(clientMimicry.HTTPHeaders) > 0 {
+		names := make([]string, 0, len(clientMimicry.HTTPHeaders))
+		for name := range clientMimicry.HTTPHeaders {
+			if name = strings.TrimSpace(name); name != "" {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		parts = append(parts, "http_headers="+strings.Join(names, ","))
+	}
+	writeLogf(logWriter, "client_mimicry: %s", strings.Join(parts, " "))
+}
+
+func appendOpenConnectClientIdentityArgs(args []string, profile aggregateAuthClientProfile, localHostname string, clientMimicry ClientMimicry) []string {
+	if userAgent := userAgentForClientMimicry(clientMimicry); userAgent != "" {
+		args = append(args, "--useragent="+userAgent)
+	}
+	if osType := firstNonEmpty(strings.TrimSpace(clientMimicry.OS), strings.TrimSpace(profile.DeviceID), "mac-intel"); osType != "" {
 		args = append(args, "--os="+osType)
 	}
 	if version := strings.TrimSpace(profile.Version); version != "" {
@@ -1770,11 +1917,11 @@ func appendOpenConnectClientIdentityArgs(args []string, profile aggregateAuthCli
 	return args
 }
 
-func fetchSAMLAuthState(server string, clientProfile aggregateAuthClientProfile, logWriter io.Writer) (*samlAuthState, error) {
-	return fetchSAMLAuthStateWithJar(server, server, nil, clientProfile, logWriter)
+func fetchSAMLAuthState(server string, clientProfile aggregateAuthClientProfile, clientMimicry ClientMimicry, logWriter io.Writer) (*samlAuthState, error) {
+	return fetchSAMLAuthStateWithJar(server, server, nil, clientProfile, clientMimicry, logWriter)
 }
 
-func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar http.CookieJar, clientProfile aggregateAuthClientProfile, logWriter io.Writer) (*samlAuthState, error) {
+func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar http.CookieJar, clientProfile aggregateAuthClientProfile, clientMimicry ClientMimicry, logWriter io.Writer) (*samlAuthState, error) {
 	requestURL, err := normalizeHTTPSRequestURL(requestTarget)
 	if err != nil {
 		return nil, err
@@ -1789,7 +1936,7 @@ func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar htt
 		}
 	}
 
-	resp, finalURL, err := doSAMLPostWithRedirects(requestURL, initXML, jar, logWriter)
+	resp, finalURL, err := doSAMLPostWithRedirects(requestURL, initXML, jar, clientMimicry, logWriter)
 	if err != nil {
 		return nil, fmt.Errorf("SAML init request failed: %w", err)
 	}
@@ -1804,8 +1951,12 @@ func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar htt
 	}
 
 	response := string(body)
-	state, err := parseSAMLAuthStateFromResponse(response, finalURL, groupAccess, clientProfile, jar)
+	writeLogf(logWriter, "aggregate_auth_init_response: target=%s status=%s summary=%s", finalURL, resp.Status, summarizeAggregateAuthInitResponse(response))
+	state, err := parseSAMLAuthStateFromResponse(response, finalURL, groupAccess, clientProfile, clientMimicry, jar)
 	if err != nil {
+		if snippet := compactAuthLogSnippet(response, 500); snippet != "" {
+			writeLogf(logWriter, "aggregate_auth_init_response_snippet: %s", snippet)
+		}
 		return nil, err
 	}
 	writeLogf(logWriter, "aggregate_auth_sso_login: %s", state.SSOLoginURL)
@@ -1816,7 +1967,7 @@ func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar htt
 	return state, nil
 }
 
-func parseSAMLAuthContinuationState(response string, requestURL string, groupAccess string, clientProfile aggregateAuthClientProfile, jar http.CookieJar) (*samlAuthState, error) {
+func parseSAMLAuthContinuationState(response string, requestURL string, groupAccess string, clientProfile aggregateAuthClientProfile, clientMimicry ClientMimicry, jar http.CookieJar) (*samlAuthState, error) {
 	opaqueXML := extractXMLElement(response, "<opaque", "</opaque>")
 	if opaqueXML == "" {
 		return nil, fmt.Errorf("missing opaque block in aggregate auth response")
@@ -1839,11 +1990,12 @@ func parseSAMLAuthContinuationState(response string, requestURL string, groupAcc
 		GroupAccess:     groupAccess,
 		AuthMethod:      extractLastXMLTag(opaqueXML, "auth-method"),
 		ClientProfile:   clientProfile,
+		ClientMimicry:   cloneClientMimicry(clientMimicry),
 		CookieJar:       jar,
 	}, nil
 }
 
-func parseSAMLAuthStateFromResponse(response string, requestURL string, groupAccess string, clientProfile aggregateAuthClientProfile, jar http.CookieJar) (*samlAuthState, error) {
+func parseSAMLAuthStateFromResponse(response string, requestURL string, groupAccess string, clientProfile aggregateAuthClientProfile, clientMimicry ClientMimicry, jar http.CookieJar) (*samlAuthState, error) {
 	ssoLoginURL := html.UnescapeString(extractXMLTag(response, "sso-v2-login"))
 	if ssoLoginURL == "" {
 		message := extractXMLTag(response, "message")
@@ -1875,6 +2027,7 @@ func parseSAMLAuthStateFromResponse(response string, requestURL string, groupAcc
 		GroupAccess:     groupAccess,
 		AuthMethod:      extractLastXMLTag(opaqueXML, "auth-method"),
 		ClientProfile:   clientProfile,
+		ClientMimicry:   cloneClientMimicry(clientMimicry),
 		CookieJar:       jar,
 	}
 	return state, nil
@@ -2000,7 +2153,7 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 	writeLogf(logWriter, "aggregate_auth_reply_variant: target=%s name=%s", targetURL, replyVariant.Name)
 	writeLogf(logWriter, "aggregate_auth_reply_cookies: %s", describeCookiesForURL(state.CookieJar, targetURL))
 
-	resp, finalTargetURL, err := doSAMLPostWithRedirects(targetURL, replyVariant.XML, state.CookieJar, logWriter)
+	resp, finalTargetURL, err := doSAMLPostWithRedirects(targetURL, replyVariant.XML, state.CookieJar, state.ClientMimicry, logWriter)
 	if err != nil {
 		return nil, fmt.Errorf("SAML auth-reply failed: %w", err)
 	}
@@ -2025,11 +2178,11 @@ func completeSAMLAuthAtTarget(state *samlAuthState, server string, samlToken str
 	if sessionToken == "" {
 		writeLogf(logWriter, "aggregate_auth_reply_error: target=%s snippet=%s", finalTargetURL, snippet)
 		if strings.Contains(response, "type=\"auth-request\"") {
-			followupState, err := parseSAMLAuthStateFromResponse(response, finalTargetURL, state.GroupAccess, state.ClientProfile, state.CookieJar)
+			followupState, err := parseSAMLAuthStateFromResponse(response, finalTargetURL, state.GroupAccess, state.ClientProfile, state.ClientMimicry, state.CookieJar)
 			if err == nil {
 				return nil, &samlAuthReplyFollowup{State: followupState, Snippet: snippet}
 			}
-			continuationState, continuationErr := parseSAMLAuthContinuationState(response, finalTargetURL, state.GroupAccess, state.ClientProfile, state.CookieJar)
+			continuationState, continuationErr := parseSAMLAuthContinuationState(response, finalTargetURL, state.GroupAccess, state.ClientProfile, state.ClientMimicry, state.CookieJar)
 			if continuationErr == nil {
 				return nil, &samlAuthReplyContinue{State: continuationState, Snippet: snippet}
 			}
@@ -2154,11 +2307,12 @@ func waitForHostScan(state *samlAuthState, logWriter io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("build host-scan wait request: %w", err)
 		}
-		req.Header.Set("User-Agent", "AnyConnect")
+		req.Header.Set("User-Agent", userAgentForClientMimicry(state.ClientMimicry))
 		if redirectCount == 0 {
 			req.Header.Set("X-Aggregate-Auth", "1")
 			req.Header.Set("X-Transcend-Version", "1")
 		}
+		applyConfiguredHTTPHeaders(req.Header, state.ClientMimicry.HTTPHeaders)
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -2803,6 +2957,101 @@ func extractLastXMLTag(body string, tag string) string {
 	return strings.TrimSpace(body[start : start+end])
 }
 
+func summarizeAggregateAuthInitResponse(response string) string {
+	parts := []string{}
+	if value := extractXMLAttribute(response, "config-auth", "type"); value != "" {
+		parts = append(parts, "type="+value)
+	}
+	if value := extractXMLAttribute(response, "config-auth", "aggregate-auth-version"); value != "" {
+		parts = append(parts, "aggregate-auth-version="+value)
+	}
+	for _, marker := range []string{
+		"sso-v2-login",
+		"sso-v2-login-final",
+		"client-cert-request",
+		"opaque",
+		"host-scan-ticket",
+		"host-scan-token",
+		"host-scan-wait-uri",
+		"session-token",
+	} {
+		if strings.Contains(response, "<"+marker) {
+			parts = append(parts, marker)
+		}
+	}
+	if value := extractLastXMLTag(response, "auth-method"); value != "" {
+		parts = append(parts, "auth-method="+value)
+	}
+	if value := compactAuthLogValue(extractXMLTag(response, "message"), 160); value != "" {
+		parts = append(parts, "message="+strconv.Quote(value))
+	}
+	if len(parts) == 0 {
+		return "unrecognized"
+	}
+	return strings.Join(parts, " ")
+}
+
+func extractXMLAttribute(body string, tag string, attribute string) string {
+	startTag := "<" + tag
+	start := strings.Index(body, startTag)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(body[start:], ">")
+	if end < 0 {
+		return ""
+	}
+	element := body[start : start+end]
+	for _, quote := range []byte{'"', '\''} {
+		needle := attribute + "=" + string(quote)
+		valueStart := strings.Index(element, needle)
+		if valueStart < 0 {
+			continue
+		}
+		valueStart += len(needle)
+		valueEnd := strings.IndexByte(element[valueStart:], quote)
+		if valueEnd < 0 {
+			return ""
+		}
+		return strings.TrimSpace(element[valueStart : valueStart+valueEnd])
+	}
+	return ""
+}
+
+func compactAuthLogSnippet(value string, maxLen int) string {
+	value = compactAuthLogValue(value, maxLen)
+	for _, tag := range []string{"session-token", "sso-token"} {
+		value = redactXMLTagValue(value, tag)
+	}
+	return value
+}
+
+func compactAuthLogValue(value string, maxLen int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if maxLen > 0 && len(value) > maxLen {
+		return value[:maxLen] + "...(truncated)"
+	}
+	return value
+}
+
+func redactXMLTagValue(value string, tag string) string {
+	startTag := "<" + tag + ">"
+	endTag := "</" + tag + ">"
+	for {
+		start := strings.Index(value, startTag)
+		if start < 0 {
+			return value
+		}
+		contentStart := start + len(startTag)
+		end := strings.Index(value[contentStart:], endTag)
+		if end < 0 {
+			return value
+		}
+		contentEnd := contentStart + end
+		value = value[:contentStart] + "<redacted>" + value[contentEnd:]
+	}
+}
+
 func extractXMLElement(body string, startPrefix string, endTag string) string {
 	start := strings.Index(body, startPrefix)
 	if start < 0 {
@@ -3126,20 +3375,21 @@ func parseShellVariables(output string) map[string]string {
 	return result
 }
 
-func connectWithCookie(auth *authResult, ocPath, script string, logWriter io.Writer, privilegedMode string, helperCfg PrivilegedHelperConfig) (int, string, error) {
+func connectWithCookie(auth *authResult, ocPath, script string, logWriter io.Writer, privilegedMode string, helperCfg PrivilegedHelperConfig, clientMimicry ClientMimicry) (int, string, error) {
 	connectURL := auth.ConnectURL
 	if connectURL == "" {
 		connectURL = fmt.Sprintf("https://%s", auth.Host)
 	}
 
-	clientProfile := detectAggregateAuthClientProfile()
-	localHostname := detectOpenConnectLocalHostname(clientProfile)
+	clientMimicry = cloneClientMimicry(clientMimicry)
+	clientProfile := aggregateAuthClientProfileForMimicry(detectAggregateAuthClientProfile(), clientMimicry)
+	localHostname := openConnectLocalHostname(clientProfile, clientMimicry)
 	cmdArgs := appendOpenConnectClientIdentityArgs([]string{
 		ocPath,
 		"--cookie-on-stdin",
 		"--protocol=anyconnect",
 		"--background",
-	}, clientProfile, localHostname)
+	}, clientProfile, localHostname, clientMimicry)
 	if script != "" {
 		cmdArgs = append(cmdArgs, "--script", script)
 	}
@@ -3185,15 +3435,16 @@ func connectWithCookie(auth *authResult, ocPath, script string, logWriter io.Wri
 	return pid, findOpenConnectInterface(pid), nil
 }
 
-func buildOpenConnectCommandPreview(ocPath, server, script string, privilegedMode string) []string {
-	clientProfile := detectAggregateAuthClientProfile()
-	localHostname := detectOpenConnectLocalHostname(clientProfile)
+func buildOpenConnectCommandPreview(ocPath, server, script string, privilegedMode string, clientMimicry ClientMimicry) []string {
+	clientMimicry = cloneClientMimicry(clientMimicry)
+	clientProfile := aggregateAuthClientProfileForMimicry(detectAggregateAuthClientProfile(), clientMimicry)
+	localHostname := openConnectLocalHostname(clientProfile, clientMimicry)
 	command := appendOpenConnectClientIdentityArgs([]string{
 		ocPath,
 		"--cookie-on-stdin",
 		"--protocol=anyconnect",
 		"--background",
-	}, clientProfile, localHostname)
+	}, clientProfile, localHostname, clientMimicry)
 	if script != "" {
 		command = append(command, "--script", script)
 	}

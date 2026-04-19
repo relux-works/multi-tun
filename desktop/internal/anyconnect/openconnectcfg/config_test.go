@@ -3,6 +3,7 @@ package openconnectcfg
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -132,6 +133,54 @@ func TestEffectiveAuthUsesServerSpecificOverrideWithGlobalFallback(t *testing.T)
 	}
 	if got.TOTPKeychainAccount != "global/totp_secret" {
 		t.Fatalf("TOTPKeychainAccount = %q, want %q", got.TOTPKeychainAccount, "global/totp_secret")
+	}
+}
+
+func TestEffectiveClientMimicryUsesServerSpecificConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Servers: map[string]ServerConfig{
+			"vpn-gw2.corp.example/outside": {
+				ClientMimicry: &ClientMimicryConfig{
+					UserAgent:     "AnyConnect",
+					Version:       "4.10.08029",
+					OS:            "mac-intel",
+					LocalHostname: "Alexis-M1-Max",
+					AuthMethods:   []string{"single-sign-on-v2", "single-sign-on-external-browser"},
+					HTTPHeaders: map[string]string{
+						"X-Support-HTTP-Auth": "true",
+					},
+				},
+			},
+		},
+	}
+
+	got := cfg.EffectiveClientMimicry("vpn-gw2.corp.example/outside")
+	if got.UserAgent != "AnyConnect" {
+		t.Fatalf("UserAgent = %q, want AnyConnect", got.UserAgent)
+	}
+	if got.Version != "4.10.08029" {
+		t.Fatalf("Version = %q, want 4.10.08029", got.Version)
+	}
+	if got.OS != "mac-intel" {
+		t.Fatalf("OS = %q, want mac-intel", got.OS)
+	}
+	if got.LocalHostname != "Alexis-M1-Max" {
+		t.Fatalf("LocalHostname = %q, want Alexis-M1-Max", got.LocalHostname)
+	}
+	if !reflect.DeepEqual(got.AuthMethods, []string{"single-sign-on-v2", "single-sign-on-external-browser"}) {
+		t.Fatalf("AuthMethods = %#v", got.AuthMethods)
+	}
+	if got.HTTPHeaders["X-Support-HTTP-Auth"] != "true" {
+		t.Fatalf("HTTPHeaders = %#v, want X-Support-HTTP-Auth", got.HTTPHeaders)
+	}
+
+	got.AuthMethods[0] = "mutated"
+	got.HTTPHeaders["X-Support-HTTP-Auth"] = "mutated"
+	again := cfg.EffectiveClientMimicry("vpn-gw2.corp.example/outside")
+	if again.AuthMethods[0] != "single-sign-on-v2" || again.HTTPHeaders["X-Support-HTTP-Auth"] != "true" {
+		t.Fatalf("EffectiveClientMimicry returned aliased data: %#v %#v", again.AuthMethods, again.HTTPHeaders)
 	}
 }
 

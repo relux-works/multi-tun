@@ -343,11 +343,31 @@ type runOptions struct {
 	username       string
 	password       string
 	totpSecret     string
+	clientMimicry  openconnect.ClientMimicry
 	vpnDomains     []string
 	bypassSuffixes []string
 	vpnNameservers []string
 	includeRoutes  []string
 	dryRun         bool
+}
+
+func toOpenConnectClientMimicry(cfg openconnectcfg.ClientMimicryConfig) openconnect.ClientMimicry {
+	headers := map[string]string(nil)
+	if cfg.HTTPHeaders != nil {
+		headers = make(map[string]string, len(cfg.HTTPHeaders))
+		for key, value := range cfg.HTTPHeaders {
+			headers[key] = value
+		}
+	}
+	return openconnect.ClientMimicry{
+		UserAgent:     cfg.UserAgent,
+		Version:       cfg.Version,
+		OS:            cfg.OS,
+		DeviceID:      cfg.DeviceID,
+		LocalHostname: cfg.LocalHostname,
+		AuthMethods:   append([]string(nil), cfg.AuthMethods...),
+		HTTPHeaders:   headers,
+	}
 }
 
 func (a *App) runRun(args []string) int {
@@ -425,6 +445,7 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		effectiveServer = host.Address
 	}
 	resolvedAuthCfg := cfg.EffectiveAuth(firstNonEmpty(effectiveServer, resolvedServer))
+	resolvedClientMimicry := toOpenConnectClientMimicry(cfg.EffectiveClientMimicry(firstNonEmpty(effectiveServer, resolvedServer)))
 	resolvedUsername, resolvedPassword, resolvedTOTP, err := resolveCredentials(*username, *password, *totpSecret, resolvedAuthCfg, *dryRun)
 	if err != nil {
 		return runOptions{}, 1, err
@@ -456,6 +477,7 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		username:       resolvedUsername,
 		password:       resolvedPassword,
 		totpSecret:     resolvedTOTP,
+		clientMimicry:  resolvedClientMimicry,
 		vpnDomains:     resolvedVPNDomains,
 		bypassSuffixes: resolvedBypassSuffixes,
 		vpnNameservers: resolvedVPNNameservers,
@@ -500,6 +522,7 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 			Password:   options.password,
 			TOTPSecret: options.totpSecret,
 		},
+		ClientMimicry:  options.clientMimicry,
 		ProfilePaths:   openconnect.DefaultProfileSearchPaths(homeDir),
 		CacheDir:       options.cacheDir,
 		ProgressWriter: a.stderr,
