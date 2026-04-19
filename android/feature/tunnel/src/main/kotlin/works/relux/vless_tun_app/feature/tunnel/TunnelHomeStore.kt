@@ -41,6 +41,7 @@ sealed interface TunnelHomeAction {
     data class EditorAppSelectionToggled(val packageName: String) : TunnelHomeAction
     data object EditorClearSelectedAppsClicked : TunnelHomeAction
     data object SaveTunnelClicked : TunnelHomeAction
+    data object DeleteEditedTunnelClicked : TunnelHomeAction
 }
 
 data class TunnelListItemState(
@@ -239,6 +240,7 @@ class TunnelHomeStore(
                 copy(appPackages = emptyList(), validationError = null)
             }
             TunnelHomeAction.SaveTunnelClicked -> saveEditor()
+            TunnelHomeAction.DeleteEditedTunnelClicked -> deleteEditedTunnel()
         }
     }
 
@@ -486,6 +488,7 @@ class TunnelHomeStore(
             sourceUrl = sourceUrl,
             serverName = if (useSourceManagedEndpoint) "" else editor.serverName.trim(),
             uuid = if (useSourceManagedEndpoint) "" else editor.uuid.trim(),
+            security = if (useSourceManagedEndpoint) "" else "tls",
             routeMasks = normalizedPolicy.routeMasks,
             bypassMasks = normalizedPolicy.bypassMasks,
             appScopeMode = editor.appScopeMode,
@@ -514,6 +517,39 @@ class TunnelHomeStore(
             phase = current.phase,
             detail = detail,
             requiresPermission = false,
+            editor = TunnelEditorState(),
+            egress = egressState,
+        )
+    }
+
+    private fun deleteEditedTunnel() {
+        val current = stateFlow.value
+        val profileId = current.editor.profileId ?: return
+        val deletedProfile = profiles.firstOrNull { it.id == profileId } ?: return
+        val deletingSelectedProfile = selectedProfileId == profileId
+
+        profiles = profiles.filterNot { it.id == profileId }
+        selectedProfileId = when {
+            !deletingSelectedProfile -> selectedProfileId
+            profiles.any { it.id == selectedProfileId } -> selectedProfileId
+            else -> profiles.firstOrNull()?.id
+        }
+        persistCatalog()
+
+        val detail = when {
+            profiles.isEmpty() -> "Tunnel deleted. Add a new tunnel to continue."
+            current.phase == TunnelPhase.Connected && deletingSelectedProfile -> {
+                "Tunnel deleted from the saved catalog. The current VPN session stays active until you disconnect."
+            }
+            else -> "Tunnel '${deletedProfile.name}' deleted."
+        }
+
+        stateFlow.value = buildState(
+            profiles = profiles,
+            selectedId = selectedProfileId,
+            phase = current.phase,
+            detail = detail,
+            requiresPermission = current.requiresPermission,
             editor = TunnelEditorState(),
             egress = egressState,
         )
@@ -608,7 +644,17 @@ class TunnelHomeStore(
         if (editor.name.isBlank()) return "Tunnel name is required."
         val port = editor.port.toIntOrNull() ?: return "Port must be numeric."
         if (port !in 1..65535) return "Port must be between 1 and 65535."
-        val hasSource = editor.sourceUrl.isNotBlank()
+        val sourceUrl = editor.sourceUrl.trim()
+        if (sourceUrl.startsWith("http://", ignoreCase = true)) {
+            return "Source URL must use https:// or be a vless:// URI."
+        }
+        if (sourceUrl.isNotBlank() &&
+            !sourceUrl.startsWith("https://", ignoreCase = true) &&
+            !sourceUrl.startsWith("vless://", ignoreCase = true)
+        ) {
+            return "Unsupported source URL format. Use https://... or vless://..."
+        }
+        val hasSource = sourceUrl.isNotBlank()
         if (!hasSource && editor.host.isBlank()) return "Host is required when no source URL is provided."
         if (!hasSource && editor.serverName.isBlank()) return "Server name is required when no source URL is provided."
         if (!hasSource && editor.uuid.isBlank()) return "UUID is required when no source URL is provided."
