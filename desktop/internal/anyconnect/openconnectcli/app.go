@@ -37,6 +37,8 @@ var (
 	userHomeDirOpenConnect        = os.UserHomeDir
 )
 
+const defaultDisconnectTimeout = 20 * time.Second
+
 func New(stdout, stderr io.Writer) *App {
 	return &App{stdout: stdout, stderr: stderr}
 }
@@ -493,7 +495,7 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 	}
 
 	if reconnect {
-		stopped, state, err := openconnect.Disconnect(options.cacheDir, 5*time.Second)
+		stopped, state, err := openconnect.Disconnect(options.cacheDir, defaultDisconnectTimeout)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 			if stopped.LogPath != "" {
@@ -572,7 +574,7 @@ func (a *App) runStop(args []string) int {
 	fs.SetOutput(a.stderr)
 	configPath := fs.String("config", "", "Path to openconnect-tun config file")
 	cacheDir := fs.String("cache-dir", "", "Override cache dir for session metadata and logs")
-	timeout := fs.Duration("timeout", 5*time.Second, "How long to wait after SIGINT before failing")
+	timeout := fs.Duration("timeout", defaultDisconnectTimeout, "How long to wait after SIGINT before failing")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
