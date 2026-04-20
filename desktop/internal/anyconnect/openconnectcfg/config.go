@@ -68,10 +68,11 @@ type ClientMimicryConfig struct {
 }
 
 type AuthConfig struct {
-	UsernameKeychainAccount string `json:"username_keychain_account,omitempty"`
-	Username                string `json:"username,omitempty"`
-	PasswordKeychainAccount string `json:"password_keychain_account,omitempty"`
-	TOTPKeychainAccount     string `json:"totp_secret_keychain_account,omitempty"`
+	UsernameKeychainAccount string   `json:"username_keychain_account,omitempty"`
+	Username                string   `json:"username,omitempty"`
+	PasswordKeychainAccount string   `json:"password_keychain_account,omitempty"`
+	TOTPKeychainAccount     string   `json:"totp_secret_keychain_account,omitempty"`
+	FallbackServers         []string `json:"fallback_servers,omitempty"`
 }
 
 func DefaultPath() string {
@@ -242,6 +243,17 @@ func (c Config) EffectiveClientMimicry(server string) ClientMimicryConfig {
 	return ClientMimicryConfig{}
 }
 
+func (c Config) EffectiveAuthFallbackServers(server string) []string {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return nil
+	}
+	if override, ok := c.Servers[server]; ok && override.Auth != nil {
+		return cloneStrings(override.Auth.FallbackServers)
+	}
+	return nil
+}
+
 func (c Config) ResolveServerURLForProfile(profile string) (string, bool, error) {
 	profile = strings.TrimSpace(profile)
 	if profile == "" {
@@ -366,6 +378,9 @@ func mergeAuthConfigOverride(base AuthConfig, override *AuthConfig) AuthConfig {
 	}
 	if strings.TrimSpace(override.TOTPKeychainAccount) != "" {
 		result.TOTPKeychainAccount = override.TOTPKeychainAccount
+	}
+	if override.FallbackServers != nil {
+		result.FallbackServers = cloneStrings(override.FallbackServers)
 	}
 	return result
 }

@@ -100,21 +100,22 @@ type ClientMimicry struct {
 }
 
 type ConnectOptions struct {
-	Server         string
-	Profile        string
-	Auth           string
-	Mode           string
-	PrivilegedMode string
-	IncludeRoutes  []string
-	VPNDomains     []string
-	BypassSuffixes []string
-	VPNNameservers []string
-	Credentials    Credentials
-	ClientMimicry  ClientMimicry
-	ProfilePaths   []string
-	CacheDir       string
-	ProgressWriter io.Writer
-	DryRun         bool
+	Server              string
+	Profile             string
+	Auth                string
+	Mode                string
+	PrivilegedMode      string
+	IncludeRoutes       []string
+	VPNDomains          []string
+	BypassSuffixes      []string
+	VPNNameservers      []string
+	Credentials         Credentials
+	ClientMimicry       ClientMimicry
+	AuthFallbackServers []string
+	ProfilePaths        []string
+	CacheDir            string
+	ProgressWriter      io.Writer
+	DryRun              bool
 }
 
 type ConnectResult struct {
@@ -1503,7 +1504,7 @@ func authenticateWithSAML(server string, options ConnectOptions, ocPath string, 
 	clientMimicry := cloneClientMimicry(options.ClientMimicry)
 	clientProfile := aggregateAuthClientProfileForMimicry(detectAggregateAuthClientProfile(), clientMimicry)
 	logClientMimicry(logWriter, clientMimicry)
-	state, err := fetchSAMLAuthState(server, clientProfile, clientMimicry, logWriter)
+	state, err := fetchSAMLAuthStateWithFallback(server, options.AuthFallbackServers, clientProfile, clientMimicry, logWriter)
 	if err != nil {
 		return nil, err
 	}
@@ -1530,12 +1531,13 @@ func authenticateWithSAML(server string, options ConnectOptions, ocPath string, 
 		scannedHostScanToken = state.HostScanToken
 		seenHostScanTokens[state.HostScanToken] = struct{}{}
 
-		refreshedState, err := fetchSAMLAuthStateWithJar(firstNonEmpty(state.RequestURL, state.ReplyURL, server), server, state.CookieJar, clientProfile, clientMimicry, logWriter)
+		stateGroupAccess := firstNonEmpty(state.GroupAccess, server)
+		refreshedState, err := fetchSAMLAuthStateWithJar(firstNonEmpty(state.RequestURL, state.ReplyURL, server), stateGroupAccess, state.CookieJar, clientProfile, clientMimicry, logWriter)
 		if err != nil {
 			return nil, err
 		}
 		refreshedState.CookieJar = state.CookieJar
-		if shouldPreferSSOAfterHostScan(server, seenHostScanTokens, refreshedState) {
+		if shouldPreferSSOAfterHostScan(stateGroupAccess, seenHostScanTokens, refreshedState) {
 			writeLogf(logWriter, "aggregate_auth_followup: auth-request after successful hostscan; deferring latest hostscan challenge until after sso")
 			state = refreshedState
 			deferredPostSSOHostScan = true
@@ -1917,8 +1919,90 @@ func appendOpenConnectClientIdentityArgs(args []string, profile aggregateAuthCli
 	return args
 }
 
+type samlAuthInitError struct {
+	RequestURL string
+	FinalURL   string
+	Status     string
+	Summary    string
+	Snippet    string
+	MissingSSO bool
+	Err        error
+}
+
+func (e *samlAuthInitError) Error() string {
+	if e == nil || e.Err == nil {
+		return "invalid aggregate auth response"
+	}
+	return e.Err.Error()
+}
+
+func (e *samlAuthInitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 func fetchSAMLAuthState(server string, clientProfile aggregateAuthClientProfile, clientMimicry ClientMimicry, logWriter io.Writer) (*samlAuthState, error) {
 	return fetchSAMLAuthStateWithJar(server, server, nil, clientProfile, clientMimicry, logWriter)
+}
+
+func fetchSAMLAuthStateWithFallback(server string, fallbackServers []string, clientProfile aggregateAuthClientProfile, clientMimicry ClientMimicry, logWriter io.Writer) (*samlAuthState, error) {
+	state, err := fetchSAMLAuthState(server, clientProfile, clientMimicry, logWriter)
+	if err == nil {
+		return state, nil
+	}
+
+	var initErr *samlAuthInitError
+	if !errors.As(err, &initErr) || initErr == nil || !initErr.MissingSSO {
+		return nil, err
+	}
+
+	writeLogf(logWriter, "aggregate_auth_missing_sso_flow: request=%s final=%s status=%s summary=%s error=%s", initErr.RequestURL, initErr.FinalURL, initErr.Status, initErr.Summary, initErr.Error())
+	for _, fallbackServer := range aggregateAuthFallbackServerCandidates(server, fallbackServers) {
+		writeLogf(logWriter, "aggregate_auth_fallback: primary=%s balancer_final=%s fallback=%s reason=missing_sso_flow", server, initErr.FinalURL, fallbackServer)
+		fallbackState, fallbackErr := fetchSAMLAuthState(fallbackServer, clientProfile, clientMimicry, logWriter)
+		if fallbackErr == nil {
+			writeLogf(logWriter, "aggregate_auth_fallback_selected: fallback=%s sso_login=%s", fallbackServer, fallbackState.SSOLoginURL)
+			return fallbackState, nil
+		}
+		writeLogf(logWriter, "aggregate_auth_fallback_failed: fallback=%s error=%v", fallbackServer, fallbackErr)
+	}
+
+	return nil, err
+}
+
+func aggregateAuthFallbackServerCandidates(primary string, configured []string) []string {
+	seen := map[string]struct{}{}
+	if primaryKey := aggregateAuthTargetKey(primary); primaryKey != "" {
+		seen[primaryKey] = struct{}{}
+	}
+
+	result := make([]string, 0, len(configured))
+	for _, raw := range configured {
+		candidate := strings.TrimSpace(raw)
+		if candidate == "" {
+			continue
+		}
+		key := aggregateAuthTargetKey(candidate)
+		if key == "" {
+			key = candidate
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func aggregateAuthTargetKey(raw string) string {
+	normalized, err := normalizeHTTPSRequestURL(raw)
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	return normalized
 }
 
 func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar http.CookieJar, clientProfile aggregateAuthClientProfile, clientMimicry ClientMimicry, logWriter io.Writer) (*samlAuthState, error) {
@@ -1951,13 +2035,23 @@ func fetchSAMLAuthStateWithJar(requestTarget string, groupAccess string, jar htt
 	}
 
 	response := string(body)
-	writeLogf(logWriter, "aggregate_auth_init_response: target=%s status=%s summary=%s", finalURL, resp.Status, summarizeAggregateAuthInitResponse(response))
+	summary := summarizeAggregateAuthInitResponse(response)
+	writeLogf(logWriter, "aggregate_auth_init_response: target=%s status=%s summary=%s", finalURL, resp.Status, summary)
 	state, err := parseSAMLAuthStateFromResponse(response, finalURL, groupAccess, clientProfile, clientMimicry, jar)
 	if err != nil {
-		if snippet := compactAuthLogSnippet(response, 500); snippet != "" {
+		snippet := compactAuthLogSnippet(response, 500)
+		if snippet != "" {
 			writeLogf(logWriter, "aggregate_auth_init_response_snippet: %s", snippet)
 		}
-		return nil, err
+		return nil, &samlAuthInitError{
+			RequestURL: requestURL,
+			FinalURL:   finalURL,
+			Status:     resp.Status,
+			Summary:    summary,
+			Snippet:    snippet,
+			MissingSSO: html.UnescapeString(extractXMLTag(response, "sso-v2-login")) == "",
+			Err:        err,
+		}
 	}
 	writeLogf(logWriter, "aggregate_auth_sso_login: %s", state.SSOLoginURL)
 	writeLogf(logWriter, "aggregate_auth_reply_url: %s", state.ReplyURL)

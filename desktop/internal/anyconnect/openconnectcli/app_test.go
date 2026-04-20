@@ -611,6 +611,48 @@ func TestParseRunOptionsUsesServerSpecificClientMimicry(t *testing.T) {
 	}
 }
 
+func TestParseRunOptionsUsesServerAuthFallbackServers(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "auth": {
+        "fallback_servers": [
+          "vpn-gw3.corp.example/outside",
+          "vpn-gw4.corp.example/outside"
+        ]
+      },
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	want := []string{"vpn-gw3.corp.example/outside", "vpn-gw4.corp.example/outside"}
+	if !reflect.DeepEqual(options.authFallbackServers, want) {
+		t.Fatalf("authFallbackServers = %#v, want %#v", options.authFallbackServers, want)
+	}
+}
+
 func TestParseRunOptionsProfileOverridesBeatServerOverrides(t *testing.T) {
 	t.Parallel()
 
