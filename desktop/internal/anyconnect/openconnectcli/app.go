@@ -335,22 +335,23 @@ func (a *App) runStatus(args []string) int {
 }
 
 type runOptions struct {
-	configPath     string
-	resolvedConfig string
-	cacheDir       string
-	server         string
-	profile        string
-	auth           string
-	mode           string
-	username       string
-	password       string
-	totpSecret     string
-	clientMimicry  openconnect.ClientMimicry
-	vpnDomains     []string
-	bypassSuffixes []string
-	vpnNameservers []string
-	includeRoutes  []string
-	dryRun         bool
+	configPath          string
+	resolvedConfig      string
+	cacheDir            string
+	server              string
+	profile             string
+	auth                string
+	mode                string
+	username            string
+	password            string
+	totpSecret          string
+	clientMimicry       openconnect.ClientMimicry
+	authFallbackServers []string
+	vpnDomains          []string
+	bypassSuffixes      []string
+	vpnNameservers      []string
+	includeRoutes       []string
+	dryRun              bool
 }
 
 func toOpenConnectClientMimicry(cfg openconnectcfg.ClientMimicryConfig) openconnect.ClientMimicry {
@@ -448,6 +449,7 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 	}
 	resolvedAuthCfg := cfg.EffectiveAuth(firstNonEmpty(effectiveServer, resolvedServer))
 	resolvedClientMimicry := toOpenConnectClientMimicry(cfg.EffectiveClientMimicry(firstNonEmpty(effectiveServer, resolvedServer)))
+	resolvedAuthFallbackServers := cfg.EffectiveAuthFallbackServers(firstNonEmpty(effectiveServer, resolvedServer))
 	resolvedUsername, resolvedPassword, resolvedTOTP, err := resolveCredentials(*username, *password, *totpSecret, resolvedAuthCfg, *dryRun)
 	if err != nil {
 		return runOptions{}, 1, err
@@ -469,22 +471,23 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 	resolvedVPNNameservers := resolveSplitIncludeNameservers(resolvedMode, resolvedSplitInclude)
 
 	return runOptions{
-		configPath:     *configPath,
-		resolvedConfig: resolvedConfigPath,
-		cacheDir:       resolveCacheDir(*cacheDir, cfg),
-		server:         resolvedServer,
-		profile:        resolvedProfile,
-		auth:           *auth,
-		mode:           resolvedMode,
-		username:       resolvedUsername,
-		password:       resolvedPassword,
-		totpSecret:     resolvedTOTP,
-		clientMimicry:  resolvedClientMimicry,
-		vpnDomains:     resolvedVPNDomains,
-		bypassSuffixes: resolvedBypassSuffixes,
-		vpnNameservers: resolvedVPNNameservers,
-		includeRoutes:  resolvedRoutes,
-		dryRun:         *dryRun,
+		configPath:          *configPath,
+		resolvedConfig:      resolvedConfigPath,
+		cacheDir:            resolveCacheDir(*cacheDir, cfg),
+		server:              resolvedServer,
+		profile:             resolvedProfile,
+		auth:                *auth,
+		mode:                resolvedMode,
+		username:            resolvedUsername,
+		password:            resolvedPassword,
+		totpSecret:          resolvedTOTP,
+		clientMimicry:       resolvedClientMimicry,
+		authFallbackServers: resolvedAuthFallbackServers,
+		vpnDomains:          resolvedVPNDomains,
+		bypassSuffixes:      resolvedBypassSuffixes,
+		vpnNameservers:      resolvedVPNNameservers,
+		includeRoutes:       resolvedRoutes,
+		dryRun:              *dryRun,
 	}, 0, nil
 }
 
@@ -524,11 +527,12 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 			Password:   options.password,
 			TOTPSecret: options.totpSecret,
 		},
-		ClientMimicry:  options.clientMimicry,
-		ProfilePaths:   openconnect.DefaultProfileSearchPaths(homeDir),
-		CacheDir:       options.cacheDir,
-		ProgressWriter: a.stderr,
-		DryRun:         options.dryRun,
+		ClientMimicry:       options.clientMimicry,
+		AuthFallbackServers: options.authFallbackServers,
+		ProfilePaths:        openconnect.DefaultProfileSearchPaths(homeDir),
+		CacheDir:            options.cacheDir,
+		ProgressWriter:      a.stderr,
+		DryRun:              options.dryRun,
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)

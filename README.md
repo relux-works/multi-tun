@@ -211,7 +211,10 @@ Example config:
     "vpn-gw2.corp.example/outside": {
       "auth": {
         "username_keychain_account": "corp-vpn/username",
-        "password_keychain_account": "corp-vpn/password"
+        "password_keychain_account": "corp-vpn/password",
+        "fallback_servers": [
+          "vpn-gw2-backup.corp.example/outside"
+        ]
       },
       "client_mimicry": {
         "user_agent": "AnyConnect",
@@ -275,7 +278,8 @@ Field reference:
 - `default.profile`: the default user-facing profile selector when `start|reconnect` runs without an explicit `--profile`
 - `default` pairing: these two fields are meant to point at the same configured VPN choice, so the config reads as one default selection instead of separate root-level knobs
 - `servers.<url>`: configuration bucket for one concrete ASA endpoint such as `vpn-gw2.corp.example/outside`
-- `servers.<url>.auth`: preferred auth override for that concrete server. Use this when different ASA endpoints require different keychain entries or usernames
+- `servers.<url>.auth`: preferred auth override for that concrete server. Use this when different ASA endpoints require different keychain entries, usernames, or aggregate-auth fallback behavior
+- `servers.<url>.auth.fallback_servers`: aggregate-auth fallback targets for that concrete server. If the initial endpoint or its redirect target returns an auth-request without `sso-v2-login`, the session log records the original request URL, final redirected URL, response summary, and configured fallback selected before retrying. Other request failures are not hidden by this fallback.
 - `servers.<url>.client_mimicry`: optional AnyConnect client identity for that concrete server. It is applied to aggregate-auth init/reply requests and to the final `openconnect` command, so endpoint-specific ASA/LB behavior can be reproduced without provider-specific code.
 - `servers.<url>.client_mimicry.user_agent`: User-Agent for aggregate-auth HTTP requests and `openconnect --useragent`. Defaults to `AnyConnect` when omitted.
 - `servers.<url>.client_mimicry.version`: client version for aggregate-auth XML `<version>` and `openconnect --version-string`. Defaults to the locally detected Cisco Secure Client version, then `4.10.07061`.

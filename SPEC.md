@@ -69,6 +69,7 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun profiles`: list ASA profiles surfaced by `vpn hosts`
 - `openconnect-tun inspect-profiles`: parse local AnyConnect XML profiles and expose server entries plus bypass-relevant flags
 - `openconnect-tun run`: authenticate with aggregate-auth or `openconnect --authenticate`, optionally using `vpn-auth` only as the external-browser automation helper, then start OpenConnect in either `full` or `split-include` mode
+- `openconnect-tun` config may define `servers.<url>.auth.fallback_servers` for endpoint-specific aggregate-auth fallback targets when a balancer backend returns an auth-request without `sso-v2-login`
 - `openconnect-tun` config may define `servers.<url>.client_mimicry` for endpoint-specific AnyConnect identity: user-agent, version, OS/device-id, local hostname, aggregate-auth capabilities, and aggregate-auth HTTP headers
 - `openconnect-tun reconnect`: replace the active OpenConnect session in one command
 - `vpn-core install|status|uninstall`: manage the shared privileged daemon used for passwordless post-SSO connect/stop flows and privileged `sing-box` TUN lifecycle

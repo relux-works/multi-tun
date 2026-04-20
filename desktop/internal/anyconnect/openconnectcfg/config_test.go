@@ -184,6 +184,42 @@ func TestEffectiveClientMimicryUsesServerSpecificConfig(t *testing.T) {
 	}
 }
 
+func TestEffectiveAuthFallbackServersUsesServerSpecificAuthConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Auth: AuthConfig{
+			FallbackServers: []string{"global-fallback.corp.example/outside"},
+		},
+		Servers: map[string]ServerConfig{
+			"vpn-gw2.corp.example/outside": {
+				Auth: &AuthConfig{
+					FallbackServers: []string{
+						"vpn-gw3.corp.example/outside",
+						"vpn-gw4.corp.example/outside",
+					},
+				},
+			},
+		},
+	}
+
+	got := cfg.EffectiveAuthFallbackServers("vpn-gw2.corp.example/outside")
+	want := []string{"vpn-gw3.corp.example/outside", "vpn-gw4.corp.example/outside"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("EffectiveAuthFallbackServers() = %#v, want %#v", got, want)
+	}
+
+	got[0] = "mutated"
+	again := cfg.EffectiveAuthFallbackServers("vpn-gw2.corp.example/outside")
+	if again[0] != "vpn-gw3.corp.example/outside" {
+		t.Fatalf("EffectiveAuthFallbackServers returned aliased data: %#v", again)
+	}
+
+	if got := cfg.EffectiveAuthFallbackServers("vpn-gw5.corp.example/outside"); got != nil {
+		t.Fatalf("unknown server fallback servers = %#v, want nil", got)
+	}
+}
+
 func TestInitWritesFullModeScaffold(t *testing.T) {
 	t.Parallel()
 
@@ -217,7 +253,7 @@ func TestInitWritesFullModeScaffold(t *testing.T) {
 	if !ok {
 		t.Fatalf("cfg.Servers missing %q", selection.ServerURL)
 	}
-	if cfg.Auth != (AuthConfig{}) {
+	if !reflect.DeepEqual(cfg.Auth, AuthConfig{}) {
 		t.Fatalf("cfg.Auth = %#v, want empty legacy fallback for new scaffold", cfg.Auth)
 	}
 	if serverCfg.Auth == nil {

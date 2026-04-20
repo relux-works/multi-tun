@@ -1376,6 +1376,76 @@ func TestFetchSAMLAuthStateWithJarLogsClientCertRequestWhenSSOMissing(t *testing
 	}
 }
 
+func TestFetchSAMLAuthStateWithFallbackRetriesConfiguredServerWhenBalancerLacksSSO(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/outside":
+			http.Redirect(w, r, "/ra1/outside", http.StatusFound)
+		case "/ra1/outside":
+			w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="auth-request" aggregate-auth-version="2">
+<client-cert-request></client-cert-request>
+</config-auth>`)
+		case "/ra2/outside":
+			w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+			_, _ = io.WriteString(w, fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="auth-request" aggregate-auth-version="2">
+<opaque is-for="sg"><tunnel-group>TG-Corp</tunnel-group><auth-method>single-sign-on-v2</auth-method><group-alias>outside</group-alias></opaque>
+<auth id="main"><sso-v2-login>%s/+CSCOE+/saml/sp/login?tgname=TG</sso-v2-login></auth>
+</config-auth>`, server.URL))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	prevClientFactory := newSAMLHTTPClient
+	newSAMLHTTPClient = func(jar http.CookieJar, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
+		client := server.Client()
+		client.Timeout = authTimeout
+		client.Jar = jar
+		client.CheckRedirect = checkRedirect
+		return client
+	}
+	defer func() {
+		newSAMLHTTPClient = prevClientFactory
+	}()
+
+	primary := strings.TrimPrefix(server.URL, "https://") + "/outside"
+	fallback := strings.TrimPrefix(server.URL, "https://") + "/ra2/outside"
+	var logBuf bytes.Buffer
+	state, err := fetchSAMLAuthStateWithFallback(primary, []string{primary, fallback, fallback}, aggregateAuthClientProfile{
+		Version:  "4.10.07061",
+		DeviceID: "mac-intel",
+	}, ClientMimicry{}, &logBuf)
+	if err != nil {
+		t.Fatalf("fetchSAMLAuthStateWithFallback() error = %v", err)
+	}
+	if got, want := state.RequestURL, server.URL+"/ra2/outside"; got != want {
+		t.Fatalf("state.RequestURL = %q, want %q", got, want)
+	}
+	if got, want := state.GroupAccess, fallback; got != want {
+		t.Fatalf("state.GroupAccess = %q, want %q", got, want)
+	}
+
+	log := logBuf.String()
+	for _, want := range []string{
+		"aggregate_auth_redirect: " + server.URL + "/outside -> " + server.URL + "/ra1/outside (status=302)",
+		"aggregate_auth_missing_sso_flow:",
+		"final=" + server.URL + "/ra1/outside",
+		"client-cert-request",
+		"aggregate_auth_fallback: primary=" + primary + " balancer_final=" + server.URL + "/ra1/outside fallback=" + fallback + " reason=missing_sso_flow",
+		"aggregate_auth_fallback_selected: fallback=" + fallback,
+		"aggregate_auth_sso_login: " + server.URL + "/+CSCOE+/saml/sp/login?tgname=TG",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q, got %q", want, log)
+		}
+	}
+}
+
 func TestCompleteSAMLAuthUsesRedirectedTargetForConnectURL(t *testing.T) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
