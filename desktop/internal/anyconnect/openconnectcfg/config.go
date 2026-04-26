@@ -67,12 +67,26 @@ type ClientMimicryConfig struct {
 	HTTPHeaders   map[string]string `json:"http_headers,omitempty"`
 }
 
+// Second factor modes:
+// - manual_otp: keep the WebView open and let the user enter SMS/manual OTP.
+// - totp_auto: read the configured TOTP secret and auto-submit authenticator codes.
+const (
+	SecondFactorModeManualOTP = "manual_otp"
+	SecondFactorModeTOTPAuto  = "totp_auto"
+)
+
+type SecondFactorConfig struct {
+	Mode                string `json:"mode,omitempty"`
+	TOTPKeychainAccount string `json:"totp_secret_keychain_account,omitempty"`
+}
+
 type AuthConfig struct {
-	UsernameKeychainAccount string   `json:"username_keychain_account,omitempty"`
-	Username                string   `json:"username,omitempty"`
-	PasswordKeychainAccount string   `json:"password_keychain_account,omitempty"`
-	TOTPKeychainAccount     string   `json:"totp_secret_keychain_account,omitempty"`
-	FallbackServers         []string `json:"fallback_servers,omitempty"`
+	UsernameKeychainAccount string              `json:"username_keychain_account,omitempty"`
+	Username                string              `json:"username,omitempty"`
+	PasswordKeychainAccount string              `json:"password_keychain_account,omitempty"`
+	TOTPKeychainAccount     string              `json:"totp_secret_keychain_account,omitempty"`
+	SecondFactor            *SecondFactorConfig `json:"second_factor,omitempty"`
+	FallbackServers         []string            `json:"fallback_servers,omitempty"`
 }
 
 func DefaultPath() string {
@@ -362,11 +376,37 @@ func cloneClientMimicryConfig(value *ClientMimicryConfig) ClientMimicryConfig {
 	return result
 }
 
+func cloneSecondFactorConfig(value *SecondFactorConfig) *SecondFactorConfig {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
+}
+
+func mergeSecondFactorOverride(base *SecondFactorConfig, override *SecondFactorConfig) *SecondFactorConfig {
+	if override == nil {
+		return cloneSecondFactorConfig(base)
+	}
+	result := SecondFactorConfig{}
+	if base != nil {
+		result = *base
+	}
+	if strings.TrimSpace(override.Mode) != "" {
+		result.Mode = override.Mode
+	}
+	if strings.TrimSpace(override.TOTPKeychainAccount) != "" {
+		result.TOTPKeychainAccount = override.TOTPKeychainAccount
+	}
+	return &result
+}
+
 func mergeAuthConfigOverride(base AuthConfig, override *AuthConfig) AuthConfig {
 	if override == nil {
 		return base
 	}
 	result := base
+	result.SecondFactor = cloneSecondFactorConfig(base.SecondFactor)
 	if strings.TrimSpace(override.UsernameKeychainAccount) != "" {
 		result.UsernameKeychainAccount = override.UsernameKeychainAccount
 	}
@@ -378,6 +418,9 @@ func mergeAuthConfigOverride(base AuthConfig, override *AuthConfig) AuthConfig {
 	}
 	if strings.TrimSpace(override.TOTPKeychainAccount) != "" {
 		result.TOTPKeychainAccount = override.TOTPKeychainAccount
+	}
+	if override.SecondFactor != nil {
+		result.SecondFactor = mergeSecondFactorOverride(result.SecondFactor, override.SecondFactor)
 	}
 	if override.FallbackServers != nil {
 		result.FallbackServers = cloneStrings(override.FallbackServers)

@@ -112,13 +112,19 @@ func TestEffectiveAuthUsesServerSpecificOverrideWithGlobalFallback(t *testing.T)
 		Auth: AuthConfig{
 			UsernameKeychainAccount: "global/username",
 			PasswordKeychainAccount: "global/password",
-			TOTPKeychainAccount:     "global/totp_secret",
+			SecondFactor: &SecondFactorConfig{
+				Mode:                SecondFactorModeTOTPAuto,
+				TOTPKeychainAccount: "global/totp_secret",
+			},
 		},
 		Servers: map[string]ServerConfig{
 			"vpn-gw2.corp.example/outside": {
 				Auth: &AuthConfig{
 					UsernameKeychainAccount: "server/username",
 					PasswordKeychainAccount: "server/password",
+					SecondFactor: &SecondFactorConfig{
+						Mode: SecondFactorModeManualOTP,
+					},
 				},
 			},
 		},
@@ -131,8 +137,14 @@ func TestEffectiveAuthUsesServerSpecificOverrideWithGlobalFallback(t *testing.T)
 	if got.PasswordKeychainAccount != "server/password" {
 		t.Fatalf("PasswordKeychainAccount = %q, want %q", got.PasswordKeychainAccount, "server/password")
 	}
-	if got.TOTPKeychainAccount != "global/totp_secret" {
-		t.Fatalf("TOTPKeychainAccount = %q, want %q", got.TOTPKeychainAccount, "global/totp_secret")
+	if got.SecondFactor == nil {
+		t.Fatal("SecondFactor = nil, want merged config")
+	}
+	if got.SecondFactor.Mode != SecondFactorModeManualOTP {
+		t.Fatalf("SecondFactor.Mode = %q, want %q", got.SecondFactor.Mode, SecondFactorModeManualOTP)
+	}
+	if got.SecondFactor.TOTPKeychainAccount != "global/totp_secret" {
+		t.Fatalf("SecondFactor.TOTPKeychainAccount = %q, want %q", got.SecondFactor.TOTPKeychainAccount, "global/totp_secret")
 	}
 }
 
@@ -230,7 +242,10 @@ func TestInitWritesFullModeScaffold(t *testing.T) {
 		Auth: AuthConfig{
 			UsernameKeychainAccount: "vpn-example-com-engineering/username",
 			PasswordKeychainAccount: "vpn-example-com-engineering/password",
-			TOTPKeychainAccount:     "vpn-example-com-engineering/totp_secret",
+			SecondFactor: &SecondFactorConfig{
+				Mode:                SecondFactorModeTOTPAuto,
+				TOTPKeychainAccount: "vpn-example-com-engineering/totp_secret",
+			},
 		},
 	})
 	if err != nil {
@@ -265,8 +280,14 @@ func TestInitWritesFullModeScaffold(t *testing.T) {
 	if got, want := serverCfg.Auth.PasswordKeychainAccount, "vpn-example-com-engineering/password"; got != want {
 		t.Fatalf("serverCfg.Auth.PasswordKeychainAccount = %q, want %q", got, want)
 	}
-	if got, want := serverCfg.Auth.TOTPKeychainAccount, "vpn-example-com-engineering/totp_secret"; got != want {
-		t.Fatalf("serverCfg.Auth.TOTPKeychainAccount = %q, want %q", got, want)
+	if serverCfg.Auth.SecondFactor == nil {
+		t.Fatal("serverCfg.Auth.SecondFactor = nil, want populated second factor")
+	}
+	if got, want := serverCfg.Auth.SecondFactor.Mode, SecondFactorModeTOTPAuto; got != want {
+		t.Fatalf("serverCfg.Auth.SecondFactor.Mode = %q, want %q", got, want)
+	}
+	if got, want := serverCfg.Auth.SecondFactor.TOTPKeychainAccount, "vpn-example-com-engineering/totp_secret"; got != want {
+		t.Fatalf("serverCfg.Auth.SecondFactor.TOTPKeychainAccount = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("Stat(path) error = %v", err)

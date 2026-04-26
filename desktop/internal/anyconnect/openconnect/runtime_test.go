@@ -90,8 +90,9 @@ func TestRedactVPNAuthArgs_RedactsSensitiveFlags(t *testing.T) {
 		"--username", "alice",
 		"--password", "secret-password",
 		"--totp-secret", "totp-secret",
+		"--manual-otp-stdin",
 	})
-	want := "--url https://vpn.example.test/sso --username <provided> --password <redacted> --totp-secret <redacted>"
+	want := "--url https://vpn.example.test/sso --username <provided> --password <redacted> --totp-secret <redacted> --manual-otp-stdin"
 	if got != want {
 		t.Fatalf("redactVPNAuthArgs() = %q, want %q", got, want)
 	}
@@ -598,6 +599,102 @@ func TestPrepareOpenConnectAuthHelpersCreatesBrowserAndCSDWrappers(t *testing.T)
 	}
 	if env["OPENCONNECT_TUN_VPN_AUTH_USERNAME"] != "alice" || env["OPENCONNECT_TUN_VPN_AUTH_PASSWORD"] != "secret" || env["OPENCONNECT_TUN_VPN_AUTH_TOTP_SECRET"] != "totp" {
 		t.Fatalf("browser wrapper credential env missing: %+v", env)
+	}
+}
+
+func TestAuthenticateWithVPNAuthURLReportsJSONErrorOutput(t *testing.T) {
+	toolDir := t.TempDir()
+	vpnAuthPath := filepath.Join(toolDir, "vpn-auth")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\":\"blank WebView page persisted for isso.mts.ru\"}'\nexit 1\n"
+	if err := os.WriteFile(vpnAuthPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(vpn-auth) error = %v", err)
+	}
+
+	prevLookPath := execLookPathOpenConnect
+	execLookPathOpenConnect = func(name string) (string, error) {
+		if name == "vpn-auth" {
+			return vpnAuthPath, nil
+		}
+		return prevLookPath(name)
+	}
+	t.Cleanup(func() {
+		execLookPathOpenConnect = prevLookPath
+	})
+
+	_, err := authenticateWithVPNAuthURL("https://vpn-gw2.corp.example/+CSCOE+/saml", Credentials{}, "", io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("authenticateWithVPNAuthURL() error = nil, want vpn-auth JSON error")
+	}
+	if !strings.Contains(err.Error(), "blank WebView page persisted for isso.mts.ru") {
+		t.Fatalf("authenticateWithVPNAuthURL() error = %v, want JSON error message", err)
+	}
+}
+
+func TestAuthenticateWithVPNAuthURLPassesManualOTPStdinFlag(t *testing.T) {
+	toolDir := t.TempDir()
+	vpnAuthPath := filepath.Join(toolDir, "vpn-auth")
+	script := `#!/bin/sh
+case " $* " in
+  *" --manual-otp-stdin "*) ;;
+  *) echo "missing manual flag: $*" >&2; exit 2 ;;
+esac
+case " $* " in
+  *" --totp-secret "*) echo "unexpected totp flag: $*" >&2; exit 2 ;;
+esac
+printf '%s\n' '{"cookie":"token","host":"vpn-gw2.corp.example"}'
+`
+	if err := os.WriteFile(vpnAuthPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(vpn-auth) error = %v", err)
+	}
+
+	prevLookPath := execLookPathOpenConnect
+	execLookPathOpenConnect = func(name string) (string, error) {
+		if name == "vpn-auth" {
+			return vpnAuthPath, nil
+		}
+		return prevLookPath(name)
+	}
+	t.Cleanup(func() {
+		execLookPathOpenConnect = prevLookPath
+	})
+
+	result, err := authenticateWithVPNAuthURL("https://vpn-gw2.corp.example/+CSCOE+/saml", Credentials{
+		Username:       "alice",
+		Password:       "secret",
+		ManualOTPStdin: true,
+	}, "", io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("authenticateWithVPNAuthURL() error = %v", err)
+	}
+	if result.Cookie != "token" {
+		t.Fatalf("Cookie = %q, want token", result.Cookie)
+	}
+}
+
+func TestAuthenticateWithVPNAuthURLReportsEmptyStdout(t *testing.T) {
+	toolDir := t.TempDir()
+	vpnAuthPath := filepath.Join(toolDir, "vpn-auth")
+	if err := os.WriteFile(vpnAuthPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(vpn-auth) error = %v", err)
+	}
+
+	prevLookPath := execLookPathOpenConnect
+	execLookPathOpenConnect = func(name string) (string, error) {
+		if name == "vpn-auth" {
+			return vpnAuthPath, nil
+		}
+		return prevLookPath(name)
+	}
+	t.Cleanup(func() {
+		execLookPathOpenConnect = prevLookPath
+	})
+
+	_, err := authenticateWithVPNAuthURL("https://vpn-gw2.corp.example/+CSCOE+/saml", Credentials{}, "", io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("authenticateWithVPNAuthURL() error = nil, want empty stdout error")
+	}
+	if !strings.Contains(err.Error(), "vpn-auth returned no JSON on stdout") {
+		t.Fatalf("authenticateWithVPNAuthURL() error = %v, want empty stdout message", err)
 	}
 }
 

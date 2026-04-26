@@ -36,8 +36,11 @@ func TestResolveCredentials_UsesKeychainBackedUsernamePasswordAndTOTP(t *testing
 	username, password, totp, err := resolveCredentials("", "", "", openconnectcfg.AuthConfig{
 		UsernameKeychainAccount: "corp-vpn/username",
 		PasswordKeychainAccount: "corp-vpn/password",
-		TOTPKeychainAccount:     "corp-vpn/totp_secret",
-	}, false)
+		SecondFactor: &openconnectcfg.SecondFactorConfig{
+			Mode:                openconnectcfg.SecondFactorModeTOTPAuto,
+			TOTPKeychainAccount: "corp-vpn/totp_secret",
+		},
+	}, openconnectcfg.SecondFactorModeTOTPAuto, false)
 	if err != nil {
 		t.Fatalf("resolveCredentials returned error: %v", err)
 	}
@@ -132,8 +135,14 @@ func TestRunSetupWritesConfigAndSeedsKeychainPlaceholders(t *testing.T) {
 	if !strings.Contains(string(raw), `"server_url": "vpn.example.com/engineering"`) {
 		t.Fatalf("config missing server_url: %s", string(raw))
 	}
+	if !strings.Contains(string(raw), `"second_factor"`) || !strings.Contains(string(raw), `"mode": "totp_auto"`) {
+		t.Fatalf("config missing second_factor totp_auto: %s", string(raw))
+	}
 	if !strings.Contains(stdout.String(), "config: "+configPath) {
 		t.Fatalf("stdout = %q, want config path", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "second_factor_mode: totp_auto") {
+		t.Fatalf("stdout = %q, want second_factor_mode", stdout.String())
 	}
 }
 
@@ -215,7 +224,7 @@ func TestResolveCredentials_PrefersExplicitValuesAndFallsBackToPlainUsername(t *
 		UsernameKeychainAccount: "corp-vpn/username",
 		PasswordKeychainAccount: "corp-vpn/password",
 		TOTPKeychainAccount:     "corp-vpn/totp_secret",
-	}, false)
+	}, openconnectcfg.SecondFactorModeTOTPAuto, false)
 	if err != nil {
 		t.Fatalf("resolveCredentials returned error: %v", err)
 	}
@@ -231,7 +240,7 @@ func TestResolveCredentials_PrefersExplicitValuesAndFallsBackToPlainUsername(t *
 
 	username, password, totp, err = resolveCredentials("", "", "", openconnectcfg.AuthConfig{
 		Username: "config-user",
-	}, false)
+	}, "", false)
 	if err != nil {
 		t.Fatalf("resolveCredentials returned error: %v", err)
 	}
@@ -243,6 +252,67 @@ func TestResolveCredentials_PrefersExplicitValuesAndFallsBackToPlainUsername(t *
 	}
 	if totp != "" {
 		t.Fatalf("totp = %q, want empty", totp)
+	}
+}
+
+func TestResolveCredentials_ManualOTPIgnoresConfiguredAndExplicitTOTP(t *testing.T) {
+	original := keychainGet
+	t.Cleanup(func() {
+		keychainGet = original
+	})
+
+	keychainGet = func(account string) (string, error) {
+		if account == "corp-vpn/totp_secret" {
+			t.Fatal("keychainGet called for TOTP in manual_otp mode")
+		}
+		return "from-keychain-" + account, nil
+	}
+
+	username, password, totp, err := resolveCredentials("alice", "secret", "flag-totp", openconnectcfg.AuthConfig{
+		SecondFactor: &openconnectcfg.SecondFactorConfig{
+			Mode:                openconnectcfg.SecondFactorModeManualOTP,
+			TOTPKeychainAccount: "corp-vpn/totp_secret",
+		},
+	}, openconnectcfg.SecondFactorModeManualOTP, false)
+	if err != nil {
+		t.Fatalf("resolveCredentials returned error: %v", err)
+	}
+	if username != "alice" || password != "secret" {
+		t.Fatalf("credentials = %q/%q, want alice/secret", username, password)
+	}
+	if totp != "" {
+		t.Fatalf("totp = %q, want empty in manual_otp mode", totp)
+	}
+}
+
+func TestResolveSecondFactorModeUsesNestedConfigAndLegacyFallback(t *testing.T) {
+	mode, err := resolveSecondFactorMode("", openconnectcfg.AuthConfig{
+		SecondFactor: &openconnectcfg.SecondFactorConfig{
+			Mode:                openconnectcfg.SecondFactorModeManualOTP,
+			TOTPKeychainAccount: "corp-vpn/totp_secret",
+		},
+		TOTPKeychainAccount: "legacy/totp_secret",
+	})
+	if err != nil {
+		t.Fatalf("resolveSecondFactorMode returned error: %v", err)
+	}
+	if mode != openconnectcfg.SecondFactorModeManualOTP {
+		t.Fatalf("mode = %q, want manual_otp", mode)
+	}
+
+	mode, err = resolveSecondFactorMode("", openconnectcfg.AuthConfig{
+		TOTPKeychainAccount: "legacy/totp_secret",
+	})
+	if err != nil {
+		t.Fatalf("resolveSecondFactorMode returned error: %v", err)
+	}
+	if mode != openconnectcfg.SecondFactorModeTOTPAuto {
+		t.Fatalf("legacy mode = %q, want totp_auto", mode)
+	}
+
+	_, err = resolveSecondFactorMode("bogus", openconnectcfg.AuthConfig{})
+	if err == nil {
+		t.Fatal("resolveSecondFactorMode error = nil, want unsupported mode")
 	}
 }
 
@@ -551,6 +621,133 @@ func TestParseRunOptionsUsesServerSpecificAuthOverrides(t *testing.T) {
 	}
 	if options.totpSecret != "totp-secret" {
 		t.Fatalf("totpSecret = %q, want %q", options.totpSecret, "totp-secret")
+	}
+}
+
+func TestParseRunOptionsManualSecondFactorDoesNotResolveTOTP(t *testing.T) {
+	original := keychainGet
+	t.Cleanup(func() {
+		keychainGet = original
+	})
+
+	values := map[string]string{
+		"server/username": "alice",
+		"server/password": "secret-password",
+	}
+	keychainGet = func(account string) (string, error) {
+		value, ok := values[account]
+		if !ok {
+			return "", fmt.Errorf("unexpected keychain read %s", account)
+		}
+		return value, nil
+	}
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "auth": {
+        "username_keychain_account": "server/username",
+        "password_keychain_account": "server/password",
+        "second_factor": {
+          "mode": "manual_otp",
+          "totp_secret_keychain_account": "server/totp"
+        }
+      },
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{"--config", configPath, "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.secondFactorMode != openconnectcfg.SecondFactorModeManualOTP {
+		t.Fatalf("secondFactorMode = %q, want manual_otp", options.secondFactorMode)
+	}
+	if options.totpSecret != "" {
+		t.Fatalf("totpSecret = %q, want empty for manual_otp", options.totpSecret)
+	}
+}
+
+func TestParseRunOptionsSecondFactorModeOverrideCanUseNestedTOTP(t *testing.T) {
+	original := keychainGet
+	t.Cleanup(func() {
+		keychainGet = original
+	})
+
+	values := map[string]string{
+		"server/username": "alice",
+		"server/password": "secret-password",
+		"server/totp":     "totp-secret",
+	}
+	keychainGet = func(account string) (string, error) {
+		value, ok := values[account]
+		if !ok {
+			return "", fmt.Errorf("missing %s", account)
+		}
+		return value, nil
+	}
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "auth": {
+        "username_keychain_account": "server/username",
+        "password_keychain_account": "server/password",
+        "second_factor": {
+          "mode": "manual_otp",
+          "totp_secret_keychain_account": "server/totp"
+        }
+      },
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{
+		"--config", configPath,
+		"--dry-run",
+		"--second-factor-mode", openconnectcfg.SecondFactorModeTOTPAuto,
+	})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.secondFactorMode != openconnectcfg.SecondFactorModeTOTPAuto {
+		t.Fatalf("secondFactorMode = %q, want totp_auto", options.secondFactorMode)
+	}
+	if options.totpSecret != "totp-secret" {
+		t.Fatalf("totpSecret = %q, want nested keychain secret", options.totpSecret)
 	}
 }
 
