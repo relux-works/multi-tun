@@ -291,6 +291,7 @@ func TestScriptDiagnosticsWrapperScriptIncludesSupplementalDNSShim(t *testing.T)
 		"gitlab.services.corp.example",
 		"/etc/resolver/$domain",
 		"/etc/resolver/search.tailscale",
+		`*."$cleanup_domain")`,
 		"10.23.16.4",
 		"10.23.0.23",
 		"corp.example",
@@ -325,6 +326,10 @@ func TestScriptDiagnosticsWrapperScriptKeepsResolverShimForSplitInclude(t *testi
 		"load_public_nameservers",
 		"vpnc_wrapper_public_bypass: apply",
 		"vpnc_wrapper_public_bypass: remove",
+		"bypass_compact=",
+		"for bypass_domain in $bypass_compact",
+		`*."$bypass_domain")`,
+		"continue 2",
 		"bypass.corp.example",
 		"launch_probe_host_route_warmup",
 		"--probe-sync-apply",
@@ -393,6 +398,9 @@ func TestSupplementalResolverSpecForConnectOnlyAppliesInFullMode(t *testing.T) {
 	}
 	if !containsString(split.BypassDomains, "bypass.corp.example") {
 		t.Fatalf("split.BypassDomains = %#v, want bypass.corp.example", split.BypassDomains)
+	}
+	if containsString(split.SearchCleanupDomains, "bypass.corp.example") {
+		t.Fatalf("split.SearchCleanupDomains = %#v, want bypass.corp.example preserved", split.SearchCleanupDomains)
 	}
 	for _, domain := range []string{"inside.corp.example", "region.corp.example", "branch.example"} {
 		if !containsString(split.Domains, domain) {

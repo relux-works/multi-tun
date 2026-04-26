@@ -42,6 +42,7 @@ Build local CLIs and agent guidance that can:
 - Generate a proxy outbound from the parsed VLESS profile.
 - Generate `direct` and `block` outbounds.
 - Enable DNS hijack.
+- When a VLESS TUN session is layered above active OpenConnect split DNS, keep the public resolver handoff scoped to the VLESS TUN interface without copying corporate split domains into macOS search suffixes.
 - Support two rendering modes:
   - full tunnel when no bypass suffixes are configured
   - split DNS/direct routing when suffix bypasses are configured

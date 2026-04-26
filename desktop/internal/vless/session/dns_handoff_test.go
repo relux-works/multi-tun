@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -87,7 +88,7 @@ func TestParseDNSServersExplicit(t *testing.T) {
 	}
 }
 
-func TestApplyAndRestoreSystemDNSHandoff(t *testing.T) {
+func TestApplyAndRestoreSystemDNSHandoffUsesScutilWithoutSearchDomains(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS-specific DNS handoff")
 	}
@@ -140,9 +141,6 @@ func TestApplyAndRestoreSystemDNSHandoff(t *testing.T) {
 	if len(current.DNSHandoffServers) != 2 || current.DNSHandoffServers[0] != "1.1.1.1" || current.DNSHandoffServers[1] != "8.8.8.8" {
 		t.Fatalf("DNSHandoffServers = %#v, want 1.1.1.1 and 8.8.8.8", current.DNSHandoffServers)
 	}
-	if current.DNSHandoffRestoreAuto {
-		t.Fatal("DNSHandoffRestoreAuto = true, want false for scutil handoff")
-	}
 	if len(calls) != 1 {
 		t.Fatalf("apply scutil calls = %#v, want one call", calls)
 	}
@@ -152,8 +150,6 @@ func TestApplyAndRestoreSystemDNSHandoff(t *testing.T) {
 	for _, needle := range []string{
 		"d.add ConfirmedServiceID " + current.DNSHandoffServiceID,
 		"d.add InterfaceName utun233",
-		"d.add DomainName corp.example",
-		"d.add SearchDomains * corp.example inside.corp.example",
 		"d.add ServerAddresses * 1.1.1.1 8.8.8.8",
 		"set State:/Network/Service/" + current.DNSHandoffServiceID + "/DNS",
 		"d.add Addresses * 172.19.0.1",
@@ -161,6 +157,11 @@ func TestApplyAndRestoreSystemDNSHandoff(t *testing.T) {
 	} {
 		if !strings.Contains(calls[0].stdin, needle) {
 			t.Fatalf("apply scutil stdin missing %q:\n%s", needle, calls[0].stdin)
+		}
+	}
+	for _, needle := range []string{"DomainName", "SearchDomains"} {
+		if strings.Contains(calls[0].stdin, needle) {
+			t.Fatalf("apply scutil stdin contains %q, want no split-DNS search leakage:\n%s", needle, calls[0].stdin)
 		}
 	}
 
@@ -180,6 +181,108 @@ func TestApplyAndRestoreSystemDNSHandoff(t *testing.T) {
 		if !strings.Contains(calls[1].stdin, needle) {
 			t.Fatalf("restore scutil stdin missing %q:\n%s", needle, calls[1].stdin)
 		}
+	}
+}
+
+func TestApplySystemDNSHandoffFallsBackToNetworkServiceWhenScutilFails(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-specific DNS handoff")
+	}
+
+	prevDefaultRoute := defaultRouteGetSession
+	prevServiceOrder := networkServiceOrderSession
+	prevDNSServers := networkDNSServersSession
+	prevSetDNSServers := setDNSServersPrivilegedSession
+	prevRunScutil := runScutilPrivilegedSession
+	t.Cleanup(func() {
+		defaultRouteGetSession = prevDefaultRoute
+		networkServiceOrderSession = prevServiceOrder
+		networkDNSServersSession = prevDNSServers
+		setDNSServersPrivilegedSession = prevSetDNSServers
+		runScutilPrivilegedSession = prevRunScutil
+	})
+
+	defaultRouteGetSession = func() ([]byte, error) {
+		return []byte("  interface: en0\n"), nil
+	}
+	networkServiceOrderSession = func() ([]byte, error) {
+		return []byte("(1) Wi-Fi\n(Hardware Port: Wi-Fi, Device: en0)\n"), nil
+	}
+	networkDNSServersSession = func(service string) ([]byte, error) {
+		if service != "Wi-Fi" {
+			t.Fatalf("networkDNSServersSession service = %q, want Wi-Fi", service)
+		}
+		return []byte("There aren't any DNS Servers set on Wi-Fi.\n"), nil
+	}
+	type dnsSetCall struct {
+		launchMode string
+		service    string
+		servers    []string
+	}
+	var calls []dnsSetCall
+	setDNSServersPrivilegedSession = func(launchMode, logPath, service string, servers []string) error {
+		calls = append(calls, dnsSetCall{
+			launchMode: launchMode,
+			service:    service,
+			servers:    append([]string(nil), servers...),
+		})
+		return nil
+	}
+	runScutilPrivilegedSession = func(launchMode, logPath, stdinData string) error {
+		return errors.New("scutil unavailable")
+	}
+
+	current := CurrentSession{
+		ID:         "20260329T120000Z",
+		LogPath:    t.TempDir() + "/session.log",
+		LaunchMode: config.LaunchModeHelper,
+		Mode:       config.RenderModeTun,
+	}
+	options := StartOptions{
+		Mode:              config.RenderModeTun,
+		InterfaceName:     "utun233",
+		TunAddresses:      []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
+		OverlayDNSActive:  true,
+		OverlayDNSDomains: []string{"corp.example", "inside.corp.example"},
+		SystemDNSServers:  []string{"1.1.1.1", "8.8.8.8"},
+	}
+
+	if err := applySystemDNSHandoff(&current, options); err != nil {
+		t.Fatalf("applySystemDNSHandoff() error = %v", err)
+	}
+	if current.DNSHandoffMode != dnsHandoffModeFallback {
+		t.Fatalf("DNSHandoffMode = %q, want %q", current.DNSHandoffMode, dnsHandoffModeFallback)
+	}
+	if len(current.DNSHandoffServers) != 2 || current.DNSHandoffServers[0] != "1.1.1.1" || current.DNSHandoffServers[1] != "8.8.8.8" {
+		t.Fatalf("DNSHandoffServers = %#v, want 1.1.1.1 and 8.8.8.8", current.DNSHandoffServers)
+	}
+	if current.DNSHandoffService != "Wi-Fi" {
+		t.Fatalf("DNSHandoffService = %q, want Wi-Fi", current.DNSHandoffService)
+	}
+	if !current.DNSHandoffRestoreAuto {
+		t.Fatal("DNSHandoffRestoreAuto = false, want true for automatic DNS restore")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("DNS set calls = %#v, want one apply call", calls)
+	}
+	if calls[0].launchMode != config.LaunchModeHelper {
+		t.Fatalf("apply launchMode = %q, want %q", calls[0].launchMode, config.LaunchModeHelper)
+	}
+	if calls[0].service != "Wi-Fi" || len(calls[0].servers) != 2 || calls[0].servers[0] != "1.1.1.1" || calls[0].servers[1] != "8.8.8.8" {
+		t.Fatalf("apply DNS call = %#v, want Wi-Fi -> 1.1.1.1,8.8.8.8", calls[0])
+	}
+
+	if err := restoreSystemDNSHandoff(current); err != nil {
+		t.Fatalf("restoreSystemDNSHandoff() error = %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("DNS set calls = %#v, want restore call", calls)
+	}
+	if calls[1].launchMode != config.LaunchModeHelper {
+		t.Fatalf("restore launchMode = %q, want %q", calls[1].launchMode, config.LaunchModeHelper)
+	}
+	if calls[1].service != "Wi-Fi" || len(calls[1].servers) != 0 {
+		t.Fatalf("restore DNS call = %#v, want Wi-Fi -> automatic", calls[1])
 	}
 }
 
