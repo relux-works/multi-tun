@@ -307,6 +307,7 @@ Field reference:
 - `servers.<url>.profiles.<profile>.split_include.vpn_domains` normalization: the CLI now collapses covered suffixes automatically during option resolution, but the config should still stay clean and minimal
 - `servers.<url>.profiles.<profile>.split_include.bypass_suffixes`: suffixes that must stay on the public resolver path even when a broader VPN suffix also matches
 - `split_include.bypass_suffixes` semantics: on macOS `openconnect-tun` implements bypasses by writing a more specific public `/etc/resolver/<suffix>` entry over the broader VPN-scoped resolver, so `bypass.corp.example` can stay public while `corp.example` still uses VPN DNS
+- split-DNS cleanup: when `search.tailscale` already contains search domains covered by `split_include.vpn_domains`, `openconnect-tun` removes both exact and covered subdomain entries from that search resolver while preserving anything covered by `split_include.bypass_suffixes`, so macOS does not bounce between public and VPN search paths
 - built-in example augmentation: for the anonymized `/outside` example targets `openconnect-tun` still augments split DNS with the extra official Cisco suffix set (`inside.corp.example`, `region.corp.example`, `branch.example`, `workspace.example`, and related domains), so the config can stay minimal without manually restating every covered subdomain
 
 ### `vless-tun setup`
@@ -335,7 +336,7 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 Renders the selected profile to the configured sing-box JSON and then starts `sing-box` in the background.
 
-When `vless-tun` is running in `network.mode=tun` above an active `openconnect-tun` split-include session, `start` now waits for overlay DNS convergence before returning. In that overlay mode, a live `sing-box` PID alone is not treated as ready; the CLI also waits for the system public resolver path to settle so follow-up terminal clients do not race the DNS handoff.
+When `vless-tun` is running in `network.mode=tun` above an active `openconnect-tun` split-include session, `start` now waits for overlay DNS convergence before returning. In that overlay mode, a live `sing-box` PID alone is not treated as ready; the CLI also waits for the system public resolver path to settle so follow-up terminal clients do not race the DNS handoff. The public resolver handoff is applied through a scoped `scutil` resolver without copying MTS/corporate split domains into search suffixes; the active network service DNS is only a fallback if scoped handoff fails.
 
 Each start creates a new timestamped session log and metadata pair under:
 

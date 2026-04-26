@@ -81,14 +81,9 @@ func applyScutilDNSHandoff(current *CurrentSession, options StartOptions, dnsSer
 	if tunnelIPv4 == "" {
 		return fmt.Errorf("missing tun IPv4 address")
 	}
-	searchDomains := normalizeDNSDomainList(options.OverlayDNSDomains)
-	if len(searchDomains) == 0 {
-		return fmt.Errorf("missing overlay DNS domains")
-	}
-
 	serviceID := dnsHandoffServiceID(current.ID)
-	stdinData := buildScutilApplyInput(serviceID, interfaceName, tunnelIPv4, dnsServers, searchDomains)
-	appendSessionLog(current.LogPath, "dns_handoff_apply_begin method=%s interface=%s target=%s search=%s\n", dnsHandoffModeScutil, interfaceName, strings.Join(dnsServers, ","), strings.Join(searchDomains, ","))
+	stdinData := buildScutilApplyInput(serviceID, interfaceName, tunnelIPv4, dnsServers)
+	appendSessionLog(current.LogPath, "dns_handoff_apply_begin method=%s interface=%s target=%s search=none\n", dnsHandoffModeScutil, interfaceName, strings.Join(dnsServers, ","))
 	if err := runScutilPrivilegedSession(current.LaunchMode, current.LogPath, stdinData); err != nil {
 		appendSessionLog(current.LogPath, "dns_handoff_apply_failed method=%s interface=%s err=%v\n", dnsHandoffModeScutil, interfaceName, err)
 		return err
@@ -247,19 +242,11 @@ func dnsHandoffServiceID(sessionID string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", token[0:8], token[8:12], token[12:16], token[16:20], token[20:32])
 }
 
-func buildScutilApplyInput(serviceID, interfaceName, tunnelIPv4 string, dnsServers, searchDomains []string) string {
+func buildScutilApplyInput(serviceID, interfaceName, tunnelIPv4 string, dnsServers []string) string {
 	var b strings.Builder
 	b.WriteString("d.init\n")
 	fmt.Fprintf(&b, "d.add ConfirmedServiceID %s\n", serviceID)
 	fmt.Fprintf(&b, "d.add InterfaceName %s\n", interfaceName)
-	if len(searchDomains) > 0 {
-		fmt.Fprintf(&b, "d.add DomainName %s\n", searchDomains[0])
-		b.WriteString("d.add SearchDomains *")
-		for _, domain := range searchDomains {
-			fmt.Fprintf(&b, " %s", domain)
-		}
-		b.WriteString("\n")
-	}
 	b.WriteString("d.add ServerAddresses *")
 	for _, server := range dnsServers {
 		fmt.Fprintf(&b, " %s", server)

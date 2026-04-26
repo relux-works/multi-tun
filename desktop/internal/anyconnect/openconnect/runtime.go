@@ -649,7 +649,7 @@ func supplementalResolverSpecForConnect(mode string, server string, options Conn
 			searchDomain = firstNonEmpty(serverSpec.SearchDomain, firstNonEmpty(options.VPNDomains...))
 		}
 		domains = filterCoveredDomainsOpenConnect(uniqueStrings(domains), bypassDomains)
-		cleanupDomains = uniqueStrings(cleanupDomains)
+		cleanupDomains = filterCoveredDomainsOpenConnect(uniqueStrings(cleanupDomains), bypassDomains)
 		if domainCoveredBySuffixesOpenConnect(searchDomain, bypassDomains) {
 			searchDomain = firstNonEmpty(firstNonEmpty(domains...), "")
 		}
@@ -837,6 +837,7 @@ sanitize_search_resolver() {
   [ -f /etc/resolver/search.tailscale ] || return 0
   [ -n "$search_cleanup_domains" ] || return 0
   cleanup_compact=$(printf '%%s\n' "$search_cleanup_domains" | tr '\n' ' ')
+  bypass_compact=$(printf '%%s\n' "$bypass_domains" | tr '\n' ' ')
   [ -n "$cleanup_compact" ] || return 0
   tmp_path=$(mktemp "/tmp/openconnect-tun-search.XXXXXX") || return 0
   if while IFS= read -r line || [ -n "$line" ]; do
@@ -846,10 +847,32 @@ sanitize_search_resolver() {
         shift
         out="search"
         for domain in "$@"; do
-          case " $cleanup_compact " in
-            *" $domain "*) ;;
-            *) out="$out $domain" ;;
-          esac
+          for bypass_domain in $bypass_compact; do
+            if [ "$domain" = "$bypass_domain" ]; then
+              out="$out $domain"
+              continue 2
+            fi
+            case "$domain" in
+              *."$bypass_domain")
+                out="$out $domain"
+                continue 2
+                ;;
+            esac
+          done
+          remove_domain=0
+          for cleanup_domain in $cleanup_compact; do
+            if [ "$domain" = "$cleanup_domain" ]; then
+              remove_domain=1
+              break
+            fi
+            case "$domain" in
+              *."$cleanup_domain")
+                remove_domain=1
+                break
+                ;;
+            esac
+          done
+          [ "$remove_domain" = "1" ] || out="$out $domain"
         done
         printf '%%s\n' "$out"
         ;;
