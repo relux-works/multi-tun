@@ -160,15 +160,19 @@ func (a *App) runSetup(args []string) int {
 	}
 
 	accountBase := defaultOpenConnectAccountBase(resolvedServerURL)
+	totpAccountName := firstNonEmpty(strings.TrimSpace(*totpAccount), keychain.TunnelKey(accountBase, "totp_secret"))
 	authCfg := openconnectcfg.AuthConfig{
 		UsernameKeychainAccount: firstNonEmpty(strings.TrimSpace(*usernameAccount), keychain.TunnelKey(accountBase, "username")),
 		PasswordKeychainAccount: firstNonEmpty(strings.TrimSpace(*passwordAccount), keychain.TunnelKey(accountBase, "password")),
-		TOTPKeychainAccount:     firstNonEmpty(strings.TrimSpace(*totpAccount), keychain.TunnelKey(accountBase, "totp_secret")),
+		SecondFactor: &openconnectcfg.SecondFactorConfig{
+			Mode:                openconnectcfg.SecondFactorModeTOTPAuto,
+			TOTPKeychainAccount: totpAccountName,
+		},
 	}
 	placeholders := map[string]string{
 		authCfg.UsernameKeychainAccount: "REPLACE_ME_USERNAME",
 		authCfg.PasswordKeychainAccount: "REPLACE_ME_PASSWORD",
-		authCfg.TOTPKeychainAccount:     "REPLACE_ME_TOTP_SECRET",
+		totpAccountName:                 "REPLACE_ME_TOTP_SECRET",
 	}
 	for account, value := range placeholders {
 		writeValue := value
@@ -204,7 +208,8 @@ func (a *App) runSetup(args []string) int {
 	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.EffectiveMode(cfg.DefaultSelection().ServerURL, cfg.DefaultSelection().Profile))
 	fmt.Fprintf(a.stdout, "username_keychain_account: %s\n", authCfg.UsernameKeychainAccount)
 	fmt.Fprintf(a.stdout, "password_keychain_account: %s\n", authCfg.PasswordKeychainAccount)
-	fmt.Fprintf(a.stdout, "totp_secret_keychain_account: %s\n", authCfg.TOTPKeychainAccount)
+	fmt.Fprintf(a.stdout, "second_factor_mode: %s\n", authCfg.SecondFactor.Mode)
+	fmt.Fprintf(a.stdout, "totp_secret_keychain_account: %s\n", authCfg.SecondFactor.TOTPKeychainAccount)
 	return 0
 }
 
@@ -342,6 +347,7 @@ type runOptions struct {
 	profile             string
 	auth                string
 	mode                string
+	secondFactorMode    string
 	username            string
 	password            string
 	totpSecret          string
@@ -410,6 +416,7 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 	username := fs.String("username", "", "Optional username for browser-assisted SAML auto-login")
 	password := fs.String("password", "", "Optional password for browser-assisted SAML auto-login")
 	totpSecret := fs.String("totp-secret", "", "Optional TOTP secret for browser-assisted SAML auto-login")
+	secondFactorMode := fs.String("second-factor-mode", "", "Second-factor mode: manual_otp or totp_auto")
 	domainList := fs.String("vpn-domains", "", "Comma-separated domains that should use VPN DNS in split-include mode")
 	bypassList := fs.String("bypass-suffixes", "", "Comma-separated suffixes that should stay on public DNS even when broader VPN suffixes match")
 	includeRoutes := multiValueFlag{}
@@ -450,7 +457,11 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 	resolvedAuthCfg := cfg.EffectiveAuth(firstNonEmpty(effectiveServer, resolvedServer))
 	resolvedClientMimicry := toOpenConnectClientMimicry(cfg.EffectiveClientMimicry(firstNonEmpty(effectiveServer, resolvedServer)))
 	resolvedAuthFallbackServers := cfg.EffectiveAuthFallbackServers(firstNonEmpty(effectiveServer, resolvedServer))
-	resolvedUsername, resolvedPassword, resolvedTOTP, err := resolveCredentials(*username, *password, *totpSecret, resolvedAuthCfg, *dryRun)
+	resolvedSecondFactorMode, err := resolveSecondFactorMode(*secondFactorMode, resolvedAuthCfg)
+	if err != nil {
+		return runOptions{}, 1, err
+	}
+	resolvedUsername, resolvedPassword, resolvedTOTP, err := resolveCredentials(*username, *password, *totpSecret, resolvedAuthCfg, resolvedSecondFactorMode, *dryRun)
 	if err != nil {
 		return runOptions{}, 1, err
 	}
@@ -478,6 +489,7 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		profile:             resolvedProfile,
 		auth:                *auth,
 		mode:                resolvedMode,
+		secondFactorMode:    resolvedSecondFactorMode,
 		username:            resolvedUsername,
 		password:            resolvedPassword,
 		totpSecret:          resolvedTOTP,
@@ -523,9 +535,10 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 		BypassSuffixes: options.bypassSuffixes,
 		VPNNameservers: options.vpnNameservers,
 		Credentials: openconnect.Credentials{
-			Username:   options.username,
-			Password:   options.password,
-			TOTPSecret: options.totpSecret,
+			Username:       options.username,
+			Password:       options.password,
+			TOTPSecret:     options.totpSecret,
+			ManualOTPStdin: options.secondFactorMode == openconnectcfg.SecondFactorModeManualOTP,
 		},
 		ClientMimicry:       options.clientMimicry,
 		AuthFallbackServers: options.authFallbackServers,
@@ -553,6 +566,9 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 	}
 	if len(options.bypassSuffixes) > 0 {
 		fmt.Fprintf(a.stdout, "bypass_suffixes: %s\n", strings.Join(options.bypassSuffixes, ", "))
+	}
+	if options.secondFactorMode != "" {
+		fmt.Fprintf(a.stdout, "second_factor_mode: %s\n", options.secondFactorMode)
 	}
 	fmt.Fprintf(a.stdout, "command: %s\n", strings.Join(result.Command, " "))
 	if options.dryRun {
@@ -633,7 +649,29 @@ func resolveCacheDir(flagValue string, cfg openconnectcfg.Config) string {
 	return openconnect.ResolveCacheDir("")
 }
 
-func resolveCredentials(username, password, totp string, authCfg openconnectcfg.AuthConfig, allowMissingSecrets bool) (string, string, string, error) {
+func resolveSecondFactorMode(flagValue string, authCfg openconnectcfg.AuthConfig) (string, error) {
+	mode := strings.TrimSpace(flagValue)
+	if mode == "" && authCfg.SecondFactor != nil {
+		mode = strings.TrimSpace(authCfg.SecondFactor.Mode)
+	}
+	if mode == "" && authCfg.SecondFactor != nil && strings.TrimSpace(authCfg.SecondFactor.TOTPKeychainAccount) != "" {
+		mode = openconnectcfg.SecondFactorModeTOTPAuto
+	}
+	if mode == "" && strings.TrimSpace(authCfg.TOTPKeychainAccount) != "" {
+		mode = openconnectcfg.SecondFactorModeTOTPAuto
+	}
+	if mode == "" {
+		return "", nil
+	}
+	switch mode {
+	case openconnectcfg.SecondFactorModeManualOTP, openconnectcfg.SecondFactorModeTOTPAuto:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported second-factor mode %q (want manual_otp or totp_auto)", mode)
+	}
+}
+
+func resolveCredentials(username, password, totp string, authCfg openconnectcfg.AuthConfig, secondFactorMode string, allowMissingSecrets bool) (string, string, string, error) {
 	resolvedUsername := username
 	resolvedPassword := password
 	resolvedTOTP := totp
@@ -660,13 +698,23 @@ func resolveCredentials(username, password, totp string, authCfg openconnectcfg.
 			}
 		}
 	}
-	if resolvedTOTP == "" && authCfg.TOTPKeychainAccount != "" {
-		resolvedTOTP, err = keychainGet(authCfg.TOTPKeychainAccount)
+	if secondFactorMode == openconnectcfg.SecondFactorModeManualOTP {
+		return resolvedUsername, resolvedPassword, "", nil
+	}
+	totpAccount := strings.TrimSpace(authCfg.TOTPKeychainAccount)
+	if authCfg.SecondFactor != nil && strings.TrimSpace(authCfg.SecondFactor.TOTPKeychainAccount) != "" {
+		totpAccount = strings.TrimSpace(authCfg.SecondFactor.TOTPKeychainAccount)
+	}
+	if resolvedTOTP == "" && secondFactorMode == openconnectcfg.SecondFactorModeTOTPAuto && totpAccount == "" && !allowMissingSecrets {
+		return "", "", "", fmt.Errorf("second-factor mode %s requires --totp-secret or second_factor.totp_secret_keychain_account", secondFactorMode)
+	}
+	if resolvedTOTP == "" && secondFactorMode == openconnectcfg.SecondFactorModeTOTPAuto && totpAccount != "" {
+		resolvedTOTP, err = keychainGet(totpAccount)
 		if err != nil {
 			if allowMissingSecrets {
 				resolvedTOTP = ""
 			} else {
-				return "", "", "", fmt.Errorf("totp keychain account %q: %w", authCfg.TOTPKeychainAccount, err)
+				return "", "", "", fmt.Errorf("totp keychain account %q: %w", totpAccount, err)
 			}
 		}
 	}
@@ -771,8 +819,8 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
 	fmt.Fprintln(a.stdout, "  openconnect-tun setup --vpn-name name [--server-url host/path] [--config path] [--force]")
-	fmt.Fprintln(a.stdout, "  openconnect-tun start [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
-	fmt.Fprintln(a.stdout, "  openconnect-tun reconnect [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
+	fmt.Fprintln(a.stdout, "  openconnect-tun start [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--second-factor-mode manual_otp|totp_auto] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
+	fmt.Fprintln(a.stdout, "  openconnect-tun reconnect [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--second-factor-mode manual_otp|totp_auto] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
 	fmt.Fprintln(a.stdout, "  openconnect-tun stop")
 	fmt.Fprintln(a.stdout, "  openconnect-tun helper install|uninstall|status")
 	fmt.Fprintln(a.stdout, "  openconnect-tun routes")

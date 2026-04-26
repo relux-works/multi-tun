@@ -11,6 +11,7 @@ struct CLIArgs {
     let username: String?
     let password: String?
     let totpSecret: String?
+    let manualOTPStdin: Bool
 
     var hasCredentials: Bool {
         username != nil && password != nil
@@ -32,6 +33,7 @@ struct CLIArgs {
         var username: String?
         var password: String?
         var totpSecret: String?
+        var manualOTPStdin = false
 
         var i = 1
         while i < args.count {
@@ -62,6 +64,8 @@ struct CLIArgs {
                 i += 1
                 guard i < args.count else { printError("--totp-secret requires a value"); return nil }
                 totpSecret = args[i]
+            case "--manual-otp-stdin":
+                manualOTPStdin = true
             case "--help", "-h":
                 printUsage(); exit(0)
             case "--version":
@@ -76,7 +80,7 @@ struct CLIArgs {
             printError("either --url or --server is required")
             return nil
         }
-        return CLIArgs(url: url, server: server, timeout: timeout, username: username, password: password, totpSecret: totpSecret)
+        return CLIArgs(url: url, server: server, timeout: timeout, username: username, password: password, totpSecret: totpSecret, manualOTPStdin: manualOTPStdin)
     }
 }
 
@@ -94,6 +98,7 @@ func printUsage() {
       --username     Auto-fill username
       --password     Auto-fill password
       --totp-secret  Base32 TOTP secret (uses totp-cli instant)
+      --manual-otp-stdin  Read SMS/manual OTP from stdin and submit it
       --timeout      Authentication timeout in seconds (default: 300)
       --version      Print version
       --help         Show this help
@@ -129,6 +134,45 @@ func outputError(_ message: String) -> Never {
         print(str)
     }
     exit(1)
+}
+
+func sanitizeLogURL(_ value: String) -> String {
+    guard let url = URL(string: value) else {
+        return String(value.prefix(240))
+    }
+    if url.scheme == "about" {
+        return value
+    }
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return String(value.prefix(240))
+    }
+    components.user = nil
+    components.password = nil
+    components.query = nil
+    components.fragment = nil
+    return String((components.string ?? value).prefix(240))
+}
+
+func sanitizedWebViewURL(_ webView: WKWebView) -> String {
+    guard let value = webView.url?.absoluteString else {
+        return "(none)"
+    }
+    return sanitizeLogURL(value)
+}
+
+func navigationFailureSummary(_ error: Error) -> String {
+    let nsError = error as NSError
+    var parts = [
+        "domain=\(nsError.domain)",
+        "code=\(nsError.code)",
+        "description=\(nsError.localizedDescription)"
+    ]
+    if let failingURL = nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
+        parts.append("failingURL=\(sanitizeLogURL(failingURL.absoluteString))")
+    } else if let failingURL = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String {
+        parts.append("failingURL=\(sanitizeLogURL(failingURL))")
+    }
+    return parts.joined(separator: " ")
 }
 
 struct PresetCookie: Decodable {
@@ -413,6 +457,9 @@ func unknownPageSnapshotScript() -> String {
         function sanitizeURL(value) {
             try {
                 var url = new URL(value, window.location.href);
+                if (url.protocol === 'about:' || url.origin === 'null') {
+                    return url.href;
+                }
                 return url.origin + url.pathname;
             } catch (_) {
                 return value || '';
@@ -448,6 +495,9 @@ func unknownPageSnapshotScript() -> String {
             title: truncate(document.title || '', 160),
             readyState: document.readyState || '',
             url: sanitizeURL(window.location.href),
+            online: navigator.onLine,
+            bodyTextLength: (document.body && document.body.innerText ? document.body.innerText.length : 0),
+            htmlLength: (document.documentElement && document.documentElement.outerHTML ? document.documentElement.outerHTML.length : 0),
             forms: Array.from(document.forms || []).slice(0, 6).map(summarizeForm),
             inputs: Array.from(document.querySelectorAll('input')).slice(0, 12).map(summarizeInput),
             iframes: Array.from(document.querySelectorAll('iframe')).slice(0, 6).map(summarizeFrame)
@@ -472,6 +522,8 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
     private var usernameOnlyAttempted = false
     private var lastSubmittedOTPCode = ""
     private var lastUnknownSnapshot = ""
+    private var repeatedUnknownSnapshotCount = 0
+    private var manualOTPReadInProgress = false
 
     init(args: CLIArgs, url: String, samlFlow: SAMLFlowResult?) {
         self.args = args
@@ -524,7 +576,7 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Poll for page changes to inject credentials
-        if args.hasCredentials {
+        if args.hasCredentials || args.manualOTPStdin {
             Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
                 self?.checkPageAndAutoFill(timer: timer)
             }
@@ -546,6 +598,7 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
             switch pageType {
             case "login":
                 self.lastUnknownSnapshot = ""
+                self.repeatedUnknownSnapshotCount = 0
                 if !self.loginAttempted, let username = self.args.username, let password = self.args.password {
                     self.loginAttempted = true
                     printInfo("detected login page — auto-filling credentials")
@@ -557,6 +610,7 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
 
             case "username_only":
                 self.lastUnknownSnapshot = ""
+                self.repeatedUnknownSnapshotCount = 0
                 if !self.usernameOnlyAttempted, let username = self.args.username {
                     self.usernameOnlyAttempted = true
                     printInfo("detected username-only page — auto-filling username")
@@ -568,6 +622,7 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
 
             case "otp":
                 self.lastUnknownSnapshot = ""
+                self.repeatedUnknownSnapshotCount = 0
                 if let secret = self.args.totpSecret {
                     printInfo("detected OTP page — generating TOTP code")
                     guard let code = generateTOTP(secret: secret) else {
@@ -583,6 +638,8 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
                     self.webView.evaluateJavaScript(script) { _, err in
                         if let err = err { printError("OTP injection error: \(err)") }
                     }
+                } else if self.args.manualOTPStdin {
+                    self.requestManualOTPFromStdin()
                 }
 
             default:
@@ -596,12 +653,69 @@ class AuthAppDelegate: NSObject, NSApplicationDelegate {
                     }
                     if snapshot != self.lastUnknownSnapshot {
                         self.lastUnknownSnapshot = snapshot
+                        self.repeatedUnknownSnapshotCount = 1
                         printInfo("unknown page snapshot: \(snapshot)")
+                    } else {
+                        self.repeatedUnknownSnapshotCount += 1
+                    }
+                    if self.isBlankUnknownSnapshot(snapshot) {
+                        if self.repeatedUnknownSnapshotCount == 10 {
+                            printError("blank WebView page still present after \(self.repeatedUnknownSnapshotCount)s; check DNS/routing for the SAML IdP")
+                        }
+                        if self.repeatedUnknownSnapshotCount >= 30 {
+                            outputError("blank WebView page persisted for \(self.repeatedUnknownSnapshotCount)s; check DNS/routing for the SAML IdP")
+                        }
                     }
                 }
                 break
             }
         }
+    }
+
+    private func requestManualOTPFromStdin() {
+        if manualOTPReadInProgress {
+            return
+        }
+        manualOTPReadInProgress = true
+        printInfo("detected OTP page — waiting for manual code on stdin")
+        printInfo("manual OTP required — enter code in terminal and press Return")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let rawCode = readLine()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.manualOTPReadInProgress = false
+                guard let code = rawCode?.trimmingCharacters(in: .whitespacesAndNewlines), !code.isEmpty else {
+                    printError("manual OTP stdin was empty")
+                    return
+                }
+                self.lastSubmittedOTPCode = code
+                printInfo("received manual OTP code")
+                let script = otpFormScript(code: code)
+                self.webView.evaluateJavaScript(script) { _, err in
+                    if let err = err { printError("manual OTP injection error: \(err)") }
+                }
+            }
+        }
+    }
+
+    private func isBlankUnknownSnapshot(_ snapshot: String) -> Bool {
+        guard let data = snapshot.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        let url = payload["url"] as? String ?? ""
+        let bodyTextLength = payload["bodyTextLength"] as? Int ?? 0
+        let htmlLength = payload["htmlLength"] as? Int ?? 0
+        let forms = payload["forms"] as? [Any] ?? []
+        let inputs = payload["inputs"] as? [Any] ?? []
+        let iframes = payload["iframes"] as? [Any] ?? []
+        return (url == "about:blank" || url == "nullblank") &&
+            bodyTextLength == 0 &&
+            htmlLength <= 80 &&
+            forms.isEmpty &&
+            inputs.isEmpty &&
+            iframes.isEmpty
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -630,7 +744,7 @@ class AuthNavigationDelegate: NSObject, WKNavigationDelegate, WKHTTPCookieStoreO
         }
 
         let urlString = url.absoluteString
-        printInfo("navigation: \(urlString.prefix(120))")
+        printInfo("navigation: \(sanitizeLogURL(urlString))")
 
         // AnyConnect SSO-v2 localhost callback
         if urlString.hasPrefix("http://localhost:29786/") {
@@ -658,6 +772,27 @@ class AuthNavigationDelegate: NSObject, WKNavigationDelegate, WKHTTPCookieStoreO
         }
 
         decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        printInfo("navigation commit: \(sanitizedWebViewURL(webView))")
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        let title = String((webView.title ?? "").prefix(160))
+        printInfo("navigation finish: url=\(sanitizedWebViewURL(webView)) title=\(title)")
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        printError("navigation failed: url=\(sanitizedWebViewURL(webView)) \(navigationFailureSummary(error))")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        printError("navigation provisional failed: url=\(sanitizedWebViewURL(webView)) \(navigationFailureSummary(error))")
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        printError("web content process terminated: url=\(sanitizedWebViewURL(webView))")
     }
 
     func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {

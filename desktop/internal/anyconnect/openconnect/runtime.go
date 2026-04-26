@@ -84,9 +84,10 @@ var (
 )
 
 type Credentials struct {
-	Username   string
-	Password   string
-	TOTPSecret string
+	Username       string
+	Password       string
+	TOTPSecret     string
+	ManualOTPStdin bool
 }
 
 type ClientMimicry struct {
@@ -2143,6 +2144,9 @@ func authenticateWithVPNAuthURL(loginURL string, creds Credentials, presetCookie
 	if creds.TOTPSecret != "" {
 		cmdArgs = append(cmdArgs, "--totp-secret", creds.TOTPSecret)
 	}
+	if creds.ManualOTPStdin {
+		cmdArgs = append(cmdArgs, "--manual-otp-stdin")
+	}
 
 	writeLogf(logWriter, "sso_browser_command: %s %s", vpnAuthPath, redactVPNAuthArgs(cmdArgs))
 	writeProgressf(progressWriter, "auth_stage: vpn_auth")
@@ -2154,6 +2158,9 @@ func authenticateWithVPNAuthURL(loginURL string, creds Credentials, presetCookie
 	defer stageWriter.Flush()
 
 	cmd := execCommandContext(ctx, vpnAuthPath, cmdArgs...)
+	if creds.ManualOTPStdin {
+		cmd.Stdin = os.Stdin
+	}
 	if strings.TrimSpace(presetCookiesJSON) != "" {
 		cmd.Env = append(os.Environ(), "VPN_AUTH_PRESET_COOKIES_JSON="+presetCookiesJSON)
 	}
@@ -2163,7 +2170,13 @@ func authenticateWithVPNAuthURL(loginURL string, creds Credentials, presetCookie
 		return nil, fmt.Errorf("vpn-auth timed out after %s", authTimeout)
 	}
 	if err != nil {
+		if message := parseVPNAuthErrorOutput(out); message != "" {
+			return nil, fmt.Errorf("vpn-auth failed: %s", message)
+		}
 		return nil, fmt.Errorf("vpn-auth failed: %w", err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil, fmt.Errorf("vpn-auth returned no JSON on stdout")
 	}
 
 	var result vpnAuthResult
@@ -2176,6 +2189,20 @@ func authenticateWithVPNAuthURL(loginURL string, creds Credentials, presetCookie
 	result.Cookie = strings.TrimSpace(result.Cookie)
 	result.CookieName = strings.TrimSpace(result.CookieName)
 	return &result, nil
+}
+
+func parseVPNAuthErrorOutput(out []byte) string {
+	out = []byte(strings.TrimSpace(string(out)))
+	if len(out) == 0 {
+		return ""
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Error)
 }
 
 func completeSAMLAuth(state *samlAuthState, server string, samlToken string, logWriter io.Writer) (*authResult, error) {
@@ -3205,6 +3232,9 @@ func prepareOpenConnectAuthHelpers(ocPath string, server string, options Connect
 			if options.Credentials.TOTPSecret != "" {
 				spec.Env = append(spec.Env, "OPENCONNECT_TUN_VPN_AUTH_TOTP_SECRET="+options.Credentials.TOTPSecret)
 			}
+			if options.Credentials.ManualOTPStdin {
+				spec.Env = append(spec.Env, "OPENCONNECT_TUN_VPN_AUTH_MANUAL_OTP_STDIN=1")
+			}
 			writeLogf(logWriter, "authenticate_external_browser: %s (vpn-auth)", browserWrapperPath)
 		} else {
 			openPath, err := execLookPathOpenConnect("open")
@@ -3891,6 +3921,9 @@ if [ -n "${OPENCONNECT_TUN_VPN_AUTH_PASSWORD:-}" ]; then
 fi
 if [ -n "${OPENCONNECT_TUN_VPN_AUTH_TOTP_SECRET:-}" ]; then
   set -- "$@" --totp-secret "$OPENCONNECT_TUN_VPN_AUTH_TOTP_SECRET"
+fi
+if [ -n "${OPENCONNECT_TUN_VPN_AUTH_MANUAL_OTP_STDIN:-}" ]; then
+  set -- "$@" --manual-otp-stdin
 fi
 
 if ! result=$("$@"); then

@@ -138,6 +138,7 @@ openconnect-tun inspect-profiles --dir ~/Downloads/cisco-anyconnect-profiles/pro
 openconnect-tun setup --vpn-name 'Corp VPN'
 openconnect-tun start --profile 'Ural Outside extended' --mode full --dry-run
 openconnect-tun start --profile 'Ural Outside extended' --mode split-include \
+  --second-factor-mode manual_otp \
   --route 198.51.100.0/24 \
   --route 203.0.113.0/24 \
   --vpn-domains corp.example,digital.example,services.corp.example \
@@ -163,7 +164,7 @@ Operational notes:
 - `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
 - `--profile` resolves against local AnyConnect XML `HostEntry` values and automatically deduplicates the same server repeated across `/opt/cisco/...` and `~/Downloads/...`.
 - the canonical lifecycle commands are now `start`, `reconnect`, `status`, and `stop`; `run`, `connect`, and `disconnect` remain as compatibility aliases.
-- `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. The preferred shape is `servers.<url>.auth`, so credentials are selected from the server being used. The legacy root-level `auth` block still works as a compatibility fallback. The shipped bootstrap convention is fully keychain-backed: `servers.<url>.auth.username_keychain_account=corp-vpn/username` and `servers.<url>.auth.password_keychain_account=corp-vpn/password`. Plain `username` remains as a compatibility fallback. `totp_secret_keychain_account` stays optional and is intentionally not wired by default.
+- `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. The preferred shape is `servers.<url>.auth`, so credentials are selected from the server being used. The legacy root-level `auth` block still works as a compatibility fallback. The shipped bootstrap convention is fully keychain-backed: `servers.<url>.auth.username_keychain_account=corp-vpn/username` and `servers.<url>.auth.password_keychain_account=corp-vpn/password`. Plain `username` remains as a compatibility fallback. `servers.<url>.auth.second_factor.mode` controls whether the OTP step waits for manual SMS/manual entry or auto-submits TOTP.
 - live auth now defaults to `--auth aggregate`, which is the only path that currently completes the example SSO+CSD flow on this machine; `--auth openconnect` remains available as the direct `openconnect --authenticate` path for debugging. `vpn-auth` is used for the browser-assisted SAML steps in aggregate mode, with preset-cookie support for follow-up pages.
 - `./scripts/setup.sh` now treats the full live runtime as part of the shipped toolchain: it ensures `sing-box` for `vless-tun`, `totp-cli` for `vpn-auth`, builds `desktop/cmd/vpn-auth`, installs the resulting binary into `~/.local/bin`, and `./scripts/deinit.sh` removes that managed binary link again.
 - the CSD helper is resolved from the active OpenConnect install, preferring native Cisco `libcsd.dylib` when it is available under `~/.cisco/...`; otherwise it falls back to Homebrew's stable `opt/openconnect/libexec/openconnect/csd-post.sh` path instead of versioned `Cellar/...` paths. The fallback `csd-post.sh` path is still wrapped with tiny macOS shims for `pidof` and GNU-style `stat -c %Y`.
@@ -212,6 +213,10 @@ Example config:
       "auth": {
         "username_keychain_account": "corp-vpn/username",
         "password_keychain_account": "corp-vpn/password",
+        "second_factor": {
+          "mode": "manual_otp",
+          "totp_secret_keychain_account": "corp-vpn/totp_secret"
+        },
         "fallback_servers": [
           "vpn-gw2-backup.corp.example/outside"
         ]
@@ -279,6 +284,11 @@ Field reference:
 - `default` pairing: these two fields are meant to point at the same configured VPN choice, so the config reads as one default selection instead of separate root-level knobs
 - `servers.<url>`: configuration bucket for one concrete ASA endpoint such as `vpn-gw2.corp.example/outside`
 - `servers.<url>.auth`: preferred auth override for that concrete server. Use this when different ASA endpoints require different keychain entries, usernames, or aggregate-auth fallback behavior
+- `servers.<url>.auth.second_factor.mode`: second-factor behavior for browser-assisted SAML auth. Valid values are `manual_otp` and `totp_auto`.
+- `servers.<url>.auth.second_factor.mode=manual_otp`: auto-fill username/password, then wait for an SMS or other manual one-time code on terminal stdin. `vpn-auth` injects that code into the OTP WebView and submits the form; if the page returns to OTP, enter the next code in the terminal.
+- `servers.<url>.auth.second_factor.mode=totp_auto`: read `second_factor.totp_secret_keychain_account`, generate TOTP, and auto-submit the OTP form. The legacy top-level `totp_secret_keychain_account` is still accepted as a compatibility shorthand for `totp_auto`.
+- `servers.<url>.auth.second_factor.totp_secret_keychain_account`: Keychain account containing the base32 TOTP secret. It can remain present while `mode=manual_otp`, so switching back to `totp_auto` does not require rediscovering the account name.
+- `--second-factor-mode manual_otp|totp_auto`: per-run override for `start` and `reconnect`, useful when the same ASA/SAML flow oscillates between SMS and authenticator TOTP.
 - `servers.<url>.auth.fallback_servers`: aggregate-auth fallback targets for that concrete server. If the initial endpoint or its redirect target returns an auth-request without `sso-v2-login`, the session log records the original request URL, final redirected URL, response summary, and configured fallback selected before retrying. Other request failures are not hidden by this fallback.
 - `servers.<url>.client_mimicry`: optional AnyConnect client identity for that concrete server. It is applied to aggregate-auth init/reply requests and to the final `openconnect` command, so endpoint-specific ASA/LB behavior can be reproduced without provider-specific code.
 - `servers.<url>.client_mimicry.user_agent`: User-Agent for aggregate-auth HTTP requests and `openconnect --useragent`. Defaults to `AnyConnect` when omitted.
