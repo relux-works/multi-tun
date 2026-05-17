@@ -81,8 +81,13 @@ func (a *App) runSetup(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "setup failed: %v\n", err)
+		return 2
+	}
 
-	cfg, err := config.Setup(*configPath, config.SetupOptions{
+	cfg, err := config.Setup(resolvedConfigPath, config.SetupOptions{
 		SourceURL:       *sourceURL,
 		SourceMode:      *sourceMode,
 		ProfileSelector: *profileSelector,
@@ -99,7 +104,7 @@ func (a *App) runSetup(args []string) int {
 		return 1
 	}
 
-	resolvedPath := config.ResolveInitPath(*configPath)
+	resolvedPath := config.ResolveInitPath(resolvedConfigPath)
 	fmt.Fprintf(a.stdout, "configured %s\n", resolvedPath)
 	fmt.Fprintf(a.stdout, "config: %s\n", resolvedPath)
 	if selection.Server != "" {
@@ -129,8 +134,13 @@ func (a *App) runInit(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "init failed: %v\n", err)
+		return 2
+	}
 
-	cfg, err := config.Init(*configPath, *subscriptionURL, *force)
+	cfg, err := config.Init(resolvedConfigPath, *subscriptionURL, *force)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "init failed: %v\n", err)
 		return 1
@@ -141,7 +151,7 @@ func (a *App) runInit(args []string) int {
 		return 1
 	}
 
-	fmt.Fprintf(a.stdout, "initialized %s\n", config.ResolveInitPath(*configPath))
+	fmt.Fprintf(a.stdout, "initialized %s\n", config.ResolveInitPath(resolvedConfigPath))
 	if strings.Contains(effective.SourceURL(), "REPLACE_ME") {
 		fmt.Fprintln(a.stdout, "source.url still has placeholder value; edit the file or rerun with --subscription-url")
 	}
@@ -157,8 +167,13 @@ func (a *App) runRefresh(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "refresh failed: %v\n", err)
+		return 2
+	}
 
-	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
 		Server: *serverName,
 	})
 	if err != nil {
@@ -190,8 +205,13 @@ func (a *App) runList(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "list failed: %v\n", err)
+		return 2
+	}
 
-	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
 		Server: *serverName,
 	})
 	if err != nil {
@@ -228,8 +248,13 @@ func (a *App) runRender(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
+		return 2
+	}
 
-	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
 		Server:   *serverName,
 		Profile:  *profileName,
 		Selector: *profileSelector,
@@ -320,21 +345,53 @@ func loadEffectiveConfig(configPath string, options config.SelectionOptions) (co
 	return effective, selection, nil
 }
 
+func commandConfigPath(flagValue string, args []string) (string, error) {
+	if len(args) == 0 {
+		return flagValue, nil
+	}
+	if len(args) > 1 {
+		return "", fmt.Errorf("unexpected argument %q; pass flags before the config argument", args[1])
+	}
+	if strings.TrimSpace(flagValue) != "" {
+		return "", errors.New("config path specified both with --config and positional argument")
+	}
+	return resolvePositionalConfigPath(args[0]), nil
+}
+
+func resolvePositionalConfigPath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+
+	candidate := filepath.Join(filepath.Dir(config.DefaultPath()), path)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	if filepath.Ext(path) == "" {
+		return candidate + ".json"
+	}
+	return candidate
+}
+
 func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "vless-tun manages DenseVPN subscriptions and renders sing-box configs.")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
-	fmt.Fprintln(a.stdout, "  vless-tun setup [--config path] [--server name] [--config-profile name] [--source-url URL] [--source-mode proxy|direct] [--profile selector] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun init [--config path] [--subscription-url URL] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path] [--server name]")
-	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--server name] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--server name] [--profile name] [--selector selector] [--output path] [--refresh] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--server name] [--profile name] [--selector selector] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun diagnose [--config path] [--server name]")
-	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [--server name] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun setup [--config path | config] [--server name] [--config-profile name] [--source-url URL] [--source-mode proxy|direct] [--profile selector] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun init [--config path | config] [--subscription-url URL] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path | config] [--server name]")
+	fmt.Fprintln(a.stdout, "  vless-tun list [--config path | config] [--server name] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun start [--config path | config] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path | config] [--server name] [--profile name] [--selector selector] [--output path] [--refresh] [--timeout duration] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun status [--config path | config] [--server name] [--profile name] [--selector selector] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun diagnose [--config path | config] [--server name]")
+	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path | config] [--server name] [--timeout duration] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun render [--config path | config] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
 	fmt.Fprintln(a.stdout, "  run -> start")
+	fmt.Fprintln(a.stdout)
+	fmt.Fprintln(a.stdout, "Config:")
+	fmt.Fprintln(a.stdout, "  With no config argument, vless-tun uses ~/.config/vless-tun/config.json.")
+	fmt.Fprintln(a.stdout, "  Positional relative config names resolve inside ~/.config/vless-tun; names without an extension try .json.")
 }
