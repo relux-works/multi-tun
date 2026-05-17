@@ -19,12 +19,19 @@ func (a *App) runStatus(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
+	serverName := fs.String("server", "", "Configured VLESS server name")
+	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
 	refresh := fs.Bool("refresh", false, "Fetch subscription before reading status")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+		Server:   *serverName,
+		Profile:  *profileName,
+		Selector: *profileSelector,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
 		return 1
@@ -46,6 +53,12 @@ func (a *App) runStatus(args []string) int {
 
 	fmt.Fprintf(a.stdout, "connection: %s\n", connection)
 	fmt.Fprintf(a.stdout, "mode: %s\n", mode)
+	if selection.Server != "" {
+		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
+	}
+	if selection.Profile != "" {
+		fmt.Fprintf(a.stdout, "config_profile: %s\n", selection.Profile)
+	}
 	fmt.Fprintf(a.stdout, "session: %s\n", currentState)
 	if sessionErr != nil {
 		fmt.Fprintf(a.stdout, "session_error: %v\n", sessionErr)

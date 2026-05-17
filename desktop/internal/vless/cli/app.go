@@ -74,6 +74,8 @@ func (a *App) runSetup(args []string) int {
 	sourceURL := fs.String("source-url", os.Getenv("DANCEVPN_SUBSCRIPTION_URL"), "VLESS source URL or literal vless:// URI")
 	sourceMode := fs.String("source-mode", "", "Optional source mode override: proxy or direct")
 	profileSelector := fs.String("profile", "", "Optional default profile selector by id, name, or substring")
+	serverName := fs.String("server", "default", "Configured VLESS server name to create")
+	configProfile := fs.String("config-profile", "default", "Configured VLESS profile alias to create")
 	force := fs.Bool("force", false, "Overwrite config if it already exists")
 
 	if err := fs.Parse(args); err != nil {
@@ -84,7 +86,14 @@ func (a *App) runSetup(args []string) int {
 		SourceURL:       *sourceURL,
 		SourceMode:      *sourceMode,
 		ProfileSelector: *profileSelector,
+		ServerName:      *serverName,
+		ConfigProfile:   *configProfile,
 	}, *force)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "setup failed: %v\n", err)
+		return 1
+	}
+	effective, selection, err := cfg.Effective(config.SelectionOptions{})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "setup failed: %v\n", err)
 		return 1
@@ -93,11 +102,17 @@ func (a *App) runSetup(args []string) int {
 	resolvedPath := config.ResolveInitPath(*configPath)
 	fmt.Fprintf(a.stdout, "configured %s\n", resolvedPath)
 	fmt.Fprintf(a.stdout, "config: %s\n", resolvedPath)
-	fmt.Fprintf(a.stdout, "source_mode: %s\n", cfg.SourceMode())
-	if cfg.DefaultProfileSelector() != "" {
-		fmt.Fprintf(a.stdout, "default_profile_selector: %s\n", cfg.DefaultProfileSelector())
+	if selection.Server != "" {
+		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
 	}
-	if strings.Contains(cfg.SourceURL(), "REPLACE_ME") {
+	if selection.Profile != "" {
+		fmt.Fprintf(a.stdout, "config_profile: %s\n", selection.Profile)
+	}
+	fmt.Fprintf(a.stdout, "source_mode: %s\n", effective.SourceMode())
+	if effective.DefaultProfileSelector() != "" {
+		fmt.Fprintf(a.stdout, "default_profile_selector: %s\n", effective.DefaultProfileSelector())
+	}
+	if strings.Contains(effective.SourceURL(), "REPLACE_ME") {
 		fmt.Fprintln(a.stdout, "source.url still has placeholder value; edit the file or rerun with --source-url")
 	}
 	return 0
@@ -120,9 +135,14 @@ func (a *App) runInit(args []string) int {
 		fmt.Fprintf(a.stderr, "init failed: %v\n", err)
 		return 1
 	}
+	effective, _, err := cfg.Effective(config.SelectionOptions{})
+	if err != nil {
+		fmt.Fprintf(a.stderr, "init failed: %v\n", err)
+		return 1
+	}
 
 	fmt.Fprintf(a.stdout, "initialized %s\n", config.ResolveInitPath(*configPath))
-	if strings.Contains(cfg.SourceURL(), "REPLACE_ME") {
+	if strings.Contains(effective.SourceURL(), "REPLACE_ME") {
 		fmt.Fprintln(a.stdout, "source.url still has placeholder value; edit the file or rerun with --subscription-url")
 	}
 	return 0
@@ -133,11 +153,14 @@ func (a *App) runRefresh(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
+	serverName := fs.String("server", "", "Configured VLESS server name")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+		Server: *serverName,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "refresh failed: %v\n", err)
 		return 1
@@ -149,6 +172,9 @@ func (a *App) runRefresh(args []string) int {
 		return 1
 	}
 
+	if selection.Server != "" {
+		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
+	}
 	fmt.Fprintf(a.stdout, "refreshed %d profile(s) from %s\n", len(snapshot.Profiles), snapshot.SourceURL)
 	fmt.Fprintf(a.stdout, "payload=%s cache=%s\n", snapshot.PayloadFormat, filepath.Join(cfg.CacheDir, "snapshot.json"))
 	return 0
@@ -159,12 +185,15 @@ func (a *App) runList(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
+	serverName := fs.String("server", "", "Configured VLESS server name")
 	refresh := fs.Bool("refresh", false, "Fetch subscription before listing cached profiles")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+		Server: *serverName,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "list failed: %v\n", err)
 		return 1
@@ -176,6 +205,9 @@ func (a *App) runList(args []string) int {
 		return 1
 	}
 
+	if selection.Server != "" {
+		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
+	}
 	for idx, profile := range snapshot.Profiles {
 		fmt.Fprintf(a.stdout, "%d. %s | %s | %s | %s\n", idx+1, profile.ID, profile.DisplayName(), profile.Endpoint(), profile.Network)
 	}
@@ -187,7 +219,9 @@ func (a *App) runRender(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
-	profileSelector := fs.String("profile", "", "Profile selector by id, name, or substring")
+	serverName := fs.String("server", "", "Configured VLESS server name")
+	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
 	outputPath := fs.String("output", "", "Override render.output_path")
 	refresh := fs.Bool("refresh", false, "Fetch subscription before rendering")
 
@@ -195,7 +229,11 @@ func (a *App) runRender(args []string) int {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+		Server:   *serverName,
+		Profile:  *profileName,
+		Selector: *profileSelector,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1
@@ -207,12 +245,7 @@ func (a *App) runRender(args []string) int {
 		return 1
 	}
 
-	selector := *profileSelector
-	if selector == "" {
-		selector = cfg.DefaultProfileSelector()
-	}
-
-	profile, err := subscription.SelectProfile(snapshot.Profiles, selector)
+	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.DefaultProfileSelector())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1
@@ -233,6 +266,12 @@ func (a *App) runRender(args []string) int {
 		return 1
 	}
 
+	if selection.Server != "" {
+		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
+	}
+	if selection.Profile != "" {
+		fmt.Fprintf(a.stdout, "config_profile: %s\n", selection.Profile)
+	}
 	fmt.Fprintf(a.stdout, "rendered %s using profile %s (%s)\n", target, profile.DisplayName(), profile.ID)
 	return 0
 }
@@ -266,20 +305,35 @@ func loadConfig(configPath string) (config.ProjectConfig, error) {
 	return config.ProjectConfig{}, err
 }
 
+func loadEffectiveConfig(configPath string, options config.SelectionOptions) (config.ProjectConfig, config.EffectiveSelection, error) {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return config.ProjectConfig{}, config.EffectiveSelection{}, err
+	}
+	effective, selection, err := cfg.Effective(options)
+	if err != nil {
+		return config.ProjectConfig{}, config.EffectiveSelection{}, err
+	}
+	if err := effective.Validate(); err != nil {
+		return config.ProjectConfig{}, config.EffectiveSelection{}, err
+	}
+	return effective, selection, nil
+}
+
 func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "vless-tun manages DenseVPN subscriptions and renders sing-box configs.")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
-	fmt.Fprintln(a.stdout, "  vless-tun setup [--config path] [--source-url URL] [--source-mode proxy|direct] [--profile selector] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun setup [--config path] [--server name] [--config-profile name] [--source-url URL] [--source-mode proxy|direct] [--profile selector] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun init [--config path] [--subscription-url URL] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path]")
-	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--profile selector] [--output path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--profile selector] [--output path] [--refresh] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun diagnose [--config path]")
-	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--profile selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path] [--server name]")
+	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--server name] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--server name] [--profile name] [--selector selector] [--output path] [--refresh] [--timeout duration] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--server name] [--profile name] [--selector selector] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun diagnose [--config path] [--server name]")
+	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [--server name] [--timeout duration] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
 	fmt.Fprintln(a.stdout, "  run -> start")

@@ -161,11 +161,17 @@ func TestSetupWritesPreferredFields(t *testing.T) {
 	if got, want := cfg.NetworkMode(), RenderModeTun; got != want {
 		t.Fatalf("NetworkMode() = %q, want %q", got, want)
 	}
-	if cfg.Default == nil {
-		t.Fatal("Default = nil, want profile selector")
+	if cfg.Current == nil {
+		t.Fatal("Current = nil, want server/profile selection")
 	}
-	if got, want := cfg.Default.ProfileSelector, "demo"; got != want {
-		t.Fatalf("Default.ProfileSelector = %q, want %q", got, want)
+	if got, want := cfg.Current.Server, "default"; got != want {
+		t.Fatalf("Current.Server = %q, want %q", got, want)
+	}
+	if got, want := cfg.Current.Profile, "default"; got != want {
+		t.Fatalf("Current.Profile = %q, want %q", got, want)
+	}
+	if cfg.Servers["default"].Profiles["default"].Selector != "demo" {
+		t.Fatalf("default profile selector = %q, want demo", cfg.Servers["default"].Profiles["default"].Selector)
 	}
 
 	loaded, err := Load(path)
@@ -181,6 +187,88 @@ func TestSetupWritesPreferredFields(t *testing.T) {
 	if got, want := loaded.NetworkMode(), RenderModeTun; got != want {
 		t.Fatalf("NetworkMode() = %q, want %q", got, want)
 	}
+}
+
+func TestEffectiveServerProfileMergesRoutingOverrides(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Current = &CurrentConfig{
+		Server:  "fortinetz",
+		Profile: "de",
+	}
+	cfg.Servers = map[string]ServerConfig{
+		"fortinetz": {
+			Source: SourceConfig{
+				Mode: SourceModeProxy,
+				URL:  "https://example.com/fortinetz",
+			},
+			CacheDir: "/tmp/fortinetz-cache",
+			Artifacts: &ArtifactsConfig{
+				SingboxConfigPath: "/tmp/fortinetz.json",
+			},
+			Routing: &RoutingConfig{
+				BypassSuffixes: []string{".ru"},
+				Routes:         []string{"10.0.0.0/8"},
+			},
+			Profiles: map[string]ProfileConfig{
+				"de": {
+					Selector: "Germany",
+					Routing: &RoutingConfig{
+						BypassExcludes: []string{"t.me"},
+						Routes:         []string{"172.16.0.0/12"},
+					},
+				},
+			},
+		},
+	}
+
+	effective, selection, err := cfg.Effective(SelectionOptions{})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if !selection.UsesServerModel {
+		t.Fatal("UsesServerModel = false, want true")
+	}
+	if got, want := selection.Server, "fortinetz"; got != want {
+		t.Fatalf("selection.Server = %q, want %q", got, want)
+	}
+	if got, want := selection.Profile, "de"; got != want {
+		t.Fatalf("selection.Profile = %q, want %q", got, want)
+	}
+	if got, want := effective.SourceURL(), "https://example.com/fortinetz"; got != want {
+		t.Fatalf("SourceURL() = %q, want %q", got, want)
+	}
+	if got, want := effective.CacheDir, "/tmp/fortinetz-cache"; got != want {
+		t.Fatalf("CacheDir = %q, want %q", got, want)
+	}
+	if got, want := effective.SingboxConfigPath(), "/tmp/fortinetz.json"; got != want {
+		t.Fatalf("SingboxConfigPath() = %q, want %q", got, want)
+	}
+	if got, want := effective.DefaultProfileSelector(), "Germany"; got != want {
+		t.Fatalf("DefaultProfileSelector() = %q, want %q", got, want)
+	}
+	if got, want := effective.NormalizedBypassSuffixes(), []string{".ru"}; !equalStrings(got, want) {
+		t.Fatalf("NormalizedBypassSuffixes() = %v, want %v", got, want)
+	}
+	if got, want := effective.NormalizedBypassExcludes(), []string{"t.me"}; !equalStrings(got, want) {
+		t.Fatalf("NormalizedBypassExcludes() = %v, want %v", got, want)
+	}
+	if got, want := effective.NormalizedRoutes(), []string{"172.16.0.0/12"}; !equalStrings(got, want) {
+		t.Fatalf("NormalizedRoutes() = %v, want %v", got, want)
+	}
+}
+
+func equalStrings(got []string, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for idx := range got {
+		if got[idx] != want[idx] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestValidateRejectsLegacySystemProxyMode(t *testing.T) {

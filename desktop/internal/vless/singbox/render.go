@@ -33,6 +33,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 	mode := cfg.NetworkMode()
 	bypassSuffixes := cfg.NormalizedBypassSuffixes()
 	bypassExcludes := cfg.NormalizedBypassExcludes()
+	directRoutes := cfg.NormalizedRoutes()
 	overlayDNS := normalizeOverlayDNS(options.OverlayDNS)
 	useOverlayDNS := mode == config.RenderModeTun && overlayDNS != nil
 	proxyResolver := cfg.ProxyResolver()
@@ -56,6 +57,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 
 	useBypassRules := len(bypassSuffixes) > 0
 	useBypassExcludes := len(bypassExcludes) > 0
+	useDirectRoutes := len(directRoutes) > 0
 	useBypassDNSRules := mode == config.RenderModeTun && useBypassRules
 	useBypassExcludeDNSRules := mode == config.RenderModeTun && useBypassExcludes
 	directDomainResolver := "dns-direct"
@@ -164,6 +166,23 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 			"rule_set": []string{"proxy-exceptions"},
 			"action":   "route",
 			"outbound": "proxy",
+		})
+	}
+
+	if useDirectRoutes {
+		routeRuleSet = append(routeRuleSet, map[string]any{
+			"type": "inline",
+			"tag":  "direct-routes",
+			"rules": []any{
+				map[string]any{
+					"ip_cidr": directRoutes,
+				},
+			},
+		})
+		routeRules = append(routeRules, map[string]any{
+			"rule_set": []string{"direct-routes"},
+			"action":   "route",
+			"outbound": "direct",
 		})
 	}
 

@@ -224,6 +224,54 @@ func TestRenderWithoutBypasses(t *testing.T) {
 	}
 }
 
+func TestRenderAddsDirectRouteCIDRs(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "fixtures", "dancevpn.subscription.plain.txt"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	profiles, err := subscription.ParseProfiles(string(raw))
+	if err != nil {
+		t.Fatalf("ParseProfiles returned error: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Routing.Routes = []string{"10.0.0.0/8", "172.16.0.0/12"}
+
+	data, err := Render(cfg, profiles[0])
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+
+	route := root["route"].(map[string]any)
+	ruleSet := route["rule_set"].([]any)
+	var directRoutes map[string]any
+	for _, item := range ruleSet {
+		entry := item.(map[string]any)
+		if entry["tag"] == "direct-routes" {
+			directRoutes = entry
+			break
+		}
+	}
+	if directRoutes == nil {
+		t.Fatalf("route.rule_set = %#v, want direct-routes entry", ruleSet)
+	}
+	rules := directRoutes["rules"].([]any)
+	ipCIDRs := rules[0].(map[string]any)["ip_cidr"].([]any)
+	for _, want := range []string{"10.0.0.0/8", "172.16.0.0/12"} {
+		if !containsAnyString(ipCIDRs, want) {
+			t.Fatalf("direct-routes ip_cidr = %#v, want %q", ipCIDRs, want)
+		}
+	}
+}
+
 func containsAnyString(items []any, want string) bool {
 	for _, item := range items {
 		if got, ok := item.(string); ok && got == want {
