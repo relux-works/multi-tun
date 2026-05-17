@@ -32,6 +32,8 @@ func (a *App) Run(args []string) int {
 		return a.runUninstall(args[1:])
 	case "status":
 		return a.runStatus(args[1:])
+	case "inspect-vless-url":
+		return a.runInspectVLESSURL(args[1:])
 	case "_daemon":
 		return a.runDaemon(args[1:])
 	case "help", "--help", "-h":
@@ -149,6 +151,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  vpn-core install")
 	fmt.Fprintln(a.stdout, "  vpn-core uninstall")
 	fmt.Fprintln(a.stdout, "  vpn-core status")
+	fmt.Fprintln(a.stdout, "  vpn-core inspect-vless-url [--source-mode proxy|direct] [--insecure] [--host name] [--tls-server-name name] URL")
 }
 
 func resolveExecutablePath() (string, error) {
