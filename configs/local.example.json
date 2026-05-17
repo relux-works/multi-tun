@@ -1,11 +1,38 @@
 {
-  "cache_dir": ".cache/vpn-config",
-  "source": {
-    "mode": "proxy",
-    "url": "https://key.vpn.dance/connect?key=REPLACE_ME"
+  "current": {
+    "server": "dance",
+    "profile": "default"
   },
-  "default": {
-    "profile_selector": ""
+  "servers": {
+    "dance": {
+      "source": {
+        "mode": "proxy",
+        "url": "https://key.vpn.dance/connect?key=REPLACE_ME"
+      },
+      "cache_dir": ".cache/vless-tun/dance",
+      "artifacts": {
+        "singbox_config_path": "configs/generated/sing-box_dance.json"
+      },
+      "routing": {
+        "bypass_suffixes": [
+          ".ru",
+          ".рф"
+        ],
+        "bypass_exclude_suffixes": [
+          ".telegram.org",
+          "t.me",
+          ".telegram.me",
+          ".telegra.ph",
+          ".telesco.pe"
+        ],
+        "routes": []
+      },
+      "profiles": {
+        "default": {
+          "selector": ""
+        }
+      }
+    }
   },
   "network": {
     "mode": "tun",
@@ -17,12 +44,6 @@
       ]
     }
   },
-  "routing": {
-    "bypass_suffixes": [
-      ".ru",
-      ".рф"
-    ]
-  },
   "dns": {
     "proxy_resolver": {
       "address": "1.1.1.1",
@@ -32,8 +53,5 @@
   },
   "logging": {
     "level": "info"
-  },
-  "artifacts": {
-    "singbox_config_path": "configs/generated/dancevpn-sing-box.json"
   }
 }

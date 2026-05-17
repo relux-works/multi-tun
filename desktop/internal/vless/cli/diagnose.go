@@ -14,11 +14,14 @@ func (a *App) runDiagnose(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
+	serverName := fs.String("server", "", "Configured VLESS server name")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+		Server: *serverName,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "diagnose failed: %v\n", err)
 		return 1
@@ -26,6 +29,9 @@ func (a *App) runDiagnose(args []string) int {
 
 	launchCfg := cfg.LaunchOrDefault()
 	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.NetworkMode())
+	if selection.Server != "" {
+		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
+	}
 	fmt.Fprintf(a.stdout, "configured_launch_mode: %s\n", launchCfg.Mode)
 	if launchCfg.Mode == config.LaunchModeHelper || launchCfg.Mode == config.LaunchModeLaunchd {
 		coreCfg := vpncore.DefaultServiceConfig()

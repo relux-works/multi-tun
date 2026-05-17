@@ -27,15 +27,17 @@ const (
 )
 
 type ProjectConfig struct {
-	CacheDir  string          `json:"cache_dir"`
-	Source    SourceConfig    `json:"source,omitempty"`
-	Default   *DefaultConfig  `json:"default,omitempty"`
-	Network   NetworkConfig   `json:"network,omitempty"`
-	Launch    *LaunchConfig   `json:"launch,omitempty"`
-	Routing   RoutingConfig   `json:"routing,omitempty"`
-	DNS       DNSConfig       `json:"dns,omitempty"`
-	Logging   LoggingConfig   `json:"logging,omitempty"`
-	Artifacts ArtifactsConfig `json:"artifacts,omitempty"`
+	Current   *CurrentConfig          `json:"current,omitempty"`
+	Servers   map[string]ServerConfig `json:"servers,omitempty"`
+	CacheDir  string                  `json:"cache_dir,omitempty"`
+	Source    SourceConfig            `json:"source,omitempty"`
+	Default   *DefaultConfig          `json:"default,omitempty"`
+	Network   NetworkConfig           `json:"network,omitempty"`
+	Launch    *LaunchConfig           `json:"launch,omitempty"`
+	Routing   RoutingConfig           `json:"routing,omitempty"`
+	DNS       DNSConfig               `json:"dns,omitempty"`
+	Logging   LoggingConfig           `json:"logging,omitempty"`
+	Artifacts ArtifactsConfig         `json:"artifacts,omitempty"`
 
 	SubscriptionURL string        `json:"subscription_url,omitempty"`
 	SelectedProfile string        `json:"selected_profile,omitempty"`
@@ -46,6 +48,40 @@ type SetupOptions struct {
 	SourceURL       string
 	SourceMode      string
 	ProfileSelector string
+	ServerName      string
+	ConfigProfile   string
+}
+
+type SelectionOptions struct {
+	Server   string
+	Profile  string
+	Selector string
+}
+
+type EffectiveSelection struct {
+	Server          string
+	Profile         string
+	Selector        string
+	UsesServerModel bool
+}
+
+type CurrentConfig struct {
+	Server  string `json:"server,omitempty"`
+	Profile string `json:"profile,omitempty"`
+}
+
+type ServerConfig struct {
+	Source    SourceConfig             `json:"source,omitempty"`
+	CacheDir  string                   `json:"cache_dir,omitempty"`
+	Artifacts *ArtifactsConfig         `json:"artifacts,omitempty"`
+	Routing   *RoutingConfig           `json:"routing,omitempty"`
+	Profiles  map[string]ProfileConfig `json:"profiles,omitempty"`
+}
+
+type ProfileConfig struct {
+	Selector        string         `json:"selector,omitempty"`
+	ProfileSelector string         `json:"profile_selector,omitempty"`
+	Routing         *RoutingConfig `json:"routing,omitempty"`
 }
 
 type SourceConfig struct {
@@ -70,6 +106,7 @@ type TUNConfig struct {
 type RoutingConfig struct {
 	BypassSuffixes []string `json:"bypass_suffixes,omitempty"`
 	BypassExcludes []string `json:"bypass_exclude_suffixes,omitempty"`
+	Routes         []string `json:"routes,omitempty"`
 }
 
 type DNSConfig struct {
@@ -234,6 +271,7 @@ func Setup(path string, options SetupOptions, force bool) (ProjectConfig, error)
 	if selector := strings.TrimSpace(options.ProfileSelector); selector != "" {
 		cfg.Default = &DefaultConfig{ProfileSelector: selector}
 	}
+	cfg = cfg.withDefaultServerProfile(options)
 	if err := cfg.Validate(); err != nil {
 		return ProjectConfig{}, err
 	}
@@ -244,6 +282,43 @@ func Setup(path string, options SetupOptions, force bool) (ProjectConfig, error)
 		return ProjectConfig{}, err
 	}
 	return cfg, nil
+}
+
+func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectConfig {
+	serverName := firstNonEmpty(options.ServerName, "default")
+	profileName := firstNonEmpty(options.ConfigProfile, "default")
+	selector := c.legacyDefaultProfileSelector()
+
+	artifacts := c.Artifacts
+	routing := c.Routing
+	profile := ProfileConfig{
+		Selector: selector,
+	}
+
+	c.Current = &CurrentConfig{
+		Server:  serverName,
+		Profile: profileName,
+	}
+	c.Servers = map[string]ServerConfig{
+		serverName: {
+			Source:    c.Source,
+			CacheDir:  c.CacheDir,
+			Artifacts: &artifacts,
+			Routing:   &routing,
+			Profiles: map[string]ProfileConfig{
+				profileName: profile,
+			},
+		},
+	}
+	c.CacheDir = ""
+	c.Source = SourceConfig{}
+	c.Default = nil
+	c.Routing = RoutingConfig{}
+	c.Artifacts = ArtifactsConfig{}
+	c.SubscriptionURL = ""
+	c.SelectedProfile = ""
+	c.Render = nil
+	return c
 }
 
 func ResolveLoadPath(path string) (string, error) {
@@ -278,6 +353,14 @@ func ResolveInitPath(path string) string {
 }
 
 func (c ProjectConfig) Validate() error {
+	effective, _, err := c.Effective(SelectionOptions{})
+	if err != nil {
+		return err
+	}
+	return effective.validateFlat()
+}
+
+func (c ProjectConfig) validateFlat() error {
 	if c.SourceURL() == "" {
 		return errors.New("source.url is required")
 	}
@@ -325,6 +408,163 @@ func (c ProjectConfig) Validate() error {
 	return nil
 }
 
+func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, EffectiveSelection, error) {
+	if len(c.Servers) == 0 {
+		effective := c
+		selector := firstNonEmpty(options.Selector, options.Profile, c.legacyDefaultProfileSelector())
+		effective.setDefaultProfileSelector(selector)
+		return effective, EffectiveSelection{
+			Selector: selector,
+		}, nil
+	}
+
+	serverName, serverCfg, err := c.resolveServerConfig(options.Server)
+	if err != nil {
+		return ProjectConfig{}, EffectiveSelection{}, err
+	}
+	profileName, profileCfg, hasProfile, err := c.resolveProfileConfig(serverCfg, options.Profile)
+	if err != nil {
+		return ProjectConfig{}, EffectiveSelection{}, err
+	}
+
+	effective := c
+	effective.Current = nil
+	effective.Servers = nil
+	effective.Source = mergeSourceConfig(c.Source, serverCfg.Source)
+	effective.CacheDir = firstNonEmpty(serverCfg.CacheDir, c.CacheDir)
+	effective.Artifacts = mergeArtifactsConfig(c.Artifacts, serverCfg.Artifacts)
+	effective.Routing = mergeRoutingConfig(c.Routing, serverCfg.Routing)
+
+	selector := firstNonEmpty(options.Selector, c.legacyDefaultProfileSelector())
+	if hasProfile {
+		effective.Routing = mergeRoutingConfig(effective.Routing, profileCfg.Routing)
+		selector = firstNonEmpty(options.Selector, profileCfg.Selector, profileCfg.ProfileSelector, c.legacyDefaultProfileSelector())
+	}
+	effective.setDefaultProfileSelector(selector)
+
+	return effective, EffectiveSelection{
+		Server:          serverName,
+		Profile:         profileName,
+		Selector:        selector,
+		UsesServerModel: true,
+	}, nil
+}
+
+func (c ProjectConfig) resolveServerConfig(override string) (string, ServerConfig, error) {
+	name := firstNonEmpty(override, currentServerName(c.Current))
+	if name != "" {
+		server, ok := c.Servers[name]
+		if !ok {
+			return "", ServerConfig{}, errors.New("selected server " + name + " is not configured")
+		}
+		return name, server, nil
+	}
+	if len(c.Servers) == 1 {
+		for onlyName, server := range c.Servers {
+			return onlyName, server, nil
+		}
+	}
+	return "", ServerConfig{}, errors.New("current.server is required when multiple vless servers are configured")
+}
+
+func (c ProjectConfig) resolveProfileConfig(server ServerConfig, override string) (string, ProfileConfig, bool, error) {
+	if len(server.Profiles) == 0 {
+		return "", ProfileConfig{}, false, nil
+	}
+
+	name := firstNonEmpty(override, currentProfileName(c.Current))
+	if name != "" {
+		profile, ok := server.Profiles[name]
+		if !ok {
+			return "", ProfileConfig{}, false, errors.New("selected profile " + name + " is not configured for selected server")
+		}
+		return name, profile, true, nil
+	}
+	if len(server.Profiles) == 1 {
+		for onlyName, profile := range server.Profiles {
+			return onlyName, profile, true, nil
+		}
+	}
+	return "", ProfileConfig{}, false, errors.New("current.profile is required when selected vless server has multiple profiles")
+}
+
+func currentServerName(current *CurrentConfig) string {
+	if current == nil {
+		return ""
+	}
+	return strings.TrimSpace(current.Server)
+}
+
+func currentProfileName(current *CurrentConfig) string {
+	if current == nil {
+		return ""
+	}
+	return strings.TrimSpace(current.Profile)
+}
+
+func mergeSourceConfig(base SourceConfig, override SourceConfig) SourceConfig {
+	result := base
+	if mode := strings.TrimSpace(override.Mode); mode != "" {
+		result.Mode = mode
+	}
+	if url := strings.TrimSpace(override.URL); url != "" {
+		result.URL = url
+	}
+	return result
+}
+
+func mergeArtifactsConfig(base ArtifactsConfig, override *ArtifactsConfig) ArtifactsConfig {
+	if override == nil {
+		return base
+	}
+	result := base
+	if path := strings.TrimSpace(override.SingboxConfigPath); path != "" {
+		result.SingboxConfigPath = path
+	}
+	return result
+}
+
+func mergeRoutingConfig(base RoutingConfig, override *RoutingConfig) RoutingConfig {
+	if override == nil {
+		return base
+	}
+	result := base
+	if override.BypassSuffixes != nil {
+		result.BypassSuffixes = cloneStrings(override.BypassSuffixes)
+	}
+	if override.BypassExcludes != nil {
+		result.BypassExcludes = cloneStrings(override.BypassExcludes)
+	}
+	if override.Routes != nil {
+		result.Routes = cloneStrings(override.Routes)
+	}
+	return result
+}
+
+func (c ProjectConfig) legacyDefaultProfileSelector() string {
+	if c.Default != nil {
+		if selector := strings.TrimSpace(c.Default.ProfileSelector); selector != "" {
+			return selector
+		}
+	}
+	return strings.TrimSpace(c.SelectedProfile)
+}
+
+func (c *ProjectConfig) setDefaultProfileSelector(selector string) {
+	selector = strings.TrimSpace(selector)
+	c.SelectedProfile = ""
+	if selector == "" {
+		if c.Default != nil {
+			c.Default.ProfileSelector = ""
+		}
+		return
+	}
+	if c.Default == nil {
+		c.Default = &DefaultConfig{}
+	}
+	c.Default.ProfileSelector = selector
+}
+
 func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
 	if !filepath.IsAbs(c.CacheDir) {
 		c.CacheDir = filepath.Join(baseDir, c.CacheDir)
@@ -337,13 +577,30 @@ func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
 			c.Render.OutputPath = filepath.Join(baseDir, path)
 		}
 	}
+	for name, server := range c.Servers {
+		if server.CacheDir != "" && !filepath.IsAbs(server.CacheDir) {
+			server.CacheDir = filepath.Join(baseDir, server.CacheDir)
+		}
+		if server.Artifacts != nil {
+			if path := strings.TrimSpace(server.Artifacts.SingboxConfigPath); path != "" && !filepath.IsAbs(path) {
+				server.Artifacts.SingboxConfigPath = filepath.Join(baseDir, path)
+			}
+		}
+		c.Servers[name] = server
+	}
 }
 
 func (c ProjectConfig) SourceURL() string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.SourceURL()
+	}
 	return firstNonEmpty(strings.TrimSpace(c.Source.URL), strings.TrimSpace(c.SubscriptionURL))
 }
 
 func (c ProjectConfig) SourceMode() string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.SourceMode()
+	}
 	mode := strings.TrimSpace(strings.ToLower(c.Source.Mode))
 	if mode != "" {
 		return mode
@@ -352,12 +609,10 @@ func (c ProjectConfig) SourceMode() string {
 }
 
 func (c ProjectConfig) DefaultProfileSelector() string {
-	if c.Default != nil {
-		if selector := strings.TrimSpace(c.Default.ProfileSelector); selector != "" {
-			return selector
-		}
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.DefaultProfileSelector()
 	}
-	return strings.TrimSpace(c.SelectedProfile)
+	return c.legacyDefaultProfileSelector()
 }
 
 func (c ProjectConfig) NetworkMode() string {
@@ -371,6 +626,9 @@ func (c ProjectConfig) NetworkMode() string {
 }
 
 func (c ProjectConfig) SingboxConfigPath() string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.SingboxConfigPath()
+	}
 	return firstNonEmpty(strings.TrimSpace(c.Artifacts.SingboxConfigPath), c.legacyRenderOutputPath())
 }
 
@@ -393,6 +651,9 @@ func (c ProjectConfig) LogLevel() string {
 }
 
 func (c ProjectConfig) BypassSuffixes() []string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.BypassSuffixes()
+	}
 	if c.Routing.BypassSuffixes != nil {
 		return cloneStrings(c.Routing.BypassSuffixes)
 	}
@@ -403,6 +664,9 @@ func (c ProjectConfig) BypassSuffixes() []string {
 }
 
 func (c ProjectConfig) BypassExcludes() []string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.BypassExcludes()
+	}
 	if c.Routing.BypassExcludes != nil {
 		return cloneStrings(c.Routing.BypassExcludes)
 	}
@@ -412,12 +676,37 @@ func (c ProjectConfig) BypassExcludes() []string {
 	return nil
 }
 
+func (c ProjectConfig) Routes() []string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.Routes()
+	}
+	if c.Routing.Routes != nil {
+		return cloneStrings(c.Routing.Routes)
+	}
+	return nil
+}
+
+func (c ProjectConfig) effectiveFromServers() (ProjectConfig, bool) {
+	if len(c.Servers) == 0 {
+		return ProjectConfig{}, false
+	}
+	effective, _, err := c.Effective(SelectionOptions{})
+	if err != nil {
+		return ProjectConfig{}, false
+	}
+	return effective, true
+}
+
 func (c ProjectConfig) NormalizedBypassSuffixes() []string {
 	return normalizeSuffixes(c.BypassSuffixes())
 }
 
 func (c ProjectConfig) NormalizedBypassExcludes() []string {
 	return normalizeSuffixes(c.BypassExcludes())
+}
+
+func (c ProjectConfig) NormalizedRoutes() []string {
+	return normalizeRoutes(c.Routes())
 }
 
 func (c ProjectConfig) ProxyResolver() ProxyDNSConfig {
@@ -480,6 +769,23 @@ func normalizeSuffix(value string) string {
 		return ".xn--p1ai"
 	}
 	return value
+}
+
+func normalizeRoutes(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func writeJSON(path string, value any) error {

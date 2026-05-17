@@ -33,7 +33,8 @@ Build local CLIs and agent guidance that can:
 ### Profile Model
 
 - Extract profile name, host, port, UUID, network type, TLS/Reality settings, and transport details.
-- Select a profile by explicit selector or default to the first one.
+- Select an active configured server/profile through `current.server` and `current.profile`, with CLI overrides for `--server`, `--profile`, and direct subscription `--selector`.
+- Keep remote VLESS profiles in the refresh cache; config profile entries are local aliases/selectors plus routing policy, not copied subscription payloads.
 
 ### sing-box Rendering
 
@@ -42,6 +43,7 @@ Build local CLIs and agent guidance that can:
 - Generate a proxy outbound from the parsed VLESS profile.
 - Generate `direct` and `block` outbounds.
 - Enable DNS hijack.
+- Support direct route CIDRs from `routing.routes`.
 - When a VLESS TUN session is layered above active OpenConnect split DNS, keep the public resolver handoff scoped to the VLESS TUN interface without copying corporate split domains into macOS search suffixes.
 - Support two rendering modes:
   - full tunnel when no bypass suffixes are configured
@@ -58,7 +60,7 @@ Build local CLIs and agent guidance that can:
 - `setup`: scaffold `~/.config/vless-tun/config.json` by default using the preferred config schema
 - `init`: create `~/.config/vless-tun/config.json` by default
 - `refresh`: fetch and cache subscription
-- `list`: inspect cached profiles
+- `list`: inspect cached profiles for the selected configured server
 - `run`: start `sing-box` in the background from the rendered config and persist session metadata
 - `reconnect`: refresh local state and replace the active `sing-box` session in one command
 - `status`: show local runtime state, launch backend, cached selection, and configured bypasses

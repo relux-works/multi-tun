@@ -17,6 +17,8 @@ import (
 
 type startOptions struct {
 	configPath      string
+	serverName      string
+	configProfile   string
 	profileSelector string
 	outputPath      string
 	refresh         bool
@@ -36,7 +38,11 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		return exitCode
 	}
 
-	cfg, err := loadConfig(options.configPath)
+	cfg, _, err := loadEffectiveConfig(options.configPath, config.SelectionOptions{
+		Server:   options.serverName,
+		Profile:  options.configProfile,
+		Selector: options.profileSelector,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
@@ -91,7 +97,9 @@ func (a *App) runReconnect(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
-	profileSelector := fs.String("profile", "", "Profile selector by id, name, or substring")
+	serverName := fs.String("server", "", "Configured VLESS server name")
+	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
 	outputPath := fs.String("output", "", "Override render.output_path")
 	refresh := fs.Bool("refresh", true, "Fetch subscription before rendering and reconnecting")
 	force := fs.Bool("force", false, "Escalate from SIGTERM to SIGKILL if sing-box does not stop in time")
@@ -101,7 +109,11 @@ func (a *App) runReconnect(args []string) int {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, _, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+		Server:   *serverName,
+		Profile:  *profileName,
+		Selector: *profileSelector,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 1
@@ -109,6 +121,8 @@ func (a *App) runReconnect(args []string) int {
 
 	prepared, err := a.prepareStart(cfg, startOptions{
 		configPath:      *configPath,
+		serverName:      *serverName,
+		configProfile:   *profileName,
 		profileSelector: *profileSelector,
 		outputPath:      *outputPath,
 		refresh:         *refresh,
@@ -162,6 +176,7 @@ func (a *App) runStop(args []string) int {
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
+	serverName := fs.String("server", "", "Configured VLESS server name")
 	force := fs.Bool("force", false, "Escalate from SIGTERM to SIGKILL if sing-box does not stop in time")
 	timeout := fs.Duration("timeout", 5*time.Second, "How long to wait after SIGTERM before failing or forcing")
 
@@ -169,7 +184,9 @@ func (a *App) runStop(args []string) int {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, _, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+		Server: *serverName,
+	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "stop failed: %v\n", err)
 		return 1
@@ -213,7 +230,9 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 	fs.SetOutput(a.stderr)
 
 	configPath := fs.String("config", "", "Path to config file")
-	profileSelector := fs.String("profile", "", "Profile selector by id, name, or substring")
+	serverName := fs.String("server", "", "Configured VLESS server name")
+	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
 	outputPath := fs.String("output", "", "Override render.output_path")
 	refresh := fs.Bool("refresh", refreshDefault, "Fetch subscription before rendering and starting")
 
@@ -223,6 +242,8 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 
 	return startOptions{
 		configPath:      *configPath,
+		serverName:      *serverName,
+		configProfile:   *profileName,
 		profileSelector: *profileSelector,
 		outputPath:      *outputPath,
 		refresh:         *refresh,
@@ -235,11 +256,7 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		return preparedStart{}, err
 	}
 
-	selector := options.profileSelector
-	if selector == "" {
-		selector = cfg.DefaultProfileSelector()
-	}
-	profile, err := subscription.SelectProfile(snapshot.Profiles, selector)
+	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.DefaultProfileSelector())
 	if err != nil {
 		return preparedStart{}, err
 	}

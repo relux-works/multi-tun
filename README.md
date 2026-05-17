@@ -69,17 +69,17 @@ The live egress loop is verified on a real Xiaomi device with a separate observe
 ./scripts/setup.sh --mac-arch amd64
 ./scripts/deinit.sh --dry-run
 
-# edit ~/.config/vless-tun/config.json and set source.url
+# edit ~/.config/vless-tun/config.json and set servers.<name>.source.url
 
-vless-tun refresh
-vless-tun list
+vless-tun refresh --server dance
+vless-tun list --server dance
 vless-tun setup --source-url "vless://..."
-vless-tun start
-vless-tun reconnect
-vless-tun status
+vless-tun start --server dance --profile default
+vless-tun reconnect --server dance --profile default
+vless-tun status --server dance
 vless-tun diagnose
 vless-tun stop
-vless-tun render
+vless-tun render --server dance --profile default
 openconnect-tun status
 openconnect-tun setup --vpn-name "Corp VPN"
 openconnect-tun profiles
@@ -103,21 +103,36 @@ On macOS the default `./scripts/setup.sh` path is host-native: on Apple Silicon 
 
 Generated artifacts:
 
-- cache snapshot: `~/.cache/vless-tun/snapshot.json` by default
-- rendered sing-box config: `~/.config/vless-tun/generated/sing-box.json` by default
+- cache snapshot: `servers.<name>.cache_dir/snapshot.json`
+- rendered sing-box config: `servers.<name>.artifacts.singbox_config_path`
+
+## Tools
+
+| Tool | Used for | How to run | Outputs |
+| --- | --- | --- | --- |
+| `task-board` | File-based task tracking for repo work | `task-board q --format compact 'summary()'`, `task-board m 'set_notes(TASK-ID, text="...")'` | `.task-board/` |
+| `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh --server dance`, `vless-tun render --server fortinetz --profile nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered sing-box JSON |
+| `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
+| `vpn-core` | Privileged helper backend for tunnel startup and packet capture support | `vpn-core install`, `vpn-core status` | LaunchDaemon state, helper logs under runtime cache paths |
+| `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
+| `Docker` / `Colima` | Linux container labs and controlled SNI-gate experiments | `artifacts/fortinetz-cascade-whitelist/lab/run-macmini-sni-lab.sh nl` | `.temp/fortinetz-cascade/sni-lab-remote/`; remote scratch under `/Users/administrator/.cache/multi-tun/fortinetz-sni-lab` |
+| `ssh` / `rsync` | Remote Mac mini lab orchestration without disturbing the local tunnel | `ssh relux-works-dedicated-macmini ...`, used by the lab runner | `.temp/fortinetz-cascade/remote-*.log` |
+| `go` | Desktop CLI builds and tests | `go test ./...`, `go build -o vless-tun ./desktop/cmd/vless-tun` | local binaries, test logs in `.temp/` when captured |
+| `xcodebuild` / `swift` | Apple helper builds and tests when needed | run through `./scripts/setup.sh` or targeted Swift build commands | build products under project and toolchain output paths |
+| `adb` / Gradle | Android smoke and instrumentation tests | `./scripts/android/run-device-smoke.sh --serial <serial>` | Android build outputs and smoke logs under script-defined paths |
 
 ## Commands
 
 ```bash
 vless-tun setup
 vless-tun init
-vless-tun refresh
-vless-tun list
-vless-tun start
-vless-tun reconnect
-vless-tun status
-vless-tun stop
-vless-tun render
+vless-tun refresh --server dance
+vless-tun list --server dance
+vless-tun start --server dance --profile default
+vless-tun reconnect --server dance --profile default
+vless-tun status --server dance
+vless-tun stop --server dance
+vless-tun render --server dance --profile default
 ```
 
 ### `openconnect-tun`
@@ -363,10 +378,13 @@ Reloads the local config, refreshes the subscription cache by default, rerenders
 
 This is the command to use after changing:
 
-- `default.profile_selector`
+- `current.server`
+- `current.profile`
+- `servers.<name>.profiles.<profile>.selector`
 - `routing.bypass_suffixes`
+- `routing.routes`
 - `dns.proxy_resolver`
-- `artifacts.singbox_config_path`
+- `servers.<name>.artifacts.singbox_config_path`
 - any other render-time setting in `~/.config/vless-tun/config.json`
 
 ### `vless-tun status`
@@ -417,10 +435,66 @@ Example config:
 
 ```json
 {
-  "cache_dir": "~/.cache/vless-tun",
-  "source": {
-    "mode": "proxy",
-    "url": "https://key.vpn.dance/connect?key=REPLACE_ME"
+  "current": {
+    "server": "dance",
+    "profile": "default"
+  },
+  "servers": {
+    "dance": {
+      "source": {
+        "mode": "proxy",
+        "url": "https://key.vpn.dance/connect?key=REPLACE_ME"
+      },
+      "cache_dir": "~/.cache/vless-tun/dance",
+      "artifacts": {
+        "singbox_config_path": "~/.config/vless-tun/generated/sing-box_dance.json"
+      },
+      "routing": {
+        "bypass_suffixes": [
+          ".ru",
+          ".рф"
+        ],
+        "bypass_exclude_suffixes": [
+          ".telegram.org",
+          "t.me"
+        ],
+        "routes": []
+      },
+      "profiles": {
+        "default": {
+          "selector": ""
+        }
+      }
+    },
+    "fortinetz": {
+      "source": {
+        "mode": "proxy",
+        "url": "https://sub.fortinetz.com/sub/t/REPLACE_ME"
+      },
+      "cache_dir": "~/.cache/vless-tun/fortinetz",
+      "artifacts": {
+        "singbox_config_path": "~/.config/vless-tun/generated/sing-box_fortinetz.json"
+      },
+      "routing": {
+        "bypass_suffixes": [
+          ".ru",
+          ".рф"
+        ],
+        "bypass_exclude_suffixes": [
+          ".telegram.org",
+          "t.me"
+        ],
+        "routes": []
+      },
+      "profiles": {
+        "nl": {
+          "selector": "Netherlands"
+        },
+        "de": {
+          "selector": "Germany"
+        }
+      }
+    }
   },
   "network": {
     "mode": "tun",
@@ -432,12 +506,6 @@ Example config:
       ]
     }
   },
-  "routing": {
-    "bypass_suffixes": [
-      ".ru",
-      ".рф"
-    ]
-  },
   "dns": {
     "proxy_resolver": {
       "address": "1.1.1.1",
@@ -447,29 +515,31 @@ Example config:
   },
   "logging": {
     "level": "info"
-  },
-  "artifacts": {
-    "singbox_config_path": "~/.config/vless-tun/generated/sing-box.json"
   }
 }
 ```
 
 Field reference:
 
-- `cache_dir`: local runtime/cache directory for refresh snapshots, session logs, and runtime metadata
-- `source.mode`: `proxy` or `direct`
-- `source.url`: the actual source address; in `proxy` mode this is an HTTP endpoint that resolves to one or more `vless://` entries, and in `direct` mode this is a literal `vless://...` URI
-- `default.profile_selector`: optional selector by exact id, exact name, or substring when the source resolves to multiple profiles
+- `current.server`: selected configured server/source, such as `dance` or `fortinetz`
+- `current.profile`: selected local profile alias under the selected server
+- `servers.<name>.source.mode`: `proxy` or `direct`
+- `servers.<name>.source.url`: the actual source address; in `proxy` mode this is an HTTP endpoint that resolves to one or more `vless://` entries, and in `direct` mode this is a literal `vless://...` URI
+- `servers.<name>.cache_dir`: local runtime/cache directory for that server's refresh snapshots, session logs, and runtime metadata
+- `servers.<name>.artifacts.singbox_config_path`: generated sing-box config path for that server
+- `servers.<name>.profiles.<profile>.selector`: optional selector by exact id, exact name, endpoint, or substring when the source resolves to multiple remote profiles; empty means first profile
 - `network.mode`: currently `tun`
 - `network.tun.interface_name`: TUN interface name for `tun` mode
 - `network.tun.addresses`: TUN addresses for `tun` mode
+- `routing` may exist globally, per server, or per profile; more specific values override broader values
 - `routing.bypass_suffixes`: domains that should go `direct`; set `[]` for full-tunnel bring-up
 - `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists
+- `routing.routes`: CIDRs/IPs that should route `direct`
 - `dns.proxy_resolver`: upstream DNS endpoint for proxied traffic
 - `logging.level`: sing-box log level written into the generated config
-- `artifacts.singbox_config_path`: provider-neutral generated sing-box config artifact path
 - `launch.mode`: optional override for the runtime backend. Omit `launch` in the happy path and `vless-tun` will resolve to the shared `vpn-core` backend automatically when it is available
 - `launch.label` and `launch.plist_path`: legacy compatibility overrides only; the shared daemon now belongs to `vpn-core`, not to each `sing-box` session
+- legacy flat configs with root-level `source`, `cache_dir`, `artifacts`, and `default.profile_selector` still load; new multi-server configs are preferred for more than one provider/source
 
 ### Full TUN on macOS
 
