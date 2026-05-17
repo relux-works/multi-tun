@@ -232,6 +232,41 @@ Evidence:
 - `.temp/fortinetz-cascade/sni-lab-remote/results-de/matrix.tsv`
 - `.temp/fortinetz-cascade/sni-lab-remote/results-us/matrix.tsv`
 
+## Recommendations For Tunnel Improvement
+
+These recommendations are based on the failure boundaries observed in the SNI-gate lab.
+
+1. Make the SNI and entry IP consistent.
+
+   Current profiles advertise popular names such as `www.amazon.com` while connecting to `83.222.9.217`. That fails any DPI policy that checks whether the SNI resolves to the destination IP. A stronger profile should use provider-controlled domains that actually resolve to the entry IP.
+
+2. Add strict-whitelist profiles with `.ru` / `.рф` SNI.
+
+   The current popular-site masks are useful only against loose SNI allowlists. They do not satisfy a strict `.ru` / `.рф` whitelist. The provider should expose separate profiles with DNS-consistent Russian-domain SNI values for that threat model.
+
+3. Rotate and diversify entry endpoints.
+
+   All tested profiles use the same visible entry `83.222.9.217:443`. Blocking that one IP breaks every tested profile. The provider should use multiple entry IPs, preferably across different networks/ASNs, with automatic fallback and health checks.
+
+4. Separate profiles by firewall model.
+
+   A single "bypass" profile is too vague. The service should label profiles by what they are designed to survive: popular-SNI allowlist, strict Russian-domain whitelist, entry-IP blocking, SNI/IP validation, or full restricted-network mode.
+
+5. Publish verifiable cascade evidence.
+
+   Client-side evidence supports common-entry to country-specific-exit routing, but not the exact number of provider-side hops. If the product claim is "cascade", the provider should publish a safe verification method: entry role, middle/exit role behavior, per-hop health, and failure semantics without exposing private infrastructure.
+
+6. Add a built-in self-test.
+
+   The client or provider panel should run a small diagnostic matrix similar to this lab: strict SNI, popular SNI, SNI/IP match, entry block, and final egress. That would make the bypass claim measurable instead of marketing-only.
+
+Priority order:
+
+1. DNS-consistent provider-controlled SNI.
+2. Multiple rotating entry IPs.
+3. Separate strict `.ru` / `.рф` whitelist profiles.
+4. Public self-test and clearer profile labels.
+
 ## Verdict
 
 Fortinetz does have real client-visible camouflage: VLESS Reality over TCP to a Russian entry IP with popular-site SNI masks, confirmed by packet capture.
