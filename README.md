@@ -74,12 +74,15 @@ The live egress loop is verified on a real Xiaomi device with a separate observe
 vless-tun refresh --server dance
 vless-tun list --server dance
 vless-tun setup --source-url "vless://..."
+vless-tun start dance
+vless-tun start fortinet
 vless-tun start --server dance --profile default
 vless-tun reconnect --server dance --profile default
 vless-tun status --server dance
 vless-tun diagnose
 vless-tun stop
 vless-tun render --server dance --profile default
+vpn-core inspect-vless-url --insecure "https://example.com/subscription"
 openconnect-tun status
 openconnect-tun setup --vpn-name "Corp VPN"
 openconnect-tun profiles
@@ -113,7 +116,7 @@ Generated artifacts:
 | `task-board` | File-based task tracking for repo work | `task-board q --format compact 'summary()'`, `task-board m 'set_notes(TASK-ID, text="...")'` | `.task-board/` |
 | `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh --server dance`, `vless-tun render --server fortinetz --profile nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered sing-box JSON |
 | `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
-| `vpn-core` | Privileged helper backend for tunnel startup and packet capture support | `vpn-core install`, `vpn-core status` | LaunchDaemon state, helper logs under runtime cache paths |
+| `vpn-core` | Privileged helper backend for tunnel startup and packet capture support; also includes a user-space VLESS subscription metadata probe | `vpn-core install`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | LaunchDaemon state, helper logs under runtime cache paths |
 | `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
 | `Docker` / `Colima` | Linux container labs and controlled SNI-gate experiments | `artifacts/fortinetz-cascade-whitelist/lab/run-macmini-sni-lab.sh nl` | `.temp/fortinetz-cascade/sni-lab-remote/`; remote scratch under `/Users/administrator/.cache/multi-tun/fortinetz-sni-lab` |
 | `ssh` / `rsync` | Remote Mac mini lab orchestration without disturbing the local tunnel | `ssh relux-works-dedicated-macmini ...`, used by the lab runner | `.temp/fortinetz-cascade/remote-*.log` |
@@ -128,6 +131,8 @@ vless-tun setup
 vless-tun init
 vless-tun refresh --server dance
 vless-tun list --server dance
+vless-tun start dance
+vless-tun start fortinet
 vless-tun start --server dance --profile default
 vless-tun reconnect --server dance --profile default
 vless-tun status --server dance
@@ -331,6 +336,8 @@ Creates `~/.config/vless-tun/config.json` by default using the preferred schema.
 
 Use `--source-url` for either an HTTP subscription endpoint or a literal `vless://...` URI. `setup` prints the resulting config path so the caller can review it immediately.
 
+All `vless-tun` commands that accept `--config` also accept one positional config argument. With no config argument, the default remains `~/.config/vless-tun/config.json`. A positional relative name resolves inside `~/.config/vless-tun`, and names without an extension try `.json`, so `vless-tun start dance` loads `~/.config/vless-tun/dance.json`. Use `--config` for repo-local or current-directory-relative paths.
+
 ### `vless-tun init`
 
 Creates `~/.config/vless-tun/config.json` by default.
@@ -350,6 +357,13 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 ### `vless-tun start`
 
 Renders the selected profile to the configured sing-box JSON and then starts `sing-box` in the background.
+
+Short provider config aliases work through the positional config argument:
+
+```bash
+vless-tun start dance
+vless-tun start fortinet
+```
 
 When `vless-tun` is running in `network.mode=tun` above an active `openconnect-tun` split-include session, `start` now waits for overlay DNS convergence before returning. In that overlay mode, a live `sing-box` PID alone is not treated as ready; the CLI also waits for the system public resolver path to settle so follow-up terminal clients do not race the DNS handoff. The public resolver handoff is applied through a scoped `scutil` resolver without copying MTS/corporate split domains into search suffixes; the active network service DNS is only a fallback if scoped handoff fails.
 
@@ -418,6 +432,18 @@ Selects a cached profile and writes a sing-box JSON config with:
 - optional direct DNS and direct outbound for configured suffix bypasses
 
 If `routing.bypass_suffixes` is empty, the renderer produces a simple full-tunnel config with no suffix-based bypasses.
+
+### `vpn-core inspect-vless-url`
+
+Inspects a VLESS subscription URL or literal `vless://` URI and prints safe profile metadata: payload format, profile count, display name, endpoint, protocol, security, network, SNI, fingerprint, and whether sensitive fields are present. It intentionally does not print the raw URI, UUID, public key, or short ID.
+
+For HTTP subscriptions the probe runs an analyzer chain and prints every attempt. The chain covers the default request, explicit Host/SNI options, insecure TLS, browser/v2ray user agents, and certificate-derived Host/SNI hints. That keeps one-off provider URLs debuggable without editing scripts.
+
+```bash
+vpn-core inspect-vless-url "vless://..."
+vpn-core inspect-vless-url --insecure "https://example.com/subscription"
+vpn-core inspect-vless-url --host subrouter.fyi --tls-server-name subrouter.fyi "https://203.0.113.10:7654/freedom/token"
+```
 
 ## Local Config
 

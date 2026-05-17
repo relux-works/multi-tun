@@ -26,8 +26,10 @@ Build local CLIs and agent guidance that can:
 ### Subscription Handling
 
 - Load a live subscription URL from gitignored local config.
+- Allow lifecycle commands to select an alternate config by positional name, resolved under `~/.config/vless-tun`, while keeping `~/.config/vless-tun/config.json` as the no-argument default.
 - Support plaintext payloads and base64 payloads.
 - Parse one or more `vless://` URIs.
+- Inspect subscription URLs through a safe analyzer chain that reports fetch/parse attempts without printing raw VLESS URIs or sensitive key material.
 - Keep a local cache snapshot to avoid reparsing by hand.
 
 ### Profile Model
@@ -61,7 +63,7 @@ Build local CLIs and agent guidance that can:
 - `init`: create `~/.config/vless-tun/config.json` by default
 - `refresh`: fetch and cache subscription
 - `list`: inspect cached profiles for the selected configured server
-- `run`: start `sing-box` in the background from the rendered config and persist session metadata
+- `run`: start `sing-box` in the background from the rendered config and persist session metadata; provider config shortcuts such as `start dance` and `start fortinet` resolve against `~/.config/vless-tun`
 - `reconnect`: refresh local state and replace the active `sing-box` session in one command
 - `status`: show local runtime state, launch backend, cached selection, and configured bypasses
 - `stop`: stop the recorded `sing-box` session
@@ -77,6 +79,7 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun` config may define `servers.<url>.client_mimicry` for endpoint-specific AnyConnect identity: user-agent, version, OS/device-id, local hostname, aggregate-auth capabilities, and aggregate-auth HTTP headers
 - `openconnect-tun reconnect`: replace the active OpenConnect session in one command
 - `vpn-core install|status|uninstall`: manage the shared privileged daemon used for passwordless post-SSO connect/stop flows and privileged `sing-box` TUN lifecycle
+- `vpn-core inspect-vless-url`: run a user-space VLESS URL metadata probe through a fixed analyzer chain
 - `openconnect-tun helper install|status|uninstall`: compatibility wrapper around `vpn-core`
 - `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
 - `openconnect-tun stop`: stop the active OpenConnect process cleanly
