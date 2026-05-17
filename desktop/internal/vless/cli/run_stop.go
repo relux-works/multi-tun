@@ -108,8 +108,13 @@ func (a *App) runReconnect(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		return 2
+	}
 
-	cfg, _, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+	cfg, _, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
 		Server:   *serverName,
 		Profile:  *profileName,
 		Selector: *profileSelector,
@@ -120,7 +125,7 @@ func (a *App) runReconnect(args []string) int {
 	}
 
 	prepared, err := a.prepareStart(cfg, startOptions{
-		configPath:      *configPath,
+		configPath:      resolvedConfigPath,
 		serverName:      *serverName,
 		configProfile:   *profileName,
 		profileSelector: *profileSelector,
@@ -183,8 +188,13 @@ func (a *App) runStop(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "stop failed: %v\n", err)
+		return 2
+	}
 
-	cfg, _, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+	cfg, _, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
 		Server: *serverName,
 	})
 	if err != nil {
@@ -239,9 +249,14 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 	if err := fs.Parse(args); err != nil {
 		return startOptions{}, 2, err
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "%s failed: %v\n", name, err)
+		return startOptions{}, 2, err
+	}
 
 	return startOptions{
-		configPath:      *configPath,
+		configPath:      resolvedConfigPath,
 		serverName:      *serverName,
 		configProfile:   *profileName,
 		profileSelector: *profileSelector,

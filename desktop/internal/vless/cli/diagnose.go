@@ -18,8 +18,13 @@ func (a *App) runDiagnose(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "diagnose failed: %v\n", err)
+		return 2
+	}
 
-	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
 		Server: *serverName,
 	})
 	if err != nil {

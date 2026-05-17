@@ -25,6 +25,61 @@ func TestStartAlias_UsesStartFailurePrefix(t *testing.T) {
 	}
 }
 
+func TestStartAlias_UsesPositionalConfigName(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"start", "dance"})
+	if exitCode != 1 {
+		t.Fatalf("Run(start) exitCode = %d, want 1", exitCode)
+	}
+	expectedPath := filepath.Join(configRoot, "vless-tun", "dance.json")
+	if !strings.Contains(stderr.String(), expectedPath+" does not exist") {
+		t.Fatalf("stderr = %q, want resolved config path %q", stderr.String(), expectedPath)
+	}
+}
+
+func TestCommandConfigPathResolvesRelativeNameUnderConfigDir(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+
+	got, err := commandConfigPath("", []string{"fortinet"})
+	if err != nil {
+		t.Fatalf("commandConfigPath() error = %v", err)
+	}
+
+	want := filepath.Join(configRoot, "vless-tun", "fortinet.json")
+	if got != want {
+		t.Fatalf("commandConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestCommandConfigPathPreservesAbsolutePath(t *testing.T) {
+	absolute := filepath.Join(t.TempDir(), "custom.json")
+
+	got, err := commandConfigPath("", []string{absolute})
+	if err != nil {
+		t.Fatalf("commandConfigPath() error = %v", err)
+	}
+	if got != absolute {
+		t.Fatalf("commandConfigPath() = %q, want %q", got, absolute)
+	}
+}
+
+func TestCommandConfigPathRejectsFlagAndPositionalConfig(t *testing.T) {
+	_, err := commandConfigPath("/tmp/config.json", []string{"dance"})
+	if err == nil {
+		t.Fatal("commandConfigPath() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "both with --config and positional argument") {
+		t.Fatalf("commandConfigPath() error = %q", err)
+	}
+}
+
 func TestSetupWritesConfigAndReportsPath(t *testing.T) {
 	t.Parallel()
 

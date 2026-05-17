@@ -26,8 +26,13 @@ func (a *App) runStatus(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
+		return 2
+	}
 
-	cfg, selection, err := loadEffectiveConfig(*configPath, config.SelectionOptions{
+	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
 		Server:   *serverName,
 		Profile:  *profileName,
 		Selector: *profileSelector,
