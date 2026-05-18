@@ -46,6 +46,7 @@ Build local CLIs and agent guidance that can:
 - Generate `direct` and `block` outbounds.
 - Enable DNS hijack.
 - Support direct route CIDRs from `routing.routes`.
+- In TUN mode, exclude IP-literal upstream VLESS endpoints from generated TUN routes and route those endpoint CIDRs `direct`, preventing broad full-tunnel routes from capturing the tunnel's own server traffic.
 - When a VLESS TUN session is layered above active OpenConnect split DNS, keep the public resolver handoff scoped to the VLESS TUN interface without copying corporate split domains into macOS search suffixes.
 - Support two rendering modes:
   - full tunnel when no bypass suffixes are configured

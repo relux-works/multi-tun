@@ -3,6 +3,7 @@ package singbox
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 	if useOverlayDNS {
 		directDomainResolver = "dns-proxy"
 	}
+	upstreamRouteExcludes := upstreamRouteExcludeCIDRs(profile)
 
 	dnsServers := []any{
 		map[string]any{
@@ -113,6 +115,23 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 	}
 	routeRuleSet := []any{}
 	routeRules := baseRouteRules(mode)
+
+	if len(upstreamRouteExcludes) > 0 {
+		routeRuleSet = append(routeRuleSet, map[string]any{
+			"type": "inline",
+			"tag":  "upstream-direct",
+			"rules": []any{
+				map[string]any{
+					"ip_cidr": upstreamRouteExcludes,
+				},
+			},
+		})
+		routeRules = append(routeRules, map[string]any{
+			"rule_set": []string{"upstream-direct"},
+			"action":   "route",
+			"outbound": "direct",
+		})
+	}
 
 	if useBypassDNSRules {
 		dnsRules = append([]any{
@@ -186,7 +205,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 		})
 	}
 
-	inbounds, err := buildInbounds(cfg, overlayDNS)
+	inbounds, err := buildInbounds(cfg, overlayDNS, upstreamRouteExcludes)
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +311,23 @@ func normalizeOverlayDNS(overlay *OverlayDNS) *OverlayDNS {
 	}
 }
 
+func upstreamRouteExcludeCIDRs(profile model.Profile) []string {
+	host := strings.TrimSpace(profile.Host)
+	if host == "" {
+		return nil
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return nil
+	}
+	addr = addr.Unmap()
+	bits := 128
+	if addr.Is4() {
+		bits = 32
+	}
+	return []string{netip.PrefixFrom(addr, bits).String()}
+}
+
 func baseRouteRules(mode string) []any {
 	rules := []any{
 		map[string]any{
@@ -314,7 +350,7 @@ func baseRouteRules(mode string) []any {
 	return rules
 }
 
-func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS) ([]any, error) {
+func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS, upstreamRouteExcludes []string) ([]any, error) {
 	if cfg.NetworkMode() != config.RenderModeTun {
 		return nil, fmt.Errorf("unsupported render mode %q", cfg.NetworkMode())
 	}
@@ -328,10 +364,31 @@ func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS) ([]any, err
 		"strict_route":   true,
 		"mtu":            1400,
 	}
+	routeExcludes := append([]string(nil), upstreamRouteExcludes...)
 	if overlayDNS != nil && len(overlayDNS.RouteExcludes) > 0 {
-		inbound["route_exclude_address"] = overlayDNS.RouteExcludes
+		routeExcludes = append(routeExcludes, overlayDNS.RouteExcludes...)
+	}
+	if len(routeExcludes) > 0 {
+		inbound["route_exclude_address"] = normalizeRouteExcludes(routeExcludes)
 	}
 	return []any{inbound}, nil
+}
+
+func normalizeRouteExcludes(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func Write(path string, data []byte) error {
