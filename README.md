@@ -430,6 +430,7 @@ Selects a cached profile and writes a sing-box JSON config with:
 - a TUN inbound
 - proxy detour for the rest of the traffic
 - optional direct DNS and direct outbound for configured suffix bypasses
+- automatic direct routing and TUN route exclusion for IP-literal upstream VLESS endpoints, so the proxy server itself is not captured by broad full-TUN routes
 
 If `routing.bypass_suffixes` is empty, the renderer produces a simple full-tunnel config with no suffix-based bypasses.
 
@@ -540,7 +541,7 @@ Example config:
     }
   },
   "logging": {
-    "level": "info"
+    "level": "warn"
   }
 }
 ```
@@ -562,7 +563,7 @@ Field reference:
 - `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists
 - `routing.routes`: CIDRs/IPs that should route `direct`
 - `dns.proxy_resolver`: upstream DNS endpoint for proxied traffic
-- `logging.level`: sing-box log level written into the generated config
+- `logging.level`: sing-box log level written into the generated config; new configs default to `warn` so normal full-TUN sessions do not write every connection to disk
 - `launch.mode`: optional override for the runtime backend. Omit `launch` in the happy path and `vless-tun` will resolve to the shared `vpn-core` backend automatically when it is available
 - `launch.label` and `launch.plist_path`: legacy compatibility overrides only; the shared daemon now belongs to `vpn-core`, not to each `sing-box` session
 - legacy flat configs with root-level `source`, `cache_dir`, `artifacts`, and `default.profile_selector` still load; new multi-server configs are preferred for more than one provider/source

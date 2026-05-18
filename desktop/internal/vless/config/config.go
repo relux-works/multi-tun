@@ -200,7 +200,7 @@ func DefaultForPath(path string) ProjectConfig {
 			},
 		},
 		Logging: LoggingConfig{
-			Level: "info",
+			Level: "warn",
 		},
 		Artifacts: ArtifactsConfig{
 			SingboxConfigPath: "configs/generated/sing-box.json",
