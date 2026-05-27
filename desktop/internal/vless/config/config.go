@@ -418,11 +418,13 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 		}, nil
 	}
 
-	serverName, serverCfg, err := c.resolveServerConfig(options.Server)
+	serverOverride := strings.TrimSpace(options.Server)
+	serverName, serverCfg, err := c.resolveServerConfig(serverOverride)
 	if err != nil {
 		return ProjectConfig{}, EffectiveSelection{}, err
 	}
-	profileName, profileCfg, hasProfile, err := c.resolveProfileConfig(serverCfg, options.Profile)
+	useCurrentProfile := serverOverride == "" || serverOverride == currentServerName(c.Current)
+	profileName, profileCfg, hasProfile, err := c.resolveProfileConfig(serverCfg, options.Profile, useCurrentProfile)
 	if err != nil {
 		return ProjectConfig{}, EffectiveSelection{}, err
 	}
@@ -467,12 +469,15 @@ func (c ProjectConfig) resolveServerConfig(override string) (string, ServerConfi
 	return "", ServerConfig{}, errors.New("current.server is required when multiple vless servers are configured")
 }
 
-func (c ProjectConfig) resolveProfileConfig(server ServerConfig, override string) (string, ProfileConfig, bool, error) {
+func (c ProjectConfig) resolveProfileConfig(server ServerConfig, override string, useCurrent bool) (string, ProfileConfig, bool, error) {
 	if len(server.Profiles) == 0 {
 		return "", ProfileConfig{}, false, nil
 	}
 
-	name := firstNonEmpty(override, currentProfileName(c.Current))
+	name := strings.TrimSpace(override)
+	if name == "" && useCurrent {
+		name = currentProfileName(c.Current)
+	}
 	if name != "" {
 		profile, ok := server.Profiles[name]
 		if !ok {

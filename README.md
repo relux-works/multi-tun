@@ -71,17 +71,16 @@ The live egress loop is verified on a real Xiaomi device with a separate observe
 
 # edit ~/.config/vless-tun/config.json and set servers.<name>.source.url
 
-vless-tun refresh --server dance
-vless-tun list --server dance
+vless-tun refresh dance
+vless-tun list dance
 vless-tun setup --source-url "vless://..."
 vless-tun start dance
-vless-tun start fortinet
-vless-tun start --server dance --profile default
-vless-tun reconnect --server dance --profile default
-vless-tun status --server dance
+vless-tun start fortinetz nl
+vless-tun reconnect dance
+vless-tun status dance
 vless-tun diagnose
 vless-tun stop
-vless-tun render --server dance --profile default
+vless-tun render dance
 vpn-core inspect-vless-url --insecure "https://example.com/subscription"
 openconnect-tun status
 openconnect-tun setup --vpn-name "Corp VPN"
@@ -114,7 +113,7 @@ Generated artifacts:
 | Tool | Used for | How to run | Outputs |
 | --- | --- | --- | --- |
 | `task-board` | File-based task tracking for repo work | `task-board q --format compact 'summary()'`, `task-board m 'set_notes(TASK-ID, text="...")'` | `.task-board/` |
-| `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh --server dance`, `vless-tun render --server fortinetz --profile nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered sing-box JSON |
+| `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered sing-box JSON |
 | `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
 | `vpn-core` | Privileged helper backend for tunnel startup and packet capture support; also includes a user-space VLESS subscription metadata probe | `vpn-core install`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | LaunchDaemon state, helper logs under runtime cache paths |
 | `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
@@ -129,15 +128,14 @@ Generated artifacts:
 ```bash
 vless-tun setup
 vless-tun init
-vless-tun refresh --server dance
-vless-tun list --server dance
+vless-tun refresh dance
+vless-tun list dance
 vless-tun start dance
-vless-tun start fortinet
-vless-tun start --server dance --profile default
-vless-tun reconnect --server dance --profile default
-vless-tun status --server dance
-vless-tun stop --server dance
-vless-tun render --server dance --profile default
+vless-tun start fortinetz nl
+vless-tun reconnect dance
+vless-tun status dance
+vless-tun stop
+vless-tun render dance
 ```
 
 ### `openconnect-tun`
@@ -336,7 +334,25 @@ Creates `~/.config/vless-tun/config.json` by default using the preferred schema.
 
 Use `--source-url` for either an HTTP subscription endpoint or a literal `vless://...` URI. `setup` prints the resulting config path so the caller can review it immediately.
 
-All `vless-tun` commands that accept `--config` also accept one positional config argument. With no config argument, the default remains `~/.config/vless-tun/config.json`. A positional relative name resolves inside `~/.config/vless-tun`, and names without an extension try `.json`, so `vless-tun start dance` loads `~/.config/vless-tun/dance.json`. Use `--config` for repo-local or current-directory-relative paths.
+With no config argument, `vless-tun` uses `~/.config/vless-tun/config.json`.
+
+Lifecycle commands use positional arguments for selection overrides against that config:
+
+```bash
+vless-tun start [server [profile]]
+vless-tun render [server [profile]]
+vless-tun status [server [profile]]
+vless-tun reconnect [server [profile]]
+vless-tun list [server]
+vless-tun refresh [server]
+vless-tun stop
+vless-tun diagnose
+vless-tun diagnose config [server [profile]]
+```
+
+`stop` and `diagnose` do not require a provider/profile; they scan all configured session cache directories for recorded tunnel state. Use `diagnose config` when you want to validate provider/profile selection.
+
+Use `--config` when you intentionally want a non-default config file. `setup` and `init` still accept one positional config path for bootstrapping.
 
 ### `vless-tun init`
 
@@ -358,11 +374,13 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 Renders the selected profile to the configured sing-box JSON and then starts `sing-box` in the background.
 
-Short provider config aliases work through the positional config argument:
+Short provider starts work through positional selection overrides:
 
 ```bash
 vless-tun start dance
-vless-tun start fortinet
+vless-tun start fortinetz nl
+vless-tun start fortinetz de
+vless-tun start freedom
 ```
 
 When `vless-tun` is running in `network.mode=tun` above an active `openconnect-tun` split-include session, `start` now waits for overlay DNS convergence before returning. In that overlay mode, a live `sing-box` PID alone is not treated as ready; the CLI also waits for the system public resolver path to settle so follow-up terminal clients do not race the DNS handoff. The public resolver handoff is applied through a scoped `scutil` resolver without copying MTS/corporate split domains into search suffixes; the active network service DNS is only a fallback if scoped handoff fails.
@@ -417,7 +435,9 @@ This is a heuristic runtime status, not a control plane.
 
 ### `vless-tun diagnose`
 
-Prints a focused runtime diagnostic view for the current launch backend. When the effective launch backend resolves to `helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket and daemon PID.
+`vless-tun diagnose` is a tunnel/runtime diagnostic. It scans configured session cache directories and reports recorded session state plus launch backend readiness. When the effective launch backend resolves to `helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket and daemon PID.
+
+`vless-tun diagnose config [server [profile]]` is a config diagnostic. It validates selection, resolved cache/render paths, source mode, bypasses, and launch settings without starting or stopping a tunnel.
 
 ### `vless-tun stop`
 

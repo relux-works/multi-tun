@@ -259,6 +259,62 @@ func TestEffectiveServerProfileMergesRoutingOverrides(t *testing.T) {
 	}
 }
 
+func TestEffectiveServerOverrideDoesNotReuseCurrentProfileFromDifferentServer(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Current = &CurrentConfig{
+		Server:  "fortinetz",
+		Profile: "nl",
+	}
+	cfg.Servers = map[string]ServerConfig{
+		"dance": {
+			Source: SourceConfig{
+				Mode: SourceModeProxy,
+				URL:  "https://example.com/dance",
+			},
+			CacheDir: "/tmp/dance-cache",
+			Artifacts: &ArtifactsConfig{
+				SingboxConfigPath: "/tmp/dance.json",
+			},
+			Profiles: map[string]ProfileConfig{
+				"default": {
+					Selector: "Sweden",
+				},
+			},
+		},
+		"fortinetz": {
+			Source: SourceConfig{
+				Mode: SourceModeProxy,
+				URL:  "https://example.com/fortinetz",
+			},
+			CacheDir: "/tmp/fortinetz-cache",
+			Artifacts: &ArtifactsConfig{
+				SingboxConfigPath: "/tmp/fortinetz.json",
+			},
+			Profiles: map[string]ProfileConfig{
+				"nl": {
+					Selector: "Netherlands",
+				},
+			},
+		},
+	}
+
+	effective, selection, err := cfg.Effective(SelectionOptions{Server: "dance"})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if got, want := selection.Server, "dance"; got != want {
+		t.Fatalf("selection.Server = %q, want %q", got, want)
+	}
+	if got, want := selection.Profile, "default"; got != want {
+		t.Fatalf("selection.Profile = %q, want %q", got, want)
+	}
+	if got, want := effective.DefaultProfileSelector(), "Sweden"; got != want {
+		t.Fatalf("DefaultProfileSelector() = %q, want %q", got, want)
+	}
+}
+
 func equalStrings(got []string, want []string) bool {
 	if len(got) != len(want) {
 		return false

@@ -167,15 +167,13 @@ func (a *App) runRefresh(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	selectionOptions, err := commandServerSelection(*serverName, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "refresh failed: %v\n", err)
 		return 2
 	}
 
-	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
-		Server: *serverName,
-	})
+	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "refresh failed: %v\n", err)
 		return 1
@@ -205,15 +203,13 @@ func (a *App) runList(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	selectionOptions, err := commandServerSelection(*serverName, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "list failed: %v\n", err)
 		return 2
 	}
 
-	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
-		Server: *serverName,
-	})
+	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "list failed: %v\n", err)
 		return 1
@@ -248,17 +244,13 @@ func (a *App) runRender(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, *profileSelector, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 2
 	}
 
-	cfg, selection, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
-		Server:   *serverName,
-		Profile:  *profileName,
-		Selector: *profileSelector,
-	})
+	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1
@@ -358,6 +350,69 @@ func commandConfigPath(flagValue string, args []string) (string, error) {
 	return resolvePositionalConfigPath(args[0]), nil
 }
 
+type positionalSelection struct {
+	Server  string
+	Profile string
+}
+
+func commandServerSelection(serverFlag string, args []string) (config.SelectionOptions, error) {
+	return commandSelection(serverFlag, "", "", args, false)
+}
+
+func commandServerProfileSelection(serverFlag, profileFlag, selectorFlag string, args []string) (config.SelectionOptions, error) {
+	return commandSelection(serverFlag, profileFlag, selectorFlag, args, true)
+}
+
+func commandSelection(serverFlag, profileFlag, selectorFlag string, args []string, allowProfile bool) (config.SelectionOptions, error) {
+	selection, err := parsePositionalSelection(args, allowProfile)
+	if err != nil {
+		return config.SelectionOptions{}, err
+	}
+
+	server := strings.TrimSpace(serverFlag)
+	profile := strings.TrimSpace(profileFlag)
+	if server != "" && selection.Server != "" {
+		return config.SelectionOptions{}, errors.New("server specified both with --server and positional argument")
+	}
+	if profile != "" && selection.Profile != "" {
+		return config.SelectionOptions{}, errors.New("profile specified both with --profile and positional argument")
+	}
+
+	if server == "" {
+		server = selection.Server
+	}
+	if profile == "" {
+		profile = selection.Profile
+	}
+
+	return config.SelectionOptions{
+		Server:   server,
+		Profile:  profile,
+		Selector: strings.TrimSpace(selectorFlag),
+	}, nil
+}
+
+func parsePositionalSelection(args []string, allowProfile bool) (positionalSelection, error) {
+	maxArgs := 1
+	expected := "server"
+	if allowProfile {
+		maxArgs = 2
+		expected = "server and profile"
+	}
+	if len(args) > maxArgs {
+		return positionalSelection{}, fmt.Errorf("unexpected argument %q; expected at most positional %s arguments, with flags before positionals", args[maxArgs], expected)
+	}
+
+	selection := positionalSelection{}
+	if len(args) >= 1 {
+		selection.Server = strings.TrimSpace(args[0])
+	}
+	if len(args) >= 2 {
+		selection.Profile = strings.TrimSpace(args[1])
+	}
+	return selection, nil
+}
+
 func resolvePositionalConfigPath(path string) string {
 	if filepath.IsAbs(path) {
 		return path
@@ -379,19 +434,22 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "Usage:")
 	fmt.Fprintln(a.stdout, "  vless-tun setup [--config path | config] [--server name] [--config-profile name] [--source-url URL] [--source-mode proxy|direct] [--profile selector] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun init [--config path | config] [--subscription-url URL] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path | config] [--server name]")
-	fmt.Fprintln(a.stdout, "  vless-tun list [--config path | config] [--server name] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun start [--config path | config] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path | config] [--server name] [--profile name] [--selector selector] [--output path] [--refresh] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun status [--config path | config] [--server name] [--profile name] [--selector selector] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun diagnose [--config path | config] [--server name]")
-	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path | config] [--server name] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun render [--config path | config] [--server name] [--profile name] [--selector selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path] [--server name | server]")
+	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--server name | server] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh] [--timeout duration] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun diagnose [tunnel] [--config path]")
+	fmt.Fprintln(a.stdout, "  vless-tun diagnose config [--config path] [--server name | server [profile]] [--profile name] [--selector selector]")
+	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [server] [--timeout duration] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh]")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
 	fmt.Fprintln(a.stdout, "  run -> start")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Config:")
 	fmt.Fprintln(a.stdout, "  With no config argument, vless-tun uses ~/.config/vless-tun/config.json.")
-	fmt.Fprintln(a.stdout, "  Positional relative config names resolve inside ~/.config/vless-tun; names without an extension try .json.")
+	fmt.Fprintln(a.stdout, "  Lifecycle command positionals override current.server/current.profile; stop and diagnose tunnel scan all configured session caches.")
+	fmt.Fprintln(a.stdout, "  Use --config to choose a non-default config file.")
+	fmt.Fprintln(a.stdout, "  setup/init still accept one positional config path for bootstrapping.")
 }

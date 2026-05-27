@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -22,6 +23,12 @@ type startOptions struct {
 	profileSelector string
 	outputPath      string
 	refresh         bool
+}
+
+type sessionTarget struct {
+	label    string
+	cacheDir string
+	launch   config.PrivilegedLaunchConfig
 }
 
 func (a *App) runStart(args []string) int {
@@ -108,27 +115,23 @@ func (a *App) runReconnect(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, *profileSelector, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 2
 	}
 
-	cfg, _, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
-		Server:   *serverName,
-		Profile:  *profileName,
-		Selector: *profileSelector,
-	})
+	cfg, _, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 1
 	}
 
 	prepared, err := a.prepareStart(cfg, startOptions{
-		configPath:      resolvedConfigPath,
-		serverName:      *serverName,
-		configProfile:   *profileName,
-		profileSelector: *profileSelector,
+		configPath:      *configPath,
+		serverName:      selectionOptions.Server,
+		configProfile:   selectionOptions.Profile,
+		profileSelector: selectionOptions.Selector,
 		outputPath:      *outputPath,
 		refresh:         *refresh,
 	})
@@ -188,43 +191,41 @@ func (a *App) runStop(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	selectionOptions, err := commandServerSelection(*serverName, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "stop failed: %v\n", err)
 		return 2
 	}
 
-	cfg, _, err := loadEffectiveConfig(resolvedConfigPath, config.SelectionOptions{
-		Server: *serverName,
-	})
+	targets, err := sessionTargetsForConfig(*configPath, selectionOptions.Server)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "stop failed: %v\n", err)
 		return 1
 	}
 
-	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.LaunchOrDefault(), *force, *timeout)
-	if err != nil {
-		fmt.Fprintf(a.stderr, "stop failed: %v\n", err)
-		if stopped != nil && stopped.LogPath != "" {
-			fmt.Fprintf(a.stderr, "log=%s\n", stopped.LogPath)
+	stoppedAny := false
+	for _, target := range targets {
+		stopped, state, err := stopCurrentSession(target.cacheDir, target.launch, *force, *timeout)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "stop failed")
+			if target.label != "" {
+				fmt.Fprintf(a.stderr, " for %s", target.label)
+			}
+			fmt.Fprintf(a.stderr, ": %v\n", err)
+			if stopped != nil && stopped.LogPath != "" {
+				fmt.Fprintf(a.stderr, "log=%s\n", stopped.LogPath)
+			}
+			return 1
 		}
-		return 1
-	}
-	if stopped == nil {
-		fmt.Fprintln(a.stdout, "no current session file found")
-		return 0
+		if stopped == nil {
+			continue
+		}
+		stoppedAny = true
+		printStopResult(a.stdout, target.label, stopped, state)
 	}
 
-	switch state {
-	case "stopped", "killed":
-		fmt.Fprintf(a.stdout, "%s sing-box session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
-	case "stale":
-		fmt.Fprintf(a.stdout, "cleared stale session %s (pid=%d)\n", stopped.ID, stopped.PID)
-	default:
-		fmt.Fprintf(a.stdout, "stop result=%s for session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
-	}
-	if stopped.LogPath != "" {
-		fmt.Fprintf(a.stdout, "log=%s\n", stopped.LogPath)
+	if !stoppedAny {
+		fmt.Fprintln(a.stdout, "no current session file found")
 	}
 	return 0
 }
@@ -249,17 +250,17 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 	if err := fs.Parse(args); err != nil {
 		return startOptions{}, 2, err
 	}
-	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
+	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, *profileSelector, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", name, err)
 		return startOptions{}, 2, err
 	}
 
 	return startOptions{
-		configPath:      resolvedConfigPath,
-		serverName:      *serverName,
-		configProfile:   *profileName,
-		profileSelector: *profileSelector,
+		configPath:      *configPath,
+		serverName:      selectionOptions.Server,
+		configProfile:   selectionOptions.Profile,
+		profileSelector: selectionOptions.Selector,
 		outputPath:      *outputPath,
 		refresh:         *refresh,
 	}, 0, nil
@@ -306,6 +307,95 @@ func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, f
 		return &stopped, state, err
 	}
 	return &stopped, state, nil
+}
+
+func sessionTargetsForConfig(configPath, serverName string) ([]sessionTarget, error) {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return nil, err
+	}
+	launch := cfg.LaunchOrDefault()
+	if len(cfg.Servers) == 0 {
+		if strings.TrimSpace(serverName) != "" {
+			return nil, errors.New("server selection requires a config with servers")
+		}
+		effective, _, err := cfg.Effective(config.SelectionOptions{})
+		if err != nil {
+			return nil, err
+		}
+		return []sessionTarget{{
+			cacheDir: effective.CacheDir,
+			launch:   launch,
+		}}, nil
+	}
+
+	if strings.TrimSpace(serverName) != "" {
+		server, ok := cfg.Servers[strings.TrimSpace(serverName)]
+		if !ok {
+			return nil, errors.New("selected server " + strings.TrimSpace(serverName) + " is not configured")
+		}
+		cacheDir := firstNonEmptyLocal(server.CacheDir, cfg.CacheDir)
+		if cacheDir == "" {
+			return nil, errors.New("selected server " + strings.TrimSpace(serverName) + " has no cache_dir")
+		}
+		return []sessionTarget{{
+			label:    strings.TrimSpace(serverName),
+			cacheDir: cacheDir,
+			launch:   launch,
+		}}, nil
+	}
+
+	targets := make([]sessionTarget, 0, len(cfg.Servers))
+	seen := map[string]struct{}{}
+	for name, server := range cfg.Servers {
+		cacheDir := firstNonEmptyLocal(server.CacheDir, cfg.CacheDir)
+		if cacheDir == "" {
+			continue
+		}
+		if _, ok := seen[cacheDir]; ok {
+			continue
+		}
+		seen[cacheDir] = struct{}{}
+		targets = append(targets, sessionTarget{
+			label:    name,
+			cacheDir: cacheDir,
+			launch:   launch,
+		})
+	}
+	if len(targets) == 0 {
+		return nil, errors.New("no vless session cache directories are configured")
+	}
+	return targets, nil
+}
+
+func stopTargetsForConfig(configPath, serverName string) ([]sessionTarget, error) {
+	return sessionTargetsForConfig(configPath, serverName)
+}
+
+func firstNonEmptyLocal(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func printStopResult(out io.Writer, label string, stopped *session.CurrentSession, state string) {
+	if label != "" {
+		fmt.Fprintf(out, "server: %s\n", label)
+	}
+	switch state {
+	case "stopped", "killed":
+		fmt.Fprintf(out, "%s sing-box session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
+	case "stale":
+		fmt.Fprintf(out, "cleared stale session %s (pid=%d)\n", stopped.ID, stopped.PID)
+	default:
+		fmt.Fprintf(out, "stop result=%s for session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
+	}
+	if stopped.LogPath != "" {
+		fmt.Fprintf(out, "log=%s\n", stopped.LogPath)
+	}
 }
 
 func systemDNSServers(cfg config.ProjectConfig) []string {
