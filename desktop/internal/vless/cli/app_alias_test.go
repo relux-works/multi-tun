@@ -25,24 +25,6 @@ func TestStartAlias_UsesStartFailurePrefix(t *testing.T) {
 	}
 }
 
-func TestStartAlias_UsesPositionalConfigName(t *testing.T) {
-	configRoot := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configRoot)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	app := New(&stdout, &stderr)
-
-	exitCode := app.Run([]string{"start", "dance"})
-	if exitCode != 1 {
-		t.Fatalf("Run(start) exitCode = %d, want 1", exitCode)
-	}
-	expectedPath := filepath.Join(configRoot, "vless-tun", "dance.json")
-	if !strings.Contains(stderr.String(), expectedPath+" does not exist") {
-		t.Fatalf("stderr = %q, want resolved config path %q", stderr.String(), expectedPath)
-	}
-}
-
 func TestCommandConfigPathResolvesRelativeNameUnderConfigDir(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configRoot)
@@ -77,6 +59,191 @@ func TestCommandConfigPathRejectsFlagAndPositionalConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "both with --config and positional argument") {
 		t.Fatalf("commandConfigPath() error = %q", err)
+	}
+}
+
+func TestStartOptionsUsePositionalServerAndProfile(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	options, exitCode, err := app.parseStartOptions("start", []string{"dance", "default"}, false)
+	if err != nil {
+		t.Fatalf("parseStartOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("parseStartOptions() exitCode = %d, want 0", exitCode)
+	}
+	if options.configPath != "" {
+		t.Fatalf("configPath = %q, want default config", options.configPath)
+	}
+	if options.serverName != "dance" {
+		t.Fatalf("serverName = %q, want dance", options.serverName)
+	}
+	if options.configProfile != "default" {
+		t.Fatalf("configProfile = %q, want default", options.configProfile)
+	}
+}
+
+func TestStartOptionsRejectFlagAndPositionalServer(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	_, exitCode, err := app.parseStartOptions("start", []string{"--server", "dance", "fortinetz"}, false)
+	if err == nil {
+		t.Fatal("parseStartOptions() error = nil, want conflict")
+	}
+	if exitCode != 2 {
+		t.Fatalf("parseStartOptions() exitCode = %d, want 2", exitCode)
+	}
+	if !strings.Contains(err.Error(), "server specified both") {
+		t.Fatalf("parseStartOptions() error = %q", err)
+	}
+}
+
+func TestStartOptionsRejectsMoreThanServerAndProfile(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	_, exitCode, err := app.parseStartOptions("start", []string{"dance", "default", "--refresh"}, false)
+	if err == nil {
+		t.Fatal("parseStartOptions() error = nil, want unexpected argument")
+	}
+	if exitCode != 2 {
+		t.Fatalf("parseStartOptions() exitCode = %d, want 2", exitCode)
+	}
+	if !strings.Contains(err.Error(), "flags before positionals") {
+		t.Fatalf("parseStartOptions() error = %q", err)
+	}
+}
+
+func TestStopTargetsIncludeAllServerCacheDirsWhenNoServerSelected(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {
+    "server": "fortinetz",
+    "profile": "nl"
+  },
+  "servers": {
+    "dance": {
+      "source": {"mode": "proxy", "url": "https://example.com/dance"},
+      "cache_dir": "/tmp/vless-dance",
+      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "profiles": {
+        "default": {"selector": "Sweden"}
+      }
+    },
+    "fortinetz": {
+      "source": {"mode": "proxy", "url": "https://example.com/fortinetz"},
+      "cache_dir": "/tmp/vless-fortinetz",
+      "artifacts": {"singbox_config_path": "/tmp/fortinetz.json"},
+      "profiles": {
+        "nl": {"selector": "Netherlands"},
+        "de": {"selector": "Germany"}
+      }
+    },
+    "freedom": {
+      "source": {"mode": "proxy", "url": "https://example.com/freedom"},
+      "cache_dir": "/tmp/vless-freedom",
+      "artifacts": {"singbox_config_path": "/tmp/freedom.json"},
+      "profiles": {
+        "fr": {"selector": "France"}
+      }
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	targets, err := stopTargetsForConfig(path, "")
+	if err != nil {
+		t.Fatalf("stopTargetsForConfig() error = %v", err)
+	}
+	if got, want := len(targets), 3; got != want {
+		t.Fatalf("len(targets) = %d, want %d", got, want)
+	}
+
+	cacheDirs := map[string]bool{}
+	for _, target := range targets {
+		cacheDirs[target.cacheDir] = true
+	}
+	for _, want := range []string{"/tmp/vless-dance", "/tmp/vless-fortinetz", "/tmp/vless-freedom"} {
+		if !cacheDirs[want] {
+			t.Fatalf("cacheDirs missing %q: %v", want, cacheDirs)
+		}
+	}
+}
+
+func TestDiagnoseDefaultsToTunnelAndRejectsProviderArgument(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"diagnose", "dance"})
+	if exitCode != 2 {
+		t.Fatalf("Run(diagnose dance) exitCode = %d, want 2", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "diagnose config") {
+		t.Fatalf("stderr = %q, want diagnose config guidance", stderr.String())
+	}
+}
+
+func TestDiagnoseConfigUsesPositionalServer(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {
+    "server": "dance",
+    "profile": "default"
+  },
+  "servers": {
+    "dance": {
+      "source": {"mode": "proxy", "url": "https://example.com/dance"},
+      "cache_dir": "/tmp/vless-dance",
+      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "profiles": {
+        "default": {"selector": "Sweden"}
+      }
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"diagnose", "config", "--config", path, "dance"})
+	if exitCode != 0 {
+		t.Fatalf("Run(diagnose config) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "diagnostic: config") {
+		t.Fatalf("stdout = %q, want config diagnostic", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "server: dance") {
+		t.Fatalf("stdout = %q, want selected server", stdout.String())
 	}
 }
 

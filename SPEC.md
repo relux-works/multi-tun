@@ -26,7 +26,7 @@ Build local CLIs and agent guidance that can:
 ### Subscription Handling
 
 - Load a live subscription URL from gitignored local config.
-- Allow lifecycle commands to select an alternate config by positional name, resolved under `~/.config/vless-tun`, while keeping `~/.config/vless-tun/config.json` as the no-argument default.
+- Allow lifecycle commands to override `current.server` and `current.profile` with positional `server [profile]` arguments while keeping `~/.config/vless-tun/config.json` as the no-argument default.
 - Support plaintext payloads and base64 payloads.
 - Parse one or more `vless://` URIs.
 - Inspect subscription URLs through a safe analyzer chain that reports fetch/parse attempts without printing raw VLESS URIs or sensitive key material.
@@ -64,10 +64,11 @@ Build local CLIs and agent guidance that can:
 - `init`: create `~/.config/vless-tun/config.json` by default
 - `refresh`: fetch and cache subscription
 - `list`: inspect cached profiles for the selected configured server
-- `run`: start `sing-box` in the background from the rendered config and persist session metadata; provider config shortcuts such as `start dance` and `start fortinet` resolve against `~/.config/vless-tun`
+- `run`: start `sing-box` in the background from the rendered config and persist session metadata; provider/profile shortcuts such as `start dance`, `start freedom`, and `start fortinetz nl` override the default config selection
 - `reconnect`: refresh local state and replace the active `sing-box` session in one command
 - `status`: show local runtime state, launch backend, cached selection, and configured bypasses
-- `stop`: stop the recorded `sing-box` session
+- `diagnose`: inspect tunnel/runtime state without requiring provider/profile selection; `diagnose config` validates config selection separately
+- `stop`: stop the recorded `sing-box` session without requiring provider/profile selection
 - `render`: emit sing-box config
 - in `network.mode=tun` on macOS, startup must reject nested-tunnel bring-up when the upstream VLESS server route already points at another VPN interface (`utun*`, `tun*`, `ppp*`, `ipsec*`)
 - `openconnect-tun setup`: scaffold `~/.config/openconnect-tun/config.json` plus placeholder keychain entries from one user-facing VPN profile name
