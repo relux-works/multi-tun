@@ -74,6 +74,7 @@ The live egress loop is verified on a real Xiaomi device with a separate observe
 vless-tun refresh dance
 vless-tun list dance
 vless-tun setup --source-url "vless://..."
+vless-tun set-current fortinetz de
 vless-tun start dance
 vless-tun start fortinetz nl
 vless-tun reconnect dance
@@ -86,6 +87,9 @@ openconnect-tun status
 openconnect-tun setup --vpn-name "Corp VPN"
 openconnect-tun profiles
 openconnect-tun inspect-profiles
+openconnect-tun set-current ural ural-outside
+openconnect-tun start msk msk-outside --mode full --dry-run
+openconnect-tun start ural ural-outside --mode split-include --dry-run
 dump status
 ```
 
@@ -130,6 +134,7 @@ vless-tun setup
 vless-tun init
 vless-tun refresh dance
 vless-tun list dance
+vless-tun set-current fortinetz de
 vless-tun start dance
 vless-tun start fortinetz nl
 vless-tun reconnect dance
@@ -154,6 +159,9 @@ openconnect-tun profiles
 openconnect-tun inspect-profiles
 openconnect-tun inspect-profiles --dir ~/Downloads/cisco-anyconnect-profiles/profiles
 openconnect-tun setup --vpn-name 'Corp VPN'
+openconnect-tun set-current ural ural-outside
+openconnect-tun start msk msk-outside --mode full --dry-run
+openconnect-tun start ural ural-outside --mode split-include --dry-run
 openconnect-tun start --profile 'Ural Outside extended' --mode full --dry-run
 openconnect-tun start --profile 'Ural Outside extended' --mode split-include \
   --second-factor-mode manual_otp \
@@ -182,6 +190,9 @@ Operational notes:
 - `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
 - `--profile` resolves against local AnyConnect XML `HostEntry` values and automatically deduplicates the same server repeated across `/opt/cisco/...` and `~/Downloads/...`.
 - the canonical lifecycle commands are now `start`, `reconnect`, `status`, and `stop`; `run`, `connect`, and `disconnect` remain as compatibility aliases.
+- `openconnect-tun set-current [server [profile]]` updates `default.server_url` and `default.profile` in `~/.config/openconnect-tun/config.json`. If the selected configured server has the current default profile or exactly one configured profile, the profile argument may be omitted; otherwise pass it explicitly.
+- `openconnect-tun start [server [profile]]` and `openconnect-tun reconnect [server [profile]]` can override the default configured server/profile for one run. Existing `--server` / `--profile` flags remain supported.
+- configured OpenConnect server keys can be friendly aliases. Put the real ASA endpoint in `servers.<alias>.server_url`; configured profile keys can also be aliases, with the real AnyConnect profile label in `servers.<alias>.profiles.<profile_alias>.name`.
 - `openconnect-tun` can read auth defaults from `~/.config/openconnect-tun/config.json`. The preferred shape is `servers.<url>.auth`, so credentials are selected from the server being used. The legacy root-level `auth` block still works as a compatibility fallback. The shipped bootstrap convention is fully keychain-backed: `servers.<url>.auth.username_keychain_account=corp-vpn/username` and `servers.<url>.auth.password_keychain_account=corp-vpn/password`. Plain `username` remains as a compatibility fallback. `servers.<url>.auth.second_factor.mode` controls whether the OTP step waits for manual SMS/manual entry or auto-submits TOTP.
 - live auth now defaults to `--auth aggregate`, which is the only path that currently completes the example SSO+CSD flow on this machine; `--auth openconnect` remains available as the direct `openconnect --authenticate` path for debugging. `vpn-auth` is used for the browser-assisted SAML steps in aggregate mode, with preset-cookie support for follow-up pages.
 - `./scripts/setup.sh` now treats the full live runtime as part of the shipped toolchain: it ensures `sing-box` for `vless-tun`, `totp-cli` for `vpn-auth`, builds `desktop/cmd/vpn-auth`, installs the resulting binary into `~/.local/bin`, and `./scripts/deinit.sh` removes that managed binary link again.
@@ -224,10 +235,11 @@ Example config:
   "cache_dir": "~/.cache/openconnect-tun",
   "default": {
     "server_url": "vpn-gw2.corp.example/outside",
-    "profile": "Ural Outside extended"
+    "profile": "ural-outside"
   },
   "servers": {
-    "vpn-gw2.corp.example/outside": {
+    "ural": {
+      "server_url": "vpn-gw2.corp.example/outside",
       "auth": {
         "username_keychain_account": "corp-vpn/username",
         "password_keychain_account": "corp-vpn/password",
@@ -253,7 +265,8 @@ Example config:
         }
       },
       "profiles": {
-        "Ural Outside extended": {
+        "ural-outside": {
+          "name": "Ural Outside extended",
           "mode": "split-include",
           "split_include": {
             "routes": [
@@ -281,7 +294,8 @@ Example config:
             ]
           }
         },
-        "Public Corp": {
+        "public": {
+          "name": "Public Corp",
           "mode": "full"
         }
       }
@@ -298,10 +312,12 @@ Field reference:
 - `cache_dir` helper/runtime logs: files under `~/.cache/openconnect-tun/runtime/`, such as orphan-cleanup logs
 - `cache_dir` separation: intentionally separate from `~/.cache/vless-tun`, so the two tunnel stacks do not overwrite each other's runtime state
 - `default.server_url`: the default OpenConnect target when `start|reconnect` runs without an explicit `--server`
-- `default.profile`: the default user-facing profile selector when `start|reconnect` runs without an explicit `--profile`
+- `default.profile`: the default configured profile key when `start|reconnect` runs without an explicit `--profile`; it may be a friendly alias such as `ural-outside`
 - `default` pairing: these two fields are meant to point at the same configured VPN choice, so the config reads as one default selection instead of separate root-level knobs
-- `servers.<url>`: configuration bucket for one concrete ASA endpoint such as `vpn-gw2.corp.example/outside`
-- `servers.<url>.auth`: preferred auth override for that concrete server. Use this when different ASA endpoints require different keychain entries, usernames, or aggregate-auth fallback behavior
+- `openconnect-tun set-current`: validates the selected `servers.<url>` entry and profile, then rewrites the paired `default` block for later no-argument starts
+- `servers.<alias>`: configuration bucket for one ASA endpoint. The key may be a friendly alias such as `msk` or `ural`
+- `servers.<alias>.server_url`: the real ASA endpoint such as `vpn-gw2.corp.example/outside`; legacy configs may still use the URL itself as the `servers` key
+- `servers.<alias>.auth`: preferred auth override for that concrete server. Use this when different ASA endpoints require different keychain entries, usernames, or aggregate-auth fallback behavior
 - `servers.<url>.auth.second_factor.mode`: second-factor behavior for browser-assisted SAML auth. Valid values are `manual_otp` and `totp_auto`.
 - `servers.<url>.auth.second_factor.mode=manual_otp`: auto-fill username/password, then wait for an SMS or other manual one-time code on terminal stdin. `vpn-auth` injects that code into the OTP WebView and submits the form; if the page returns to OTP, enter the next code in the terminal.
 - `servers.<url>.auth.second_factor.mode=totp_auto`: read `second_factor.totp_secret_keychain_account`, generate TOTP, and auto-submit the OTP form. The legacy top-level `totp_secret_keychain_account` is still accepted as a compatibility shorthand for `totp_auto`.
@@ -316,7 +332,8 @@ Field reference:
 - `servers.<url>.client_mimicry.local_hostname`: local hostname passed to `openconnect --local-hostname`; omitted values still use the host-detected name.
 - `servers.<url>.client_mimicry.auth_methods`: aggregate-auth `<capabilities>` auth methods. Omit the field to keep the Cisco-like default method list.
 - `servers.<url>.client_mimicry.http_headers`: extra or overriding aggregate-auth HTTP headers by name. Values are logged only by header name, not by value.
-- `servers.<url>.profiles.<profile>`: one user-facing profile variant under that server; this is where `mode` and `split_include` live
+- `servers.<alias>.profiles.<profile_alias>`: one profile variant under that server; this is where `name`, `mode`, and `split_include` live
+- `servers.<alias>.profiles.<profile_alias>.name`: the real AnyConnect profile label passed to OpenConnect, such as `Ural Outside extended`
 - legacy auth fallback: root-level `auth` is still accepted for older configs, but new configs should prefer `servers.<url>.auth`
 - `servers.<url>.profiles.<profile>.mode`: default connect mode for that profile. Use `split-include` for coexistence-safe split routing or `full` for stock full-tunnel behavior
 - `servers.<url>.profiles.<profile>.split_include.routes`: included CIDRs, hosts, or aliases passed to `vpn-slice` in split-include mode
@@ -343,6 +360,7 @@ vless-tun start [server [profile]]
 vless-tun render [server [profile]]
 vless-tun status [server [profile]]
 vless-tun reconnect [server [profile]]
+vless-tun set-current [server [profile]]
 vless-tun list [server]
 vless-tun refresh [server]
 vless-tun stop
@@ -350,9 +368,21 @@ vless-tun diagnose
 vless-tun diagnose config [server [profile]]
 ```
 
-`stop` and `diagnose` do not require a provider/profile; they scan all configured session cache directories for recorded tunnel state. Use `diagnose config` when you want to validate provider/profile selection.
+`stop` and `diagnose` do not require a provider/profile; they scan all configured session cache directories for recorded tunnel state. `reconnect` uses the same stop-all scan before starting the selected provider/profile, so switching `current.server` from one provider to another does not leave the old tunnel blocking the new one. Use `diagnose config` when you want to validate provider/profile selection.
 
 Use `--config` when you intentionally want a non-default config file. `setup` and `init` still accept one positional config path for bootstrapping.
+
+### `vless-tun set-current`
+
+Updates `current.server` and `current.profile` in `~/.config/vless-tun/config.json`, so later no-argument commands use that selection:
+
+```bash
+vless-tun set-current dance
+vless-tun set-current freedom
+vless-tun set-current fortinetz de
+```
+
+If the selected server has a `default` profile or exactly one profile, the profile argument may be omitted. If the server has multiple profiles and no `default`, pass the profile explicitly.
 
 ### `vless-tun init`
 
@@ -406,7 +436,7 @@ In `network.mode=tun`, `start` resolves the launch backend automatically. If the
 
 ### `vless-tun reconnect`
 
-Reloads the local config, refreshes the subscription cache by default, rerenders the selected profile, stops any currently recorded session, and starts a fresh `sing-box` session.
+Reloads the local config, refreshes the subscription cache by default, rerenders the selected profile, stops any currently recorded session across all configured VLESS server cache directories, and starts a fresh `sing-box` session.
 
 This is the command to use after changing:
 
@@ -629,7 +659,7 @@ go build -o cisco-dump ./desktop/cmd/cisco-dump
 ## Notes
 
 - This version manages the local `sing-box` session lifecycle with `start`, `status`, `stop`, and a configurable privileged TUN backend for macOS.
-- `reconnect` is the "apply latest config" path: it rereads local config, refreshes the subscription by default, rerenders, and replaces the current session.
+- `reconnect` is the "apply latest config" path: it rereads local config, refreshes the subscription by default, rerenders, stops any recorded VLESS session across configured server cache directories, and starts the selected session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
 - `system_proxy` render mode has been removed; legacy configs should use `network.mode=tun` and drop any old `network.system_proxy` block.

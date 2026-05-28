@@ -6,6 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/session"
 )
 
 func TestStartAlias_UsesStartFailurePrefix(t *testing.T) {
@@ -185,6 +189,38 @@ func TestStopTargetsIncludeAllServerCacheDirsWhenNoServerSelected(t *testing.T) 
 	}
 }
 
+func TestReconnectStopsAllConfiguredSessionCacheDirs(t *testing.T) {
+	path := writeCLISelectionConfig(t)
+
+	previous := stopCurrentSessionFunc
+	var stoppedCacheDirs []string
+	stopCurrentSessionFunc = func(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
+		stoppedCacheDirs = append(stoppedCacheDirs, cacheDir)
+		return nil, "none", nil
+	}
+	t.Cleanup(func() {
+		stopCurrentSessionFunc = previous
+	})
+
+	results, err := stopConfiguredSessions(path, false, time.Second)
+	if err != nil {
+		t.Fatalf("stopConfiguredSessions() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("stopConfiguredSessions() returned %d stopped sessions, want none", len(results))
+	}
+
+	cacheDirs := map[string]bool{}
+	for _, cacheDir := range stoppedCacheDirs {
+		cacheDirs[cacheDir] = true
+	}
+	for _, want := range []string{"/tmp/vless-dance", "/tmp/vless-fortinetz", "/tmp/vless-freedom"} {
+		if !cacheDirs[want] {
+			t.Fatalf("stopped cache dirs missing %q: %v", want, stoppedCacheDirs)
+		}
+	}
+}
+
 func TestDiagnoseDefaultsToTunnelAndRejectsProviderArgument(t *testing.T) {
 	t.Parallel()
 
@@ -247,6 +283,56 @@ func TestDiagnoseConfigUsesPositionalServer(t *testing.T) {
 	}
 }
 
+func TestSetCurrentUsesPositionalServerAndWritesConfig(t *testing.T) {
+	t.Parallel()
+
+	path := writeCLISelectionConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"set-current", "--config", path, "dance"})
+	if exitCode != 0 {
+		t.Fatalf("Run(set-current) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "current.server: dance") {
+		t.Fatalf("stdout = %q, want current server", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "current.profile: default") {
+		t.Fatalf("stdout = %q, want default profile", stdout.String())
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"server": "dance"`) {
+		t.Fatalf("config = %s, want current server dance", string(raw))
+	}
+	if !strings.Contains(string(raw), `"profile": "default"`) {
+		t.Fatalf("config = %s, want current profile default", string(raw))
+	}
+}
+
+func TestSetCurrentRequiresProfileForMultiProfileServer(t *testing.T) {
+	t.Parallel()
+
+	path := writeCLISelectionConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"set-current", "--config", path, "fortinetz"})
+	if exitCode != 1 {
+		t.Fatalf("Run(set-current) exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "profile is required") {
+		t.Fatalf("stderr = %q, want profile required", stderr.String())
+	}
+}
+
 func TestSetupWritesConfigAndReportsPath(t *testing.T) {
 	t.Parallel()
 
@@ -270,4 +356,53 @@ func TestSetupWritesConfigAndReportsPath(t *testing.T) {
 	if _, err := os.Stat(configPath); err != nil {
 		t.Fatalf("Stat(configPath) error = %v", err)
 	}
+}
+
+func writeCLISelectionConfig(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {
+    "server": "fortinetz",
+    "profile": "nl"
+  },
+  "servers": {
+    "dance": {
+      "source": {"mode": "proxy", "url": "https://example.com/dance"},
+      "cache_dir": "/tmp/vless-dance",
+      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "profiles": {
+        "default": {"selector": "Sweden"}
+      }
+    },
+    "fortinetz": {
+      "source": {"mode": "proxy", "url": "https://example.com/fortinetz"},
+      "cache_dir": "/tmp/vless-fortinetz",
+      "artifacts": {"singbox_config_path": "/tmp/fortinetz.json"},
+      "profiles": {
+        "nl": {"selector": "Netherlands"},
+        "de": {"selector": "Germany"}
+      }
+    },
+    "freedom": {
+      "source": {"mode": "proxy", "url": "https://example.com/freedom"},
+      "cache_dir": "/tmp/vless-freedom",
+      "artifacts": {"singbox_config_path": "/tmp/freedom.json"},
+      "profiles": {
+        "fr": {"selector": "France"}
+      }
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
 }

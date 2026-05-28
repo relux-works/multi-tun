@@ -88,6 +88,8 @@ func (a *App) Run(args []string) int {
 		return 0
 	case "setup":
 		return a.runSetup(args[1:])
+	case "set-current":
+		return a.runSetCurrent(args[1:])
 	case "start":
 		return a.runStart(args[1:])
 	case "run":
@@ -117,6 +119,35 @@ func (a *App) Run(args []string) int {
 		a.printUsage()
 		return 2
 	}
+}
+
+func (a *App) runSetCurrent(args []string) int {
+	fs := flag.NewFlagSet("set-current", flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+
+	configPath := fs.String("config", "", "Path to openconnect-tun config file")
+	serverURL := fs.String("server", "", "Configured ASA endpoint, for example vpn-gw2.corp.example/outside")
+	profile := fs.String("profile", "", "Configured profile name")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	selection, err := commandOpenConnectSelection(*serverURL, *profile, fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "set-current failed: %v\n", err)
+		return 2
+	}
+
+	_, current, resolvedConfigPath, err := openconnectcfg.SetCurrent(*configPath, selection)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "set-current failed: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(a.stdout, "config: %s\n", resolvedConfigPath)
+	fmt.Fprintf(a.stdout, "current.server_url: %s\n", current.ServerURL)
+	fmt.Fprintf(a.stdout, "current.profile: %s\n", current.Profile)
+	return 0
 }
 
 func (a *App) runSetup(args []string) int {
@@ -382,6 +413,7 @@ func toOpenConnectClientMimicry(cfg openconnectcfg.ClientMimicryConfig) openconn
 func (a *App) runRun(args []string) int {
 	options, exitCode, err := a.parseRunOptions("run", args)
 	if err != nil {
+		a.printRunOptionsError("run", exitCode, err)
 		return exitCode
 	}
 	return a.executeRun(options, false, "run")
@@ -390,6 +422,7 @@ func (a *App) runRun(args []string) int {
 func (a *App) runStart(args []string) int {
 	options, exitCode, err := a.parseRunOptions("start", args)
 	if err != nil {
+		a.printRunOptionsError("start", exitCode, err)
 		return exitCode
 	}
 	return a.executeRun(options, false, "start")
@@ -398,9 +431,21 @@ func (a *App) runStart(args []string) int {
 func (a *App) runReconnect(args []string) int {
 	options, exitCode, err := a.parseRunOptions("reconnect", args)
 	if err != nil {
+		a.printRunOptionsError("reconnect", exitCode, err)
 		return exitCode
 	}
 	return a.executeRun(options, true, "reconnect")
+}
+
+func (a *App) printRunOptionsError(command string, exitCode int, err error) {
+	if err == nil {
+		return
+	}
+	if exitCode == 2 {
+		fmt.Fprintf(a.stderr, "%s usage error: %v\n", command, err)
+		return
+	}
+	fmt.Fprintf(a.stderr, "%s failed: %v\n", command, err)
 }
 
 func (a *App) parseRunOptions(name string, args []string) (runOptions, int, error) {
@@ -423,7 +468,16 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 	fs.Var(&includeRoutes, "route", "Included route/host/alias for split-include mode; may be repeated")
 	dryRun := fs.Bool("dry-run", false, "Print resolved plan without starting openconnect")
 
-	if err := fs.Parse(args); err != nil {
+	normalizedArgs, err := normalizeOpenConnectFlagOrder(args)
+	if err != nil {
+		return runOptions{}, 2, err
+	}
+	if err := fs.Parse(normalizedArgs); err != nil {
+		return runOptions{}, 2, err
+	}
+
+	selectionOptions, err := commandOpenConnectSelection(*server, *profile, fs.Args())
+	if err != nil {
 		return runOptions{}, 2, err
 	}
 
@@ -433,8 +487,40 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 	}
 
 	defaultSelection := cfg.DefaultSelection()
-	resolvedServer := firstNonEmpty(*server, defaultSelection.ServerURL)
-	resolvedProfile := firstNonEmpty(*profile, defaultSelection.Profile)
+	resolvedServer := firstNonEmpty(selectionOptions.ServerURL, defaultSelection.ServerURL)
+	resolvedProfile := firstNonEmpty(selectionOptions.Profile, defaultSelection.Profile)
+	if selectionOptions.ServerURL != "" {
+		if cfg.HasConfiguredServerProfiles(selectionOptions.ServerURL) {
+			resolvedSelection, resolveErr := cfg.ResolveRuntimeSelection(selectionOptions)
+			if resolveErr != nil {
+				return runOptions{}, 1, resolveErr
+			}
+			resolvedServer = resolvedSelection.ServerURL
+			resolvedProfile = resolvedSelection.Profile
+		}
+	} else if selectionOptions.Profile != "" && resolvedServer != "" {
+		if cfg.HasConfiguredServerProfiles(resolvedServer) {
+			resolvedSelection, resolveErr := cfg.ResolveRuntimeSelection(openconnectcfg.SelectionOptions{
+				ServerURL: resolvedServer,
+				Profile:   selectionOptions.Profile,
+			})
+			if resolveErr != nil {
+				return runOptions{}, 1, resolveErr
+			}
+			resolvedServer = resolvedSelection.ServerURL
+			resolvedProfile = resolvedSelection.Profile
+		}
+	} else if resolvedServer != "" && cfg.HasConfiguredServerProfiles(resolvedServer) {
+		resolvedSelection, resolveErr := cfg.ResolveRuntimeSelection(openconnectcfg.SelectionOptions{
+			ServerURL: resolvedServer,
+			Profile:   resolvedProfile,
+		})
+		if resolveErr != nil {
+			return runOptions{}, 1, resolveErr
+		}
+		resolvedServer = resolvedSelection.ServerURL
+		resolvedProfile = resolvedSelection.Profile
+	}
 	effectiveServer := resolvedServer
 	if effectiveServer == "" && resolvedProfile != "" {
 		serverFromConfig, ok, resolveErr := cfg.ResolveServerURLForProfile(resolvedProfile)
@@ -555,6 +641,9 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 	fmt.Fprintf(a.stdout, "mode: %s\n", result.Mode)
 	fmt.Fprintf(a.stdout, "privileged_mode: %s\n", result.PrivilegedMode)
 	fmt.Fprintf(a.stdout, "server: %s\n", result.Server)
+	if options.profile != "" {
+		fmt.Fprintf(a.stdout, "profile: %s\n", options.profile)
+	}
 	if result.ResolvedFrom != "" {
 		fmt.Fprintf(a.stdout, "resolved_from: %s\n", result.ResolvedFrom)
 	}
@@ -730,6 +819,117 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func commandOpenConnectSelection(serverFlag, profileFlag string, args []string) (openconnectcfg.SelectionOptions, error) {
+	selection, err := parseOpenConnectPositionalSelection(args)
+	if err != nil {
+		return openconnectcfg.SelectionOptions{}, err
+	}
+
+	serverURL := strings.TrimSpace(serverFlag)
+	profile := strings.TrimSpace(profileFlag)
+	if serverURL != "" && selection.ServerURL != "" {
+		return openconnectcfg.SelectionOptions{}, errors.New("server specified both with --server and positional argument")
+	}
+	if profile != "" && selection.Profile != "" {
+		return openconnectcfg.SelectionOptions{}, errors.New("profile specified both with --profile and positional argument")
+	}
+	if serverURL == "" {
+		serverURL = selection.ServerURL
+	}
+	if profile == "" {
+		profile = selection.Profile
+	}
+
+	return openconnectcfg.SelectionOptions{
+		ServerURL: serverURL,
+		Profile:   profile,
+	}, nil
+}
+
+func parseOpenConnectPositionalSelection(args []string) (openconnectcfg.SelectionOptions, error) {
+	if len(args) > 2 {
+		return openconnectcfg.SelectionOptions{}, fmt.Errorf("unexpected argument %q; expected at most positional server and profile arguments", args[2])
+	}
+
+	selection := openconnectcfg.SelectionOptions{}
+	if len(args) >= 1 {
+		selection.ServerURL = strings.TrimSpace(args[0])
+	}
+	if len(args) >= 2 {
+		selection.Profile = strings.TrimSpace(args[1])
+	}
+	return selection, nil
+}
+
+func normalizeOpenConnectFlagOrder(args []string) ([]string, error) {
+	boolFlags := map[string]struct{}{
+		"dry-run": {},
+	}
+	valueFlags := map[string]struct{}{
+		"auth":               {},
+		"bypass-suffixes":    {},
+		"cache-dir":          {},
+		"config":             {},
+		"mode":               {},
+		"password":           {},
+		"profile":            {},
+		"route":              {},
+		"second-factor-mode": {},
+		"server":             {},
+		"totp-secret":        {},
+		"username":           {},
+		"vpn-domains":        {},
+	}
+
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, 2)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionals = append(positionals, arg)
+			continue
+		}
+
+		name, hasInlineValue := flagName(arg)
+		if name == "" {
+			flags = append(flags, arg)
+			continue
+		}
+		if _, ok := boolFlags[name]; ok {
+			flags = append(flags, arg)
+			continue
+		}
+		if _, ok := valueFlags[name]; ok {
+			flags = append(flags, arg)
+			if !hasInlineValue {
+				if i+1 >= len(args) {
+					return nil, fmt.Errorf("flag %s requires a value", arg)
+				}
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		flags = append(flags, arg)
+	}
+
+	return append(flags, positionals...), nil
+}
+
+func flagName(arg string) (string, bool) {
+	arg = strings.TrimLeft(arg, "-")
+	if arg == "" {
+		return "", false
+	}
+	name, value, hasValue := strings.Cut(arg, "=")
+	_ = value
+	return name, hasValue
+}
+
 func (a *App) runRoutes(args []string) int {
 	fs := flag.NewFlagSet("routes", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
@@ -819,8 +1019,9 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
 	fmt.Fprintln(a.stdout, "  openconnect-tun setup --vpn-name name [--server-url host/path] [--config path] [--force]")
-	fmt.Fprintln(a.stdout, "  openconnect-tun start [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--second-factor-mode manual_otp|totp_auto] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
-	fmt.Fprintln(a.stdout, "  openconnect-tun reconnect [--server host/path | --profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--second-factor-mode manual_otp|totp_auto] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
+	fmt.Fprintln(a.stdout, "  openconnect-tun set-current [--config path] [--server host/path | server [profile]] [--profile name]")
+	fmt.Fprintln(a.stdout, "  openconnect-tun start [--server host/path | server [profile]] [--profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--second-factor-mode manual_otp|totp_auto] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
+	fmt.Fprintln(a.stdout, "  openconnect-tun reconnect [--server host/path | server [profile]] [--profile name] [--auth openconnect|aggregate|password] [--mode full|split-include] [--second-factor-mode manual_otp|totp_auto] [--route cidr] [--vpn-domains a,b] [--bypass-suffixes a,b] [--dry-run]")
 	fmt.Fprintln(a.stdout, "  openconnect-tun stop")
 	fmt.Fprintln(a.stdout, "  openconnect-tun helper install|uninstall|status")
 	fmt.Fprintln(a.stdout, "  openconnect-tun routes")

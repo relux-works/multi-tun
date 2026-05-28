@@ -27,6 +27,8 @@ Build local CLIs and agent guidance that can:
 
 - Load a live subscription URL from gitignored local config.
 - Allow lifecycle commands to override `current.server` and `current.profile` with positional `server [profile]` arguments while keeping `~/.config/vless-tun/config.json` as the no-argument default.
+- Allow `openconnect-tun start|reconnect` to override `default.server_url` and `default.profile` with positional `server [profile]` arguments while keeping `~/.config/openconnect-tun/config.json` as the no-argument default.
+- Allow configured OpenConnect server/profile aliases, where `servers.<alias>.server_url` is the real ASA endpoint and `servers.<alias>.profiles.<profile_alias>.name` is the real AnyConnect profile label.
 - Support plaintext payloads and base64 payloads.
 - Parse one or more `vless://` URIs.
 - Inspect subscription URLs through a safe analyzer chain that reports fetch/parse attempts without printing raw VLESS URIs or sensitive key material.
@@ -64,8 +66,9 @@ Build local CLIs and agent guidance that can:
 - `init`: create `~/.config/vless-tun/config.json` by default
 - `refresh`: fetch and cache subscription
 - `list`: inspect cached profiles for the selected configured server
+- `set-current`: persist `current.server` and `current.profile`; profile may be omitted when the selected server has a `default` profile or exactly one profile
 - `run`: start `sing-box` in the background from the rendered config and persist session metadata; provider/profile shortcuts such as `start dance`, `start freedom`, and `start fortinetz nl` override the default config selection
-- `reconnect`: refresh local state and replace the active `sing-box` session in one command
+- `reconnect`: refresh local state, stop recorded `sing-box` sessions across configured server cache directories, and start the selected profile in one command
 - `status`: show local runtime state, launch backend, cached selection, and configured bypasses
 - `diagnose`: inspect tunnel/runtime state without requiring provider/profile selection; `diagnose config` validates config selection separately
 - `stop`: stop the recorded `sing-box` session without requiring provider/profile selection
@@ -75,7 +78,8 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun status`: inspect AnyConnect CLI state and active connection metadata
 - `openconnect-tun profiles`: list ASA profiles surfaced by `vpn hosts`
 - `openconnect-tun inspect-profiles`: parse local AnyConnect XML profiles and expose server entries plus bypass-relevant flags
-- `openconnect-tun run`: authenticate with aggregate-auth or `openconnect --authenticate`, optionally using `vpn-auth` only as the external-browser automation helper, then start OpenConnect in either `full` or `split-include` mode
+- `openconnect-tun set-current`: persist `default.server_url` and `default.profile`; profile may be omitted when the selected configured server has the current default profile or exactly one configured profile; server/profile inputs may be friendly aliases
+- `openconnect-tun run`: authenticate with aggregate-auth or `openconnect --authenticate`, optionally using `vpn-auth` only as the external-browser automation helper, then start OpenConnect in either `full` or `split-include` mode; `start msk msk-outside` and `reconnect ural ural-outside` override the default config selection for one run while passing the configured real server URL/profile label to OpenConnect
 - `openconnect-tun` config may define `servers.<url>.auth.second_factor.mode` as `manual_otp` or `totp_auto`, with `--second-factor-mode` as a per-run override for SAML flows whose second factor changes between SMS/manual OTP and authenticator TOTP
 - `openconnect-tun` config may define `servers.<url>.auth.fallback_servers` for endpoint-specific aggregate-auth fallback targets when a balancer backend returns an auth-request without `sso-v2-login`
 - `openconnect-tun` config may define `servers.<url>.client_mimicry` for endpoint-specific AnyConnect identity: user-agent, version, OS/device-id, local hostname, aggregate-auth capabilities, and aggregate-auth HTTP headers

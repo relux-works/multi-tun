@@ -284,6 +284,35 @@ func Setup(path string, options SetupOptions, force bool) (ProjectConfig, error)
 	return cfg, nil
 }
 
+func SetCurrent(path string, options SelectionOptions) (ProjectConfig, EffectiveSelection, string, error) {
+	resolvedPath, err := ResolveLoadPath(path)
+	if err != nil {
+		return ProjectConfig{}, EffectiveSelection{}, "", err
+	}
+
+	cfg, err := Load(resolvedPath)
+	if err != nil {
+		return ProjectConfig{}, EffectiveSelection{}, "", err
+	}
+	serverName, profileName, err := cfg.resolveCurrentUpdate(options)
+	if err != nil {
+		return ProjectConfig{}, EffectiveSelection{}, "", err
+	}
+
+	cfg.Current = &CurrentConfig{
+		Server:  serverName,
+		Profile: profileName,
+	}
+	effective, selection, err := cfg.Effective(SelectionOptions{})
+	if err != nil {
+		return ProjectConfig{}, EffectiveSelection{}, "", err
+	}
+	if err := writeJSON(resolvedPath, cfg); err != nil {
+		return ProjectConfig{}, EffectiveSelection{}, "", err
+	}
+	return effective, selection, resolvedPath, nil
+}
+
 func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectConfig {
 	serverName := firstNonEmpty(options.ServerName, "default")
 	profileName := firstNonEmpty(options.ConfigProfile, "default")
@@ -467,6 +496,56 @@ func (c ProjectConfig) resolveServerConfig(override string) (string, ServerConfi
 		}
 	}
 	return "", ServerConfig{}, errors.New("current.server is required when multiple vless servers are configured")
+}
+
+func (c ProjectConfig) resolveCurrentUpdate(options SelectionOptions) (string, string, error) {
+	if len(c.Servers) == 0 {
+		return "", "", errors.New("set-current requires a config with servers")
+	}
+
+	serverName := strings.TrimSpace(options.Server)
+	if serverName == "" {
+		serverName = currentServerName(c.Current)
+	}
+	if serverName == "" {
+		if len(c.Servers) == 1 {
+			for onlyName := range c.Servers {
+				serverName = onlyName
+			}
+		}
+	}
+	if serverName == "" {
+		return "", "", errors.New("server is required")
+	}
+
+	serverCfg, ok := c.Servers[serverName]
+	if !ok {
+		return "", "", errors.New("selected server " + serverName + " is not configured")
+	}
+	if len(serverCfg.Profiles) == 0 {
+		if strings.TrimSpace(options.Profile) != "" {
+			return "", "", errors.New("selected server " + serverName + " has no configured profiles")
+		}
+		return serverName, "", nil
+	}
+
+	profileName := strings.TrimSpace(options.Profile)
+	if profileName == "" {
+		if _, ok := serverCfg.Profiles["default"]; ok {
+			profileName = "default"
+		} else if len(serverCfg.Profiles) == 1 {
+			for onlyName := range serverCfg.Profiles {
+				profileName = onlyName
+			}
+		}
+	}
+	if profileName == "" {
+		return "", "", errors.New("profile is required when selected vless server has multiple profiles and no default profile")
+	}
+	if _, ok := serverCfg.Profiles[profileName]; !ok {
+		return "", "", errors.New("selected profile " + profileName + " is not configured for selected server")
+	}
+	return serverName, profileName, nil
 }
 
 func (c ProjectConfig) resolveProfileConfig(server ServerConfig, override string, useCurrent bool) (string, ProfileConfig, bool, error) {

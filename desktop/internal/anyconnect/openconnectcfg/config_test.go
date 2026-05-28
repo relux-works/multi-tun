@@ -50,6 +50,32 @@ func TestEffectiveModeUsesNestedProfileMode(t *testing.T) {
 	}
 }
 
+func TestEffectiveModeUsesServerAndProfileAliases(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		DefaultMode: "full",
+		Servers: map[string]ServerConfig{
+			"ural": {
+				ServerURL: "vpn-gw2.corp.example/outside",
+				Profiles: map[string]ProfileConfig{
+					"ural-outside": {
+						Name: "Ural Outside extended",
+						Mode: "split-include",
+					},
+				},
+			},
+		},
+	}
+
+	if got := cfg.EffectiveMode("ural", "ural-outside"); got != "split-include" {
+		t.Fatalf("EffectiveMode(alias) = %q, want split-include", got)
+	}
+	if got := cfg.EffectiveMode("vpn-gw2.corp.example/outside", "Ural Outside extended"); got != "split-include" {
+		t.Fatalf("EffectiveMode(actual) = %q, want split-include", got)
+	}
+}
+
 func TestResolveServerURLForProfileUsesConfiguredNestedProfile(t *testing.T) {
 	t.Parallel()
 
@@ -72,6 +98,39 @@ func TestResolveServerURLForProfileUsesConfiguredNestedProfile(t *testing.T) {
 	}
 	if serverURL != "vpn-gw2.corp.example/outside" {
 		t.Fatalf("ResolveServerURLForProfile() = %q, want %q", serverURL, "vpn-gw2.corp.example/outside")
+	}
+}
+
+func TestResolveServerURLForProfileUsesProfileAliasName(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Servers: map[string]ServerConfig{
+			"ural": {
+				ServerURL: "vpn-gw2.corp.example/outside",
+				Profiles: map[string]ProfileConfig{
+					"ural-outside": {
+						Name: "Ural Outside extended",
+					},
+				},
+			},
+		},
+	}
+
+	serverURL, ok, err := cfg.ResolveServerURLForProfile("ural-outside")
+	if err != nil {
+		t.Fatalf("ResolveServerURLForProfile(alias) error = %v", err)
+	}
+	if !ok || serverURL != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("ResolveServerURLForProfile(alias) = %q/%v, want resolved server", serverURL, ok)
+	}
+
+	serverURL, ok, err = cfg.ResolveServerURLForProfile("Ural Outside extended")
+	if err != nil {
+		t.Fatalf("ResolveServerURLForProfile(actual) error = %v", err)
+	}
+	if !ok || serverURL != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("ResolveServerURLForProfile(actual) = %q/%v, want resolved server", serverURL, ok)
 	}
 }
 
@@ -102,6 +161,145 @@ func TestResolveServerURLForProfileRejectsAmbiguousNestedProfiles(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "multiple configured servers") {
 		t.Fatalf("ResolveServerURLForProfile() error = %v, want ambiguity message", err)
+	}
+}
+
+func TestSetCurrentUsesDefaultProfileWhenProfileOmitted(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+	_, selection, resolved, err := SetCurrent(path, SelectionOptions{
+		ServerURL: "vpn-gw2.corp.example/outside",
+	})
+	if err != nil {
+		t.Fatalf("SetCurrent() error = %v", err)
+	}
+	if resolved != path {
+		t.Fatalf("resolved = %q, want %q", resolved, path)
+	}
+	if selection.ServerURL != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("selection.ServerURL = %q", selection.ServerURL)
+	}
+	if selection.Profile != "Ural Outside extended" {
+		t.Fatalf("selection.Profile = %q, want default profile", selection.Profile)
+	}
+}
+
+func TestSetCurrentUsesOnlyProfileWhenProfileOmitted(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+	_, selection, _, err := SetCurrent(path, SelectionOptions{
+		ServerURL: "vpn-gw3.corp.example/outside",
+	})
+	if err != nil {
+		t.Fatalf("SetCurrent() error = %v", err)
+	}
+	if selection.Profile != "Public Corp" {
+		t.Fatalf("selection.Profile = %q, want only profile", selection.Profile)
+	}
+}
+
+func TestSetCurrentRequiresProfileForMultiProfileServerWithoutDefault(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+	_, _, _, err := SetCurrent(path, SelectionOptions{
+		ServerURL: "vpn-gw4.corp.example/outside",
+	})
+	if err == nil {
+		t.Fatal("SetCurrent() error = nil, want missing profile error")
+	}
+	if !strings.Contains(err.Error(), "profile is required") {
+		t.Fatalf("SetCurrent() error = %v, want profile required", err)
+	}
+}
+
+func TestSetCurrentStoresExplicitProfile(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+	_, selection, _, err := SetCurrent(path, SelectionOptions{
+		ServerURL: "vpn-gw4.corp.example/outside",
+		Profile:   "Admin Corp",
+	})
+	if err != nil {
+		t.Fatalf("SetCurrent() error = %v", err)
+	}
+	if selection.Profile != "Admin Corp" {
+		t.Fatalf("selection.Profile = %q, want explicit profile", selection.Profile)
+	}
+
+	cfg, _, err := LoadOptional(path)
+	if err != nil {
+		t.Fatalf("LoadOptional() error = %v", err)
+	}
+	current := cfg.DefaultSelection()
+	if current.ServerURL != "vpn-gw4.corp.example/outside" || current.Profile != "Admin Corp" {
+		t.Fatalf("DefaultSelection() = %#v, want explicit selection", current)
+	}
+}
+
+func TestSetCurrentStoresAliasProfileAndActualServerURL(t *testing.T) {
+	t.Parallel()
+
+	path := writeAliasConfig(t)
+	_, selection, _, err := SetCurrent(path, SelectionOptions{
+		ServerURL: "ural",
+		Profile:   "ural-outside",
+	})
+	if err != nil {
+		t.Fatalf("SetCurrent() error = %v", err)
+	}
+	if selection.ServerURL != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("selection.ServerURL = %q, want actual URL", selection.ServerURL)
+	}
+	if selection.Profile != "ural-outside" {
+		t.Fatalf("selection.Profile = %q, want profile alias", selection.Profile)
+	}
+
+	cfg, _, err := LoadOptional(path)
+	if err != nil {
+		t.Fatalf("LoadOptional() error = %v", err)
+	}
+	runtime, err := cfg.ResolveRuntimeSelection(SelectionOptions{
+		ServerURL: cfg.DefaultSelection().ServerURL,
+		Profile:   cfg.DefaultSelection().Profile,
+	})
+	if err != nil {
+		t.Fatalf("ResolveRuntimeSelection() error = %v", err)
+	}
+	if runtime.ServerKey != "ural" || runtime.ProfileKey != "ural-outside" {
+		t.Fatalf("runtime keys = %q/%q, want aliases", runtime.ServerKey, runtime.ProfileKey)
+	}
+	if runtime.ServerURL != "vpn-gw2.corp.example/outside" || runtime.Profile != "Ural Outside extended" {
+		t.Fatalf("runtime actuals = %q/%q, want actual URL/profile", runtime.ServerURL, runtime.Profile)
+	}
+}
+
+func TestSetCurrentRejectsUnknownServerAndProfile(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+	_, _, _, err := SetCurrent(path, SelectionOptions{
+		ServerURL: "vpn-gw5.corp.example/outside",
+	})
+	if err == nil {
+		t.Fatal("SetCurrent() unknown server error = nil")
+	}
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("SetCurrent() error = %v, want not configured", err)
+	}
+
+	_, _, _, err = SetCurrent(path, SelectionOptions{
+		ServerURL: "vpn-gw3.corp.example/outside",
+		Profile:   "Missing Corp",
+	})
+	if err == nil {
+		t.Fatal("SetCurrent() unknown profile error = nil")
+	}
+	if !strings.Contains(err.Error(), "profile \"Missing Corp\" is not configured") {
+		t.Fatalf("SetCurrent() error = %v, want missing profile", err)
 	}
 }
 
@@ -292,4 +490,75 @@ func TestInitWritesFullModeScaffold(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("Stat(path) error = %v", err)
 	}
+}
+
+func writeSetCurrentConfig(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(path, []byte(`{
+  "cache_dir": ".cache/openconnect-tun",
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include"
+        },
+        "Public Corp": {
+          "mode": "full"
+        }
+      }
+    },
+    "vpn-gw3.corp.example/outside": {
+      "profiles": {
+        "Public Corp": {
+          "mode": "full"
+        }
+      }
+    },
+    "vpn-gw4.corp.example/outside": {
+      "profiles": {
+        "Admin Corp": {
+          "mode": "split-include"
+        },
+        "Public Corp": {
+          "mode": "full"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(path) error = %v", err)
+	}
+	return path
+}
+
+func writeAliasConfig(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(path, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "ural-outside"
+  },
+  "servers": {
+    "ural": {
+      "server_url": "vpn-gw2.corp.example/outside",
+      "profiles": {
+        "ural-outside": {
+          "name": "Ural Outside extended",
+          "mode": "split-include"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(path) error = %v", err)
+	}
+	return path
 }

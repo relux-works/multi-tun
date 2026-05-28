@@ -31,6 +31,14 @@ type sessionTarget struct {
 	launch   config.PrivilegedLaunchConfig
 }
 
+type stopSessionResult struct {
+	target  sessionTarget
+	stopped *session.CurrentSession
+	state   string
+}
+
+var stopCurrentSessionFunc = stopCurrentSession
+
 func (a *App) runStart(args []string) int {
 	return a.runStartCommand("start", args)
 }
@@ -140,11 +148,13 @@ func (a *App) runReconnect(args []string) int {
 		return 1
 	}
 
-	stopped, state, err := stopCurrentSession(cfg.CacheDir, cfg.LaunchOrDefault(), *force, *timeout)
+	stoppedSessions, err := stopConfiguredSessions(*configPath, *force, *timeout)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		if stopped != nil && stopped.LogPath != "" {
-			fmt.Fprintf(a.stderr, "log=%s\n", stopped.LogPath)
+		for _, result := range stoppedSessions {
+			if result.stopped != nil && result.stopped.LogPath != "" {
+				fmt.Fprintf(a.stderr, "log=%s\n", result.stopped.LogPath)
+			}
 		}
 		return 1
 	}
@@ -165,10 +175,17 @@ func (a *App) runReconnect(args []string) int {
 	}
 
 	fmt.Fprintf(a.stdout, "reconnected sing-box session %s\n", started.ID)
-	if stopped != nil {
-		fmt.Fprintf(a.stdout, "previous_session: %s (%s)\n", stopped.ID, state)
-	} else {
+	if len(stoppedSessions) == 0 {
 		fmt.Fprintln(a.stdout, "previous_session: none")
+	} else {
+		for _, result := range stoppedSessions {
+			label := result.target.label
+			if label == "" {
+				fmt.Fprintf(a.stdout, "previous_session: %s (%s)\n", result.stopped.ID, result.state)
+				continue
+			}
+			fmt.Fprintf(a.stdout, "previous_session: %s %s (%s)\n", label, result.stopped.ID, result.state)
+		}
 	}
 	fmt.Fprintf(a.stdout, "pid=%d profile=%s (%s)\n", started.PID, started.ProfileName, started.ProfileID)
 	fmt.Fprintf(a.stdout, "mode=%s\n", started.Mode)
@@ -205,7 +222,7 @@ func (a *App) runStop(args []string) int {
 
 	stoppedAny := false
 	for _, target := range targets {
-		stopped, state, err := stopCurrentSession(target.cacheDir, target.launch, *force, *timeout)
+		stopped, state, err := stopCurrentSessionFunc(target.cacheDir, target.launch, *force, *timeout)
 		if err != nil {
 			fmt.Fprintf(a.stderr, "stop failed")
 			if target.label != "" {
@@ -307,6 +324,33 @@ func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, f
 		return &stopped, state, err
 	}
 	return &stopped, state, nil
+}
+
+func stopConfiguredSessions(configPath string, force bool, timeout time.Duration) ([]stopSessionResult, error) {
+	targets, err := sessionTargetsForConfig(configPath, "")
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]stopSessionResult, 0, len(targets))
+	for _, target := range targets {
+		stopped, state, err := stopCurrentSessionFunc(target.cacheDir, target.launch, force, timeout)
+		if stopped != nil {
+			results = append(results, stopSessionResult{
+				target:  target,
+				stopped: stopped,
+				state:   state,
+			})
+		}
+		if err != nil {
+			label := target.label
+			if label == "" {
+				return results, err
+			}
+			return results, fmt.Errorf("%s: %w", label, err)
+		}
+	}
+	return results, nil
 }
 
 func sessionTargetsForConfig(configPath, serverName string) ([]sessionTarget, error) {
