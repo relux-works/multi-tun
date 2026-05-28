@@ -29,6 +29,18 @@ type SetupOptions struct {
 	Auth      AuthConfig
 }
 
+type SelectionOptions struct {
+	ServerURL string
+	Profile   string
+}
+
+type RuntimeSelection struct {
+	ServerKey  string
+	ServerURL  string
+	ProfileKey string
+	Profile    string
+}
+
 type DefaultSelection struct {
 	ServerURL string `json:"server_url,omitempty"`
 	Profile   string `json:"profile,omitempty"`
@@ -46,6 +58,8 @@ type VPNConfig struct {
 }
 
 type ServerConfig struct {
+	ServerURL     string                   `json:"server_url,omitempty"`
+	URL           string                   `json:"url,omitempty"`
 	Auth          *AuthConfig              `json:"auth,omitempty"`
 	ClientMimicry *ClientMimicryConfig     `json:"client_mimicry,omitempty"`
 	SplitInclude  *SplitIncludeConfig      `json:"split_include,omitempty"`
@@ -53,6 +67,8 @@ type ServerConfig struct {
 }
 
 type ProfileConfig struct {
+	Name         string              `json:"name,omitempty"`
+	Profile      string              `json:"profile,omitempty"`
 	Mode         string              `json:"mode,omitempty"`
 	SplitInclude *SplitIncludeConfig `json:"split_include,omitempty"`
 }
@@ -189,6 +205,43 @@ func LoadOptional(path string) (Config, string, error) {
 	return cfg, resolved, nil
 }
 
+func SetCurrent(path string, options SelectionOptions) (Config, DefaultSelection, string, error) {
+	cfg, resolved, err := loadForUpdate(path)
+	if err != nil {
+		return Config{}, DefaultSelection{}, resolved, err
+	}
+
+	selection, err := cfg.ResolveRuntimeSelection(options)
+	if err != nil {
+		return Config{}, DefaultSelection{}, resolved, err
+	}
+
+	cfg.Default = DefaultSelection{
+		ServerURL: selection.ServerURL,
+		Profile:   selection.ProfileKey,
+	}
+	cfg.DefaultServer = ""
+	cfg.DefaultProfile = ""
+	if err := writeJSON(resolved, cfg); err != nil {
+		return Config{}, DefaultSelection{}, resolved, err
+	}
+	return cfg, cfg.Default, resolved, nil
+}
+
+func loadForUpdate(path string) (Config, string, error) {
+	resolved := ResolveLoadPath(path)
+	raw, err := os.ReadFile(resolved)
+	if err != nil {
+		return Config{}, resolved, err
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return Config{}, resolved, err
+	}
+	return cfg, resolved, nil
+}
+
 func (c Config) CacheDirOrDefault() string {
 	if strings.TrimSpace(c.CacheDir) != "" {
 		return c.CacheDir
@@ -203,12 +256,75 @@ func (c Config) DefaultSelection() DefaultSelection {
 	}
 }
 
+func (c Config) ResolveConfiguredSelection(options SelectionOptions) (DefaultSelection, error) {
+	selection, err := c.ResolveRuntimeSelection(options)
+	if err != nil {
+		return DefaultSelection{}, err
+	}
+	return DefaultSelection{
+		ServerURL: selection.ServerURL,
+		Profile:   selection.ProfileKey,
+	}, nil
+}
+
+func (c Config) ResolveRuntimeSelection(options SelectionOptions) (RuntimeSelection, error) {
+	serverSelector := strings.TrimSpace(options.ServerURL)
+	if serverSelector == "" {
+		return RuntimeSelection{}, errors.New("server_url is required")
+	}
+
+	serverKey, serverCfg, serverURL, ok, err := c.resolveServerConfig(serverSelector)
+	if err != nil {
+		return RuntimeSelection{}, err
+	}
+	if !ok {
+		return RuntimeSelection{}, fmt.Errorf("server %q is not configured", serverSelector)
+	}
+
+	profile := strings.TrimSpace(options.Profile)
+	if profile == "" {
+		defaultSelection := c.DefaultSelection()
+		defaultServerKey, _, _, defaultServerOK, defaultServerErr := c.resolveServerConfig(defaultSelection.ServerURL)
+		if defaultServerErr != nil {
+			return RuntimeSelection{}, defaultServerErr
+		}
+		if defaultServerOK && defaultServerKey == serverKey && serverHasProfile(serverCfg, defaultSelection.Profile) {
+			profile = defaultSelection.Profile
+		} else {
+			profileNames := sortedServerProfileNames(serverCfg)
+			switch len(profileNames) {
+			case 0:
+				return RuntimeSelection{}, fmt.Errorf("server %q has no configured profiles", serverSelector)
+			case 1:
+				profile = profileNames[0]
+			default:
+				return RuntimeSelection{}, fmt.Errorf("profile is required when selected openconnect server has multiple profiles and no default profile")
+			}
+		}
+	}
+
+	profileKey, _, profileName, ok, err := resolveProfileConfig(serverCfg, profile)
+	if err != nil {
+		return RuntimeSelection{}, err
+	}
+	if !ok {
+		return RuntimeSelection{}, fmt.Errorf("profile %q is not configured for server %q", profile, serverSelector)
+	}
+
+	return RuntimeSelection{
+		ServerKey:  serverKey,
+		ServerURL:  serverURL,
+		ProfileKey: profileKey,
+		Profile:    profileName,
+	}, nil
+}
+
 func (c Config) EffectiveMode(server string, profile string) string {
 	server = strings.TrimSpace(server)
 	profile = strings.TrimSpace(profile)
 	if server != "" && profile != "" {
-		if serverCfg, ok := c.Servers[server]; ok {
-			if profileCfg, ok := serverCfg.Profiles[profile]; ok {
+		if _, serverCfg, _, ok, _ := c.resolveServerConfig(server); ok {
+			if _, profileCfg, _, ok, _ := resolveProfileConfig(serverCfg, profile); ok {
 				if mode := strings.TrimSpace(profileCfg.Mode); mode != "" {
 					return mode
 				}
@@ -222,9 +338,9 @@ func (c Config) EffectiveSplitInclude(server string, profile string) SplitInclud
 	result := mergeSplitIncludeOverride(SplitIncludeConfig{}, c.SplitInclude)
 	server = strings.TrimSpace(server)
 	profile = strings.TrimSpace(profile)
-	if override, ok := c.Servers[server]; ok {
+	if _, override, _, ok, _ := c.resolveServerConfig(server); ok {
 		result = mergeSplitIncludeOverride(result, override.SplitInclude)
-		if profileOverride, ok := override.Profiles[profile]; ok {
+		if _, profileOverride, _, ok, _ := resolveProfileConfig(override, profile); ok {
 			result = mergeSplitIncludeOverride(result, profileOverride.SplitInclude)
 		}
 	}
@@ -240,7 +356,7 @@ func (c Config) EffectiveAuth(server string) AuthConfig {
 	if server == "" {
 		return result
 	}
-	if override, ok := c.Servers[server]; ok {
+	if _, override, _, ok, _ := c.resolveServerConfig(server); ok {
 		result = mergeAuthConfigOverride(result, override.Auth)
 	}
 	return result
@@ -251,7 +367,7 @@ func (c Config) EffectiveClientMimicry(server string) ClientMimicryConfig {
 	if server == "" {
 		return ClientMimicryConfig{}
 	}
-	if override, ok := c.Servers[server]; ok {
+	if _, override, _, ok, _ := c.resolveServerConfig(server); ok {
 		return cloneClientMimicryConfig(override.ClientMimicry)
 	}
 	return ClientMimicryConfig{}
@@ -262,10 +378,104 @@ func (c Config) EffectiveAuthFallbackServers(server string) []string {
 	if server == "" {
 		return nil
 	}
-	if override, ok := c.Servers[server]; ok && override.Auth != nil {
+	if _, override, _, ok, _ := c.resolveServerConfig(server); ok && override.Auth != nil {
 		return cloneStrings(override.Auth.FallbackServers)
 	}
 	return nil
+}
+
+func (c Config) HasConfiguredServerProfiles(server string) bool {
+	_, serverCfg, _, ok, err := c.resolveServerConfig(server)
+	if err != nil || !ok {
+		return false
+	}
+	return len(serverCfg.Profiles) > 0
+}
+
+func (c Config) resolveServerConfig(selector string) (string, ServerConfig, string, bool, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return "", ServerConfig{}, "", false, nil
+	}
+	if serverCfg, ok := c.Servers[selector]; ok {
+		return selector, serverCfg, resolvedServerURL(selector, serverCfg), true, nil
+	}
+
+	matches := make([]string, 0, 1)
+	for key, serverCfg := range c.Servers {
+		if resolvedServerURL(key, serverCfg) == selector {
+			matches = append(matches, key)
+		}
+	}
+	sort.Strings(matches)
+
+	switch len(matches) {
+	case 0:
+		return "", ServerConfig{}, "", false, nil
+	case 1:
+		key := matches[0]
+		serverCfg := c.Servers[key]
+		return key, serverCfg, resolvedServerURL(key, serverCfg), true, nil
+	default:
+		return "", ServerConfig{}, "", false, fmt.Errorf("server %q matched multiple configured aliases: %s", selector, strings.Join(matches, ", "))
+	}
+}
+
+func resolvedServerURL(key string, serverCfg ServerConfig) string {
+	return firstNonEmpty(serverCfg.ServerURL, serverCfg.URL, key)
+}
+
+func serverHasProfile(serverCfg ServerConfig, profile string) bool {
+	_, _, _, ok, _ := resolveProfileConfig(serverCfg, profile)
+	return ok
+}
+
+func resolveProfileConfig(serverCfg ServerConfig, selector string) (string, ProfileConfig, string, bool, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return "", ProfileConfig{}, "", false, nil
+	}
+	if profileCfg, ok := serverCfg.Profiles[selector]; ok {
+		return selector, profileCfg, resolvedProfileName(selector, profileCfg), true, nil
+	}
+
+	matches := make([]string, 0, 1)
+	for key, profileCfg := range serverCfg.Profiles {
+		if resolvedProfileName(key, profileCfg) == selector {
+			matches = append(matches, key)
+		}
+	}
+	sort.Strings(matches)
+
+	switch len(matches) {
+	case 0:
+		return "", ProfileConfig{}, "", false, nil
+	case 1:
+		key := matches[0]
+		profileCfg := serverCfg.Profiles[key]
+		return key, profileCfg, resolvedProfileName(key, profileCfg), true, nil
+	default:
+		return "", ProfileConfig{}, "", false, fmt.Errorf("profile %q matched multiple configured aliases: %s", selector, strings.Join(matches, ", "))
+	}
+}
+
+func resolvedProfileName(key string, profileCfg ProfileConfig) string {
+	return firstNonEmpty(profileCfg.Name, profileCfg.Profile, key)
+}
+
+func sortedServerProfileNames(serverCfg ServerConfig) []string {
+	if len(serverCfg.Profiles) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(serverCfg.Profiles))
+	for name := range serverCfg.Profiles {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (c Config) ResolveServerURLForProfile(profile string) (string, bool, error) {
@@ -275,12 +485,14 @@ func (c Config) ResolveServerURLForProfile(profile string) (string, bool, error)
 	}
 
 	matches := make([]string, 0, 1)
-	for serverURL, serverCfg := range c.Servers {
-		if _, ok := serverCfg.Profiles[profile]; ok {
-			matches = append(matches, serverURL)
+	for serverKey, serverCfg := range c.Servers {
+		if _, _, _, ok, err := resolveProfileConfig(serverCfg, profile); err != nil {
+			return "", false, err
+		} else if ok {
+			matches = append(matches, resolvedServerURL(serverKey, serverCfg))
 		}
 	}
-	sort.Strings(matches)
+	matches = uniqueSortedStrings(matches)
 
 	switch len(matches) {
 	case 0:
@@ -290,6 +502,23 @@ func (c Config) ResolveServerURLForProfile(profile string) (string, bool, error)
 	default:
 		return "", false, fmt.Errorf("profile %q matched multiple configured servers: %s", profile, strings.Join(matches, ", "))
 	}
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Strings(values)
+	result := values[:0]
+	var last string
+	for _, value := range values {
+		if value == "" || value == last {
+			continue
+		}
+		result = append(result, value)
+		last = value
+	}
+	return result
 }
 
 func (c *Config) resolveRelativePaths(baseDir string) {

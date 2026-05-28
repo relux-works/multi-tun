@@ -1149,6 +1149,219 @@ func TestParseRunOptionsResolvesServerFromNestedProfileWithoutXML(t *testing.T) 
 	}
 }
 
+func TestParseRunOptionsUsesPositionalServerProfile(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectSelectionConfig(t)
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{
+		"--config", configPath,
+		"--dry-run",
+		"vpn-gw4.corp.example/outside",
+		"Admin Corp",
+	})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.server != "vpn-gw4.corp.example/outside" {
+		t.Fatalf("server = %q, want positional server", options.server)
+	}
+	if options.profile != "Admin Corp" {
+		t.Fatalf("profile = %q, want positional profile", options.profile)
+	}
+	if options.mode != openconnect.ConnectModeSplitInclude {
+		t.Fatalf("mode = %q, want profile mode", options.mode)
+	}
+}
+
+func TestParseRunOptionsUsesServerAndProfileAliases(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectAliasConfig(t)
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{
+		"--config", configPath,
+		"--dry-run",
+		"ural",
+		"ural-outside",
+	})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.server != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("server = %q, want actual URL", options.server)
+	}
+	if options.profile != "Ural Outside extended" {
+		t.Fatalf("profile = %q, want actual profile name", options.profile)
+	}
+	if options.mode != openconnect.ConnectModeSplitInclude {
+		t.Fatalf("mode = %q, want alias profile mode", options.mode)
+	}
+	if !reflect.DeepEqual(options.vpnDomains, []string{"corp.example"}) {
+		t.Fatalf("vpnDomains = %#v, want alias profile split include", options.vpnDomains)
+	}
+}
+
+func TestParseRunOptionsAcceptsFlagsAfterPositionals(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectAliasConfig(t)
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{
+		"ural",
+		"ural-outside",
+		"--config", configPath,
+		"--dry-run",
+		"--mode", openconnect.ConnectModeFull,
+	})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.server != "vpn-gw2.corp.example/outside" {
+		t.Fatalf("server = %q, want actual URL", options.server)
+	}
+	if options.profile != "Ural Outside extended" {
+		t.Fatalf("profile = %q, want actual profile", options.profile)
+	}
+	if options.mode != openconnect.ConnectModeFull {
+		t.Fatalf("mode = %q, want CLI override", options.mode)
+	}
+	if !options.dryRun {
+		t.Fatal("dryRun = false, want true")
+	}
+}
+
+func TestParseRunOptionsUsesDefaultAliasSelection(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectAliasConfig(t)
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{
+		"--config", configPath,
+		"--dry-run",
+	})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.server != "vpn-gw1.corp.example/outside" {
+		t.Fatalf("server = %q, want default alias URL", options.server)
+	}
+	if options.profile != "MSK Outside extended" {
+		t.Fatalf("profile = %q, want default alias profile name", options.profile)
+	}
+}
+
+func TestParseRunOptionsUsesOnlyProfileForPositionalServer(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectSelectionConfig(t)
+	app := New(ioDiscard{}, ioDiscard{})
+	options, exitCode, err := app.parseRunOptions("start", []string{
+		"--config", configPath,
+		"--dry-run",
+		"vpn-gw3.corp.example/outside",
+	})
+	if err != nil {
+		t.Fatalf("parseRunOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if options.profile != "Public Corp" {
+		t.Fatalf("profile = %q, want only configured profile", options.profile)
+	}
+	if options.mode != openconnect.ConnectModeFull {
+		t.Fatalf("mode = %q, want full", options.mode)
+	}
+}
+
+func TestParseRunOptionsRequiresProfileForMultiProfilePositionalServerWithoutDefault(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectSelectionConfig(t)
+	app := New(ioDiscard{}, ioDiscard{})
+	_, exitCode, err := app.parseRunOptions("start", []string{
+		"--config", configPath,
+		"--dry-run",
+		"vpn-gw4.corp.example/outside",
+	})
+	if err == nil {
+		t.Fatal("parseRunOptions() error = nil, want missing profile error")
+	}
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(err.Error(), "profile is required") {
+		t.Fatalf("parseRunOptions() error = %v, want profile required", err)
+	}
+}
+
+func TestSetCurrentUsesPositionalServerAndWritesConfig(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectSelectionConfig(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	exitCode := app.Run([]string{
+		"set-current",
+		"--config", configPath,
+		"vpn-gw4.corp.example/outside",
+		"Admin Corp",
+	})
+	if exitCode != 0 {
+		t.Fatalf("Run(set-current) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "current.server_url: vpn-gw4.corp.example/outside") {
+		t.Fatalf("stdout = %q, want current server", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "current.profile: Admin Corp") {
+		t.Fatalf("stdout = %q, want current profile", stdout.String())
+	}
+
+	cfg, _, err := openconnectcfg.LoadOptional(configPath)
+	if err != nil {
+		t.Fatalf("LoadOptional() error = %v", err)
+	}
+	current := cfg.DefaultSelection()
+	if current.ServerURL != "vpn-gw4.corp.example/outside" || current.Profile != "Admin Corp" {
+		t.Fatalf("DefaultSelection() = %#v, want set-current selection", current)
+	}
+}
+
+func TestStartReportsMissingProfileForMultiProfilePositionalServer(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeOpenConnectSelectionConfig(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+	exitCode := app.Run([]string{
+		"start",
+		"--config", configPath,
+		"--dry-run",
+		"vpn-gw4.corp.example/outside",
+	})
+	if exitCode != 1 {
+		t.Fatalf("Run(start) exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "start failed: profile is required") {
+		t.Fatalf("stderr = %q, want missing profile message", stderr.String())
+	}
+}
+
 func TestNormalizeDomainSuffixListCollapsesCoveredSuffixes(t *testing.T) {
 	t.Parallel()
 
@@ -1186,4 +1399,87 @@ type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) {
 	return len(p), nil
+}
+
+func writeOpenConnectSelectionConfig(t *testing.T) string {
+	t.Helper()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw2.corp.example/outside",
+    "profile": "Ural Outside extended"
+  },
+  "servers": {
+    "vpn-gw2.corp.example/outside": {
+      "profiles": {
+        "Ural Outside extended": {
+          "mode": "split-include"
+        },
+        "Public Corp": {
+          "mode": "full"
+        }
+      }
+    },
+    "vpn-gw3.corp.example/outside": {
+      "profiles": {
+        "Public Corp": {
+          "mode": "full"
+        }
+      }
+    },
+    "vpn-gw4.corp.example/outside": {
+      "profiles": {
+        "Admin Corp": {
+          "mode": "split-include"
+        },
+        "Public Corp": {
+          "mode": "full"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+	return configPath
+}
+
+func writeOpenConnectAliasConfig(t *testing.T) string {
+	t.Helper()
+
+	configPath := filepath.Join(t.TempDir(), "openconnect.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "default": {
+    "server_url": "vpn-gw1.corp.example/outside",
+    "profile": "msk-outside"
+  },
+  "servers": {
+    "msk": {
+      "server_url": "vpn-gw1.corp.example/outside",
+      "profiles": {
+        "msk-outside": {
+          "name": "MSK Outside extended",
+          "mode": "full"
+        }
+      }
+    },
+    "ural": {
+      "server_url": "vpn-gw2.corp.example/outside",
+      "profiles": {
+        "ural-outside": {
+          "name": "Ural Outside extended",
+          "mode": "split-include",
+          "split_include": {
+            "vpn_domains": ["corp.example"],
+            "nameservers": ["10.23.16.4"]
+          }
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+	return configPath
 }

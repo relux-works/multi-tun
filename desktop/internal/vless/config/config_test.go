@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -315,6 +316,88 @@ func TestEffectiveServerOverrideDoesNotReuseCurrentProfileFromDifferentServer(t 
 	}
 }
 
+func TestSetCurrentUsesDefaultProfileWhenProfileOmitted(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+
+	_, selection, resolvedPath, err := SetCurrent(path, SelectionOptions{Server: "dance"})
+	if err != nil {
+		t.Fatalf("SetCurrent() error = %v", err)
+	}
+	if resolvedPath != path {
+		t.Fatalf("resolvedPath = %q, want %q", resolvedPath, path)
+	}
+	if got, want := selection.Server, "dance"; got != want {
+		t.Fatalf("selection.Server = %q, want %q", got, want)
+	}
+	if got, want := selection.Profile, "default"; got != want {
+		t.Fatalf("selection.Profile = %q, want %q", got, want)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Current == nil {
+		t.Fatal("Current = nil")
+	}
+	if got, want := loaded.Current.Server, "dance"; got != want {
+		t.Fatalf("Current.Server = %q, want %q", got, want)
+	}
+	if got, want := loaded.Current.Profile, "default"; got != want {
+		t.Fatalf("Current.Profile = %q, want %q", got, want)
+	}
+}
+
+func TestSetCurrentUsesOnlyProfileWhenProfileOmitted(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+
+	_, selection, _, err := SetCurrent(path, SelectionOptions{Server: "freedom"})
+	if err != nil {
+		t.Fatalf("SetCurrent() error = %v", err)
+	}
+	if got, want := selection.Server, "freedom"; got != want {
+		t.Fatalf("selection.Server = %q, want %q", got, want)
+	}
+	if got, want := selection.Profile, "fr"; got != want {
+		t.Fatalf("selection.Profile = %q, want %q", got, want)
+	}
+}
+
+func TestSetCurrentRequiresProfileForMultiProfileServer(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+
+	_, _, _, err := SetCurrent(path, SelectionOptions{Server: "fortinetz"})
+	if err == nil {
+		t.Fatal("SetCurrent() error = nil, want profile required")
+	}
+	if !strings.Contains(err.Error(), "profile is required") {
+		t.Fatalf("SetCurrent() error = %q, want profile required", err)
+	}
+}
+
+func TestSetCurrentStoresExplicitProfile(t *testing.T) {
+	t.Parallel()
+
+	path := writeSetCurrentConfig(t)
+
+	_, selection, _, err := SetCurrent(path, SelectionOptions{Server: "fortinetz", Profile: "de"})
+	if err != nil {
+		t.Fatalf("SetCurrent() error = %v", err)
+	}
+	if got, want := selection.Server, "fortinetz"; got != want {
+		t.Fatalf("selection.Server = %q, want %q", got, want)
+	}
+	if got, want := selection.Profile, "de"; got != want {
+		t.Fatalf("selection.Profile = %q, want %q", got, want)
+	}
+}
+
 func equalStrings(got []string, want []string) bool {
 	if len(got) != len(want) {
 		return false
@@ -325,6 +408,55 @@ func equalStrings(got []string, want []string) bool {
 		}
 	}
 	return true
+}
+
+func writeSetCurrentConfig(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {
+    "server": "fortinetz",
+    "profile": "nl"
+  },
+  "servers": {
+    "dance": {
+      "source": {"mode": "proxy", "url": "https://example.com/dance"},
+      "cache_dir": "/tmp/vless-dance",
+      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "profiles": {
+        "default": {"selector": "Sweden"}
+      }
+    },
+    "fortinetz": {
+      "source": {"mode": "proxy", "url": "https://example.com/fortinetz"},
+      "cache_dir": "/tmp/vless-fortinetz",
+      "artifacts": {"singbox_config_path": "/tmp/fortinetz.json"},
+      "profiles": {
+        "nl": {"selector": "Netherlands"},
+        "de": {"selector": "Germany"}
+      }
+    },
+    "freedom": {
+      "source": {"mode": "proxy", "url": "https://example.com/freedom"},
+      "cache_dir": "/tmp/vless-freedom",
+      "artifacts": {"singbox_config_path": "/tmp/freedom.json"},
+      "profiles": {
+        "fr": {"selector": "France"}
+      }
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
 }
 
 func TestValidateRejectsLegacySystemProxyMode(t *testing.T) {

@@ -45,6 +45,8 @@ func (a *App) Run(args []string) int {
 		return a.runRefresh(args[1:])
 	case "list":
 		return a.runList(args[1:])
+	case "set-current":
+		return a.runSetCurrent(args[1:])
 	case "start":
 		return a.runStart(args[1:])
 	case "run":
@@ -64,6 +66,39 @@ func (a *App) Run(args []string) int {
 		a.printUsage()
 		return 2
 	}
+}
+
+func (a *App) runSetCurrent(args []string) int {
+	fs := flag.NewFlagSet("set-current", flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+
+	configPath := fs.String("config", "", "Path to config file")
+	serverName := fs.String("server", "", "Configured VLESS server name")
+	profileName := fs.String("profile", "", "Configured VLESS profile alias")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, "", fs.Args())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "set-current failed: %v\n", err)
+		return 2
+	}
+
+	effective, selection, resolvedPath, err := config.SetCurrent(*configPath, selectionOptions)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "set-current failed: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(a.stdout, "config: %s\n", resolvedPath)
+	fmt.Fprintf(a.stdout, "current.server: %s\n", selection.Server)
+	if selection.Profile != "" {
+		fmt.Fprintf(a.stdout, "current.profile: %s\n", selection.Profile)
+	}
+	if effective.DefaultProfileSelector() != "" {
+		fmt.Fprintf(a.stdout, "profile_selector: %s\n", effective.DefaultProfileSelector())
+	}
+	return 0
 }
 
 func (a *App) runSetup(args []string) int {
@@ -436,6 +471,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  vless-tun init [--config path | config] [--subscription-url URL] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path] [--server name | server]")
 	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--server name | server] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun set-current [--config path] [--server name | server [profile]] [--profile name]")
 	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh]")
 	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh] [--timeout duration] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--refresh]")
@@ -449,7 +485,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Config:")
 	fmt.Fprintln(a.stdout, "  With no config argument, vless-tun uses ~/.config/vless-tun/config.json.")
-	fmt.Fprintln(a.stdout, "  Lifecycle command positionals override current.server/current.profile; stop and diagnose tunnel scan all configured session caches.")
+	fmt.Fprintln(a.stdout, "  Lifecycle command positionals override current.server/current.profile; reconnect, stop, and diagnose tunnel scan all configured session caches.")
 	fmt.Fprintln(a.stdout, "  Use --config to choose a non-default config file.")
 	fmt.Fprintln(a.stdout, "  setup/init still accept one positional config path for bootstrapping.")
 }
