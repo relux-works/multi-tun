@@ -206,6 +206,7 @@ func (a *App) runRefresh(args []string) int {
 		fmt.Fprintf(a.stderr, "refresh failed: %v\n", err)
 		return 2
 	}
+	selectionOptions.AllowMissingProfile = true
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
@@ -242,6 +243,7 @@ func (a *App) runList(args []string) int {
 		fmt.Fprintf(a.stderr, "list failed: %v\n", err)
 		return 2
 	}
+	selectionOptions.AllowMissingProfile = true
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
