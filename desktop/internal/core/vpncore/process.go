@@ -5,15 +5,24 @@ import (
 	"fmt"
 )
 
+type LogOptions struct {
+	MaxLines int
+}
+
 func Run(cfg ServiceConfig, command []string, stdinData, logPath string) error {
+	return RunWithLogOptions(cfg, command, stdinData, logPath, LogOptions{})
+}
+
+func RunWithLogOptions(cfg ServiceConfig, command []string, stdinData, logPath string, options LogOptions) error {
 	if logPath == "" {
 		return errors.New("log path is required")
 	}
 	if _, err := callActive(cfg, Request{
-		Action:  "run",
-		Command: append([]string(nil), command...),
-		Stdin:   stdinData,
-		LogPath: logPath,
+		Action:      "run",
+		Command:     append([]string(nil), command...),
+		Stdin:       stdinData,
+		LogPath:     logPath,
+		LogMaxLines: options.MaxLines,
 	}); err != nil {
 		if isUnavailable(err) {
 			return fmt.Errorf("vpn core is unavailable; run `vpn-core install` once")
@@ -24,15 +33,20 @@ func Run(cfg ServiceConfig, command []string, stdinData, logPath string) error {
 }
 
 func SpawnDetached(cfg ServiceConfig, command []string, stdinData, logPath string, setPGID bool) (int, error) {
+	return SpawnDetachedWithLogOptions(cfg, command, stdinData, logPath, setPGID, LogOptions{})
+}
+
+func SpawnDetachedWithLogOptions(cfg ServiceConfig, command []string, stdinData, logPath string, setPGID bool, options LogOptions) (int, error) {
 	if logPath == "" {
 		return 0, errors.New("log path is required")
 	}
 	response, err := callActive(cfg, Request{
-		Action:  "spawn",
-		Command: append([]string(nil), command...),
-		Stdin:   stdinData,
-		LogPath: logPath,
-		SetPGID: setPGID,
+		Action:      "spawn",
+		Command:     append([]string(nil), command...),
+		Stdin:       stdinData,
+		LogPath:     logPath,
+		LogMaxLines: options.MaxLines,
+		SetPGID:     setPGID,
 	})
 	if err != nil {
 		if isUnavailable(err) {

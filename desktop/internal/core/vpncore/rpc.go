@@ -10,14 +10,15 @@ import (
 )
 
 type Request struct {
-	Action  string   `json:"action"`
-	Command []string `json:"command,omitempty"`
-	Stdin   string   `json:"stdin,omitempty"`
-	LogPath string   `json:"log_path,omitempty"`
-	PID     int      `json:"pid,omitempty"`
-	Signal  string   `json:"signal,omitempty"`
-	Group   bool     `json:"group,omitempty"`
-	SetPGID bool     `json:"setpgid,omitempty"`
+	Action      string   `json:"action"`
+	Command     []string `json:"command,omitempty"`
+	Stdin       string   `json:"stdin,omitempty"`
+	LogPath     string   `json:"log_path,omitempty"`
+	LogMaxLines int      `json:"log_max_lines,omitempty"`
+	PID         int      `json:"pid,omitempty"`
+	Signal      string   `json:"signal,omitempty"`
+	Group       bool     `json:"group,omitempty"`
+	SetPGID     bool     `json:"setpgid,omitempty"`
 }
 
 type Response struct {

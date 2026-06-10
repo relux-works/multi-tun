@@ -108,6 +108,42 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 	t.Fatalf("spawned pid %d is still alive after signal", pid)
 }
 
+func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-tail-%d.sock", time.Now().UnixNano()))
+	_ = os.Remove(socketPath)
+	defer os.Remove(socketPath)
+
+	cfg := ServiceConfig{
+		Label:      "test-tail",
+		PlistPath:  "test-tail",
+		SocketPath: socketPath,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+	}()
+	waitForSocket(t, cfg, errCh)
+
+	dir := t.TempDir()
+	runLogPath := filepath.Join(dir, "run.log")
+	runScriptPath := filepath.Join(dir, "run.sh")
+	runScript := "#!/bin/sh\nset -eu\nfor i in 1 2 3 4 5; do echo line-$i; done\n"
+	if err := os.WriteFile(runScriptPath, []byte(runScript), 0o755); err != nil {
+		t.Fatalf("WriteFile(run script) error = %v", err)
+	}
+
+	if err := RunWithLogOptions(cfg, []string{runScriptPath}, "", runLogPath, LogOptions{MaxLines: 2}); err != nil {
+		t.Fatalf("RunWithLogOptions() error = %v", err)
+	}
+	raw, err := os.ReadFile(runLogPath)
+	if err != nil {
+		t.Fatalf("ReadFile(run log) error = %v", err)
+	}
+	if got, want := string(raw), "line-4\nline-5\n"; got != want {
+		t.Fatalf("run log = %q, want %q", got, want)
+	}
+}
+
 func TestCompatibilityFallbackUsesLegacyService(t *testing.T) {
 	primarySocketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-primary-%d.sock", time.Now().UnixNano()))
 	legacySocketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-legacy-%d.sock", time.Now().UnixNano()))

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"multi-tun/desktop/internal/core/logtail"
 )
 
 const runTimeout = 20 * time.Second
@@ -245,7 +247,7 @@ func handleRun(request Request) error {
 		return errors.New("missing log path")
 	}
 
-	logFile, err := os.OpenFile(request.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := logtail.Open(request.LogPath, logtail.Options{MaxLines: request.LogMaxLines})
 	if err != nil {
 		return fmt.Errorf("open vpn core log: %w", err)
 	}
@@ -275,7 +277,7 @@ func handleSpawn(request Request) (int, error) {
 		return 0, errors.New("missing log path")
 	}
 
-	logFile, err := os.OpenFile(request.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := logtail.Open(request.LogPath, logtail.Options{MaxLines: request.LogMaxLines})
 	if err != nil {
 		return 0, fmt.Errorf("open vpn core log: %w", err)
 	}
