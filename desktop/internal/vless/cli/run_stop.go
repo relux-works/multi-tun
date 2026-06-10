@@ -50,7 +50,7 @@ func (a *App) runRun(args []string) int {
 }
 
 func (a *App) runStartCommand(commandName string, args []string) int {
-	options, exitCode, err := a.parseStartOptions(commandName, args, false)
+	options, exitCode, err := a.parseStartOptions(commandName, args, true)
 	if err != nil {
 		return exitCode
 	}
@@ -381,7 +381,7 @@ func effectiveStartRefresh(cfg config.ProjectConfig, options startOptions) bool 
 	if options.refreshSet {
 		return options.refresh
 	}
-	return strings.TrimSpace(cfg.DefaultProfileSelector()) == ""
+	return true
 }
 
 func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {

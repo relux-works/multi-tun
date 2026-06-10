@@ -79,7 +79,7 @@ Build local CLIs and agent guidance that can:
 - `refresh`: fetch and cache subscription
 - `list`: inspect cached profiles for the selected configured server
 - `set-current`: persist `current.server` and `current.profile`; profile may be omitted when the selected server has a `default` profile or exactly one profile
-- `run`: refresh selector-less auto profiles before rendering, start the selected `vless-tun` runtime engine in the background, and persist session metadata; provider/profile shortcuts such as `start dance`, `start freedom`, and `start fortinetz nl` override the default config selection, while explicit profile selectors start from cache unless `--refresh` is passed
+- `run`: refresh the selected configured server subscription before rendering by default, start the selected `vless-tun` runtime engine in the background, and persist session metadata; provider/profile shortcuts such as `start dance`, `start freedom`, and `start fortinetz nl` override the default config selection, while `--refresh=false` is the explicit cached fallback for offline starts
 - before starting configured engine sidecars, `run`/`start` must clean stale sidecar processes only when they match the configured sidecar executable/name and generated sidecar config path; cleanup must not use broad process-name kills
 - `reconnect`: stop recorded `vless-tun` sessions across configured server cache directories, refresh local state, and start the selected profile in one command
 - `status`: show local runtime state, selected engine, sidecars, launch backend, cached selection, and configured bypasses
