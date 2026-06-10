@@ -87,6 +87,7 @@ func (a *App) runDiagnoseConfig(args []string) int {
 		fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
 		return 2
 	}
+	selectionOptions.AllowMissingProfile = true
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {

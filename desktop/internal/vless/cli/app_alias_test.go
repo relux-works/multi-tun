@@ -419,6 +419,90 @@ func TestDiagnoseConfigUsesPositionalServer(t *testing.T) {
 	}
 }
 
+func TestDiagnoseConfigAllowsServerOnlyMultiProfileSelection(t *testing.T) {
+	t.Parallel()
+
+	path := writeServerLevelMultiProfileConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"diagnose", "config", "--config", path, "fortinetz"})
+	if exitCode != 0 {
+		t.Fatalf("Run(diagnose config) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "server: fortinetz") {
+		t.Fatalf("stdout = %q, want selected server", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "config_profile:") {
+		t.Fatalf("stdout = %q, want no selected config profile", stdout.String())
+	}
+}
+
+func TestRefreshAllowsServerOnlyMultiProfileSelection(t *testing.T) {
+	t.Parallel()
+
+	path := writeServerLevelMultiProfileConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"refresh", "--config", path, "fortinetz"})
+	if exitCode != 0 {
+		t.Fatalf("Run(refresh) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "server: fortinetz") {
+		t.Fatalf("stdout = %q, want selected server", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "refreshed 1 profile(s)") {
+		t.Fatalf("stdout = %q, want refreshed profile count", stdout.String())
+	}
+}
+
+func TestListAllowsServerOnlyMultiProfileSelection(t *testing.T) {
+	t.Parallel()
+
+	path := writeServerLevelMultiProfileConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"list", "--refresh", "--config", path, "fortinetz"})
+	if exitCode != 0 {
+		t.Fatalf("Run(list) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "server: fortinetz") {
+		t.Fatalf("stdout = %q, want selected server", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "fortinetz-nl") {
+		t.Fatalf("stdout = %q, want refreshed direct profile", stdout.String())
+	}
+}
+
+func TestStatusAllowsServerOnlyMultiProfileSelection(t *testing.T) {
+	t.Parallel()
+
+	path := writeServerLevelMultiProfileConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"status", "--config", path, "fortinetz"})
+	if exitCode != 0 {
+		t.Fatalf("Run(status) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "server: fortinetz") {
+		t.Fatalf("stdout = %q, want selected server", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "config_profile:") {
+		t.Fatalf("stdout = %q, want no selected config profile", stdout.String())
+	}
+}
+
 func TestSetCurrentUsesPositionalServerAndWritesConfig(t *testing.T) {
 	t.Parallel()
 
@@ -563,6 +647,54 @@ func writeReconnectUnmatchedProfileConfig(t *testing.T) string {
       "engine": {"type": "sing-box"},
       "profiles": {
         "default": {"selector": "missing-profile"}
+      }
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
+}
+
+func writeServerLevelMultiProfileConfig(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	danceCache := filepath.Join(root, "dance-cache")
+	fortinetzCache := filepath.Join(root, "fortinetz-cache")
+	danceConfig := filepath.Join(root, "dance.json")
+	fortinetzConfig := filepath.Join(root, "fortinetz.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {
+    "server": "dance",
+    "profile": "default"
+  },
+  "servers": {
+    "dance": {
+      "source": {"mode": "direct", "url": "vless://00000000-0000-0000-0000-000000000001@dance.example.com:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=dance.example.com&sid=1#dance"},
+      "cache_dir": "`+danceCache+`",
+      "artifacts": {"singbox_config_path": "`+danceConfig+`"},
+      "engine": {"type": "sing-box"},
+      "profiles": {
+        "default": {"selector": "dance"}
+      }
+    },
+    "fortinetz": {
+      "source": {"mode": "direct", "url": "vless://00000000-0000-0000-0000-000000000002@fortinetz.example.com:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=fortinetz.example.com&sid=1#fortinetz-nl"},
+      "cache_dir": "`+fortinetzCache+`",
+      "artifacts": {"singbox_config_path": "`+fortinetzConfig+`"},
+      "engine": {"type": "sing-box"},
+      "profiles": {
+        "nl": {"selector": "Netherlands"},
+        "de": {"selector": "Germany"}
       }
     }
   },

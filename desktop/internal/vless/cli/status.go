@@ -42,6 +42,7 @@ func (a *App) runStatus(args []string) int {
 			selectionOptions.Server = activeSelection
 		}
 	}
+	selectionOptions.AllowMissingProfile = true
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {

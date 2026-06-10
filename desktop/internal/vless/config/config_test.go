@@ -491,6 +491,49 @@ func TestEffectiveServerOverrideDoesNotReuseCurrentProfileFromDifferentServer(t 
 	}
 }
 
+func TestEffectiveServerOverrideRequiresProfileForMultiProfileByDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := multiProfileServerSelectionConfig()
+
+	_, _, err := cfg.Effective(SelectionOptions{Server: "fortinetz"})
+	if err == nil {
+		t.Fatal("Effective() error = nil, want profile requirement")
+	}
+	if !strings.Contains(err.Error(), "current.profile is required") {
+		t.Fatalf("Effective() error = %q, want profile requirement", err)
+	}
+}
+
+func TestEffectiveServerOverrideAllowsMissingProfileForServerLevelCommands(t *testing.T) {
+	t.Parallel()
+
+	cfg := multiProfileServerSelectionConfig()
+
+	effective, selection, err := cfg.Effective(SelectionOptions{
+		Server:              "fortinetz",
+		AllowMissingProfile: true,
+	})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if got, want := selection.Server, "fortinetz"; got != want {
+		t.Fatalf("selection.Server = %q, want %q", got, want)
+	}
+	if selection.Profile != "" {
+		t.Fatalf("selection.Profile = %q, want empty profile for server-level selection", selection.Profile)
+	}
+	if got, want := effective.CacheDir, "/tmp/fortinetz-cache"; got != want {
+		t.Fatalf("CacheDir = %q, want %q", got, want)
+	}
+	if got, want := effective.SingboxConfigPath(), "/tmp/fortinetz.json"; got != want {
+		t.Fatalf("SingboxConfigPath() = %q, want %q", got, want)
+	}
+	if got := effective.DefaultProfileSelector(); got != "" {
+		t.Fatalf("DefaultProfileSelector() = %q, want empty selector", got)
+	}
+}
+
 func TestSetCurrentUsesDefaultProfileWhenProfileOmitted(t *testing.T) {
 	t.Parallel()
 
@@ -675,6 +718,56 @@ func writeSetCurrentConfig(t *testing.T) string {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	return path
+}
+
+func multiProfileServerSelectionConfig() ProjectConfig {
+	cfg := Default()
+	cfg.Current = &CurrentConfig{
+		Server:  "dance",
+		Profile: "default",
+	}
+	cfg.Servers = map[string]ServerConfig{
+		"dance": {
+			Source: SourceConfig{
+				Mode: SourceModeProxy,
+				URL:  "https://example.com/dance",
+			},
+			CacheDir: "/tmp/dance-cache",
+			Artifacts: &ArtifactsConfig{
+				SingboxConfigPath: "/tmp/dance.json",
+			},
+			Engine: &EngineConfig{
+				Type: EngineSingbox,
+			},
+			Profiles: map[string]ProfileConfig{
+				"default": {
+					Selector: "Sweden",
+				},
+			},
+		},
+		"fortinetz": {
+			Source: SourceConfig{
+				Mode: SourceModeProxy,
+				URL:  "https://example.com/fortinetz",
+			},
+			CacheDir: "/tmp/fortinetz-cache",
+			Artifacts: &ArtifactsConfig{
+				SingboxConfigPath: "/tmp/fortinetz.json",
+			},
+			Engine: &EngineConfig{
+				Type: EngineSingbox,
+			},
+			Profiles: map[string]ProfileConfig{
+				"nl": {
+					Selector: "Netherlands",
+				},
+				"de": {
+					Selector: "Germany",
+				},
+			},
+		},
+	}
+	return cfg
 }
 
 func TestValidateRejectsLegacySystemProxyMode(t *testing.T) {

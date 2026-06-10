@@ -59,9 +59,10 @@ type SetupOptions struct {
 }
 
 type SelectionOptions struct {
-	Server   string
-	Profile  string
-	Selector string
+	Server              string
+	Profile             string
+	Selector            string
+	AllowMissingProfile bool
 }
 
 type EffectiveSelection struct {
@@ -435,7 +436,7 @@ func (c ProjectConfig) Validate() error {
 	if err := c.validateExplicitServerEngines(); err != nil {
 		return err
 	}
-	effective, _, err := c.Effective(SelectionOptions{})
+	effective, _, err := c.Effective(SelectionOptions{AllowMissingProfile: true})
 	if err != nil {
 		return err
 	}
@@ -532,7 +533,7 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 		return ProjectConfig{}, EffectiveSelection{}, err
 	}
 	useCurrentProfile := serverOverride == "" || serverOverride == currentServerName(c.Current)
-	profileName, profileCfg, hasProfile, err := c.resolveProfileConfig(serverCfg, options.Profile, useCurrentProfile)
+	profileName, profileCfg, hasProfile, err := c.resolveProfileConfig(serverCfg, options.Profile, useCurrentProfile, options.AllowMissingProfile)
 	if err != nil {
 		return ProjectConfig{}, EffectiveSelection{}, err
 	}
@@ -631,7 +632,7 @@ func (c ProjectConfig) resolveCurrentUpdate(options SelectionOptions) (string, s
 	return serverName, profileName, nil
 }
 
-func (c ProjectConfig) resolveProfileConfig(server ServerConfig, override string, useCurrent bool) (string, ProfileConfig, bool, error) {
+func (c ProjectConfig) resolveProfileConfig(server ServerConfig, override string, useCurrent bool, allowMissing bool) (string, ProfileConfig, bool, error) {
 	if len(server.Profiles) == 0 {
 		return "", ProfileConfig{}, false, nil
 	}
@@ -651,6 +652,9 @@ func (c ProjectConfig) resolveProfileConfig(server ServerConfig, override string
 		for onlyName, profile := range server.Profiles {
 			return onlyName, profile, true, nil
 		}
+	}
+	if allowMissing {
+		return "", ProfileConfig{}, false, nil
 	}
 	return "", ProfileConfig{}, false, errors.New("current.profile is required when selected vless server has multiple profiles")
 }
