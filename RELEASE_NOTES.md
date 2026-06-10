@@ -1,5 +1,111 @@
 # Release Notes
 
+## v1.3.3 - Bounded VLESS runtime logging
+
+Tag: `v1.3.3`
+Base tag: `v1.3.2`
+
+This release makes `vless-tun` runtime logging explicit and bounded. The high-CPU incident on `fortinetz` showed `sing-box` running in TUN mode with `logging.level=info`, producing about two million session-log lines and hundreds of percent CPU. `logging.level=warn` remains the normal runtime default, and helper-backed `sing-box` logs now retain only the configured tail.
+
+### Highlights
+
+- Added top-level `logging.max_lines`, defaulting to `1000`.
+- Added validation for top-level `logging.level`.
+- `vless-tun status` and `vless-tun diagnose config` now print `logging_level` and `logging_max_lines`.
+- `vpn-core` accepts per-command log options and applies bounded tail retention to helper-backed long-running `sing-box` stdout/stderr.
+- `vless-tun` internal runtime events now carry severity prefixes such as `[info]`, `[warn]`, and `[error]`.
+- Verbose `trace`, `debug`, or `info` TUN starts print a warning: `max_lines` bounds disk growth, but the engine can still spend CPU logging every connection.
+
+### Config compatibility
+
+Existing v1.3.2 configs continue to load. If `logging.max_lines` is absent, the loaded default is `1000`.
+
+For older configs, make the top-level `logging` section explicit:
+
+```json
+"logging": {
+  "level": "warn",
+  "max_lines": 1000
+}
+```
+
+Valid `logging.level` values:
+
+```text
+trace, debug, info, warn, error, fatal, panic
+```
+
+Operational guidance:
+
+- use `warn` for normal long-running TUN sessions
+- use `info` or `debug` only for short diagnostics
+- set `max_lines` to `0` only when intentionally collecting an unbounded log
+
+### Agent upgrade checklist
+
+Use this checklist when updating an existing machine from v1.3.2.
+
+1. Back up the live config.
+
+```bash
+cp ~/.config/vless-tun/config.json ~/.config/vless-tun/config.json.bak-v1.3.3
+```
+
+2. Ensure the top-level `logging` section contains both fields.
+
+```json
+"logging": {
+  "level": "warn",
+  "max_lines": 1000
+}
+```
+
+3. Rebuild and install the local toolchain.
+
+```bash
+./scripts/setup.sh
+```
+
+4. Restart the shared helper if it is already installed, so the LaunchDaemon uses the updated `vpn-core` binary.
+
+```bash
+vpn-core install
+```
+
+5. Verify config diagnostics before starting a tunnel.
+
+```bash
+vless-tun diagnose config fortinetz nl
+```
+
+Expected logging lines:
+
+```text
+logging_level: warn
+logging_max_lines: 1000
+```
+
+6. Start normally.
+
+```bash
+vless-tun start fortinetz nl
+```
+
+### Operational notes
+
+- Bounded retention applies to helper-backed `sing-box` frontend logs. This is the default happy path on macOS when `vpn-core` is installed.
+- Xray sidecar logs remain separate under `xray-session-<timestamp>.log`; keep `logging.level=warn` unless collecting short diagnostics.
+- Old oversized session logs can be truncated safely after the session is stopped.
+
+### Validation performed for this release
+
+```bash
+go test ./...
+git diff --check
+vless-tun diagnose config fortinetz nl
+vless-tun status fortinetz
+```
+
 ## v1.3.2 - VLESS profile alias mismatch diagnostics
 
 Tag: `v1.3.2`

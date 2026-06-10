@@ -62,6 +62,8 @@ Build local CLIs and agent guidance that can:
 - Support direct route CIDRs from `routing.routes`.
 - In TUN mode, exclude IP-literal upstream VLESS endpoints from generated TUN routes and route those endpoint CIDRs `direct`, preventing broad full-tunnel routes from capturing the tunnel's own server traffic.
 - When a VLESS TUN session is layered above active OpenConnect split DNS, keep the public resolver handoff scoped to the VLESS TUN interface without copying corporate split domains into macOS search suffixes.
+- Keep runtime logging configurable through a top-level `logging` section. `logging.level` must validate known engine log levels, and `logging.max_lines` must bound helper-backed `sing-box` session logs with tail retention so verbose TUN diagnostics cannot grow into multi-million-line files.
+- Internal `vless-tun` runtime events should include severity prefixes (`debug`, `info`, `warn`, `error`) so log tails remain useful after bounding.
 - Support two rendering modes:
   - full tunnel when no bypass suffixes are configured
   - split DNS/direct routing when suffix bypasses are configured
