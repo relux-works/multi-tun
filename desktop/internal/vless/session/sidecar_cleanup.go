@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,13 +42,13 @@ type orphanSidecarTarget struct {
 
 var psProcessLinePattern = regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$`)
 
-func cleanupOrphanSidecars(options []SidecarOptions, logFile *os.File, timeout time.Duration) error {
+func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout time.Duration) error {
 	targets := orphanSidecarTargets(options)
 	if len(targets) == 0 {
 		return nil
 	}
 
-	_, _ = fmt.Fprintf(logFile, "orphan_sidecar_cleanup_begin targets=%s\n", orphanSidecarTargetNames(targets))
+	writeSessionLog(logFile, logLevelInfo, "orphan_sidecar_cleanup_begin targets=%s\n", orphanSidecarTargetNames(targets))
 	out, err := sidecarProcessListSession()
 	if err != nil {
 		return fmt.Errorf("list sidecar processes: %w", err)
@@ -68,7 +69,7 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile *os.File, timeout t
 				continue
 			}
 
-			_, _ = fmt.Fprintf(logFile, "orphan_sidecar_cleanup_kill name=%s pid=%d pgid=%d command=%s\n", target.Name, process.PID, process.PGID, process.Command)
+			writeSessionLog(logFile, logLevelWarn, "orphan_sidecar_cleanup_kill name=%s pid=%d pgid=%d command=%s\n", target.Name, process.PID, process.PGID, process.Command)
 			if err := terminateOrphanSidecar(process, timeout); err != nil {
 				return fmt.Errorf("stop orphan %s sidecar pid %d: %w", target.Name, process.PID, err)
 			}
@@ -76,7 +77,7 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile *os.File, timeout t
 			killed++
 		}
 	}
-	_, _ = fmt.Fprintf(logFile, "orphan_sidecar_cleanup_done killed=%d\n", killed)
+	writeSessionLog(logFile, logLevelInfo, "orphan_sidecar_cleanup_done killed=%d\n", killed)
 	return nil
 }
 

@@ -103,7 +103,7 @@ func TestApplyAndRestoreSystemDNSHandoffUsesScutilWithoutSearchDomains(t *testin
 		stdin      string
 	}
 	var calls []scutilCall
-	runScutilPrivilegedSession = func(launchMode, logPath, stdinData string) error {
+	runScutilPrivilegedSession = func(launchMode, logPath string, maxLines int, stdinData string) error {
 		calls = append(calls, scutilCall{
 			launchMode: launchMode,
 			stdin:      stdinData,
@@ -220,7 +220,7 @@ func TestApplySystemDNSHandoffFallsBackToNetworkServiceWhenScutilFails(t *testin
 		servers    []string
 	}
 	var calls []dnsSetCall
-	setDNSServersPrivilegedSession = func(launchMode, logPath, service string, servers []string) error {
+	setDNSServersPrivilegedSession = func(launchMode, logPath string, maxLines int, service string, servers []string) error {
 		calls = append(calls, dnsSetCall{
 			launchMode: launchMode,
 			service:    service,
@@ -228,7 +228,7 @@ func TestApplySystemDNSHandoffFallsBackToNetworkServiceWhenScutilFails(t *testin
 		})
 		return nil
 	}
-	runScutilPrivilegedSession = func(launchMode, logPath, stdinData string) error {
+	runScutilPrivilegedSession = func(launchMode, logPath string, maxLines int, stdinData string) error {
 		return errors.New("scutil unavailable")
 	}
 

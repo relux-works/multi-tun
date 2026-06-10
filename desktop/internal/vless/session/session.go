@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -29,6 +30,10 @@ const (
 	startupResolveInterval = 300 * time.Millisecond
 	resolveProbeTimeout    = 1500 * time.Millisecond
 	resolveProbeSuccesses  = 2
+	logLevelDebug          = "debug"
+	logLevelInfo           = "info"
+	logLevelWarn           = "warn"
+	logLevelError          = "error"
 )
 
 var (
@@ -45,8 +50,8 @@ var (
 	vpnCoreAvailableSession = func() bool {
 		return vpncore.Available(vpncore.DefaultServiceConfig())
 	}
-	vpnCoreSpawnDetachedSession = func(command []string, logPath string, setPGID bool) (int, error) {
-		return vpncore.SpawnDetached(vpncore.DefaultServiceConfig(), command, "", logPath, setPGID)
+	vpnCoreSpawnDetachedSession = func(command []string, logPath string, maxLines int, setPGID bool) (int, error) {
+		return vpncore.SpawnDetachedWithLogOptions(vpncore.DefaultServiceConfig(), command, "", logPath, setPGID, vpncore.LogOptions{MaxLines: maxLines})
 	}
 	vpnCoreSignalSession = func(pid int, signal string, group bool) error {
 		return vpncore.Signal(vpncore.DefaultServiceConfig(), pid, signal, group)
@@ -93,6 +98,7 @@ type StartOptions struct {
 	SystemDNSServers  []string
 	PrivilegedLaunch  config.PrivilegedLaunchConfig
 	Sidecars          []SidecarOptions
+	LogMaxLines       int
 }
 
 type SidecarOptions struct {
@@ -108,6 +114,7 @@ type CurrentSession struct {
 	Engine                   string           `json:"engine,omitempty"`
 	ConfigPath               string           `json:"config_path"`
 	LogPath                  string           `json:"log_path"`
+	LogMaxLines              int              `json:"log_max_lines,omitempty"`
 	MetadataPath             string           `json:"metadata_path"`
 	ProfileID                string           `json:"profile_id"`
 	ProfileName              string           `json:"profile_name"`
@@ -178,29 +185,37 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		session.LaunchLabel = options.PrivilegedLaunch.Label
 		session.LaunchPlistPath = options.PrivilegedLaunch.PlistPath
 	}
+	if launchMode == config.LaunchModeHelper {
+		session.LogMaxLines = options.LogMaxLines
+	}
 
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	var logFile io.WriteCloser
+	if launchMode == config.LaunchModeHelper {
+		logFile, err = openSessionLog(logPath, options.LogMaxLines)
+	} else {
+		logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	}
 	if err != nil {
 		return CurrentSession{}, err
 	}
 	writeLogHeader(logFile, session, profile)
 	if err := guardNestedTunnelStartup(profile, options.Mode); err != nil {
-		_, _ = fmt.Fprintf(logFile, "startup_guard_failed: %v\n", err)
+		writeSessionLog(logFile, logLevelError, "startup_guard_failed: %v\n", err)
 		_ = logFile.Close()
 		return CurrentSession{}, err
 	}
 
 	if err := cleanupOrphanSidecars(options.Sidecars, logFile, 1500*time.Millisecond); err != nil {
-		_, _ = fmt.Fprintf(logFile, "orphan_sidecar_cleanup_failed: %v\n", err)
+		writeSessionLog(logFile, logLevelError, "orphan_sidecar_cleanup_failed: %v\n", err)
 		_ = logFile.Close()
 		return CurrentSession{}, err
 	}
 
 	sidecars, err := startSidecars(cacheDir, sessionID, options.Sidecars)
 	if err != nil {
-		_, _ = fmt.Fprintf(logFile, "sidecar_start_failed: %v\n", err)
+		writeSessionLog(logFile, logLevelError, "sidecar_start_failed: %v\n", err)
 		if cleanupErr := cleanupOrphanSidecars(options.Sidecars, logFile, 1500*time.Millisecond); cleanupErr != nil {
-			_, _ = fmt.Fprintf(logFile, "sidecar_start_cleanup_failed: %v\n", cleanupErr)
+			writeSessionLog(logFile, logLevelError, "sidecar_start_cleanup_failed: %v\n", cleanupErr)
 		}
 		_ = logFile.Close()
 		return CurrentSession{}, err
@@ -218,7 +233,13 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		}
 		session.PID = pid
 	default:
-		cmd, err := startProcessSession(logFile, executable, configPath, launchMode)
+		processLogFile, ok := logFile.(*os.File)
+		if !ok {
+			_ = logFile.Close()
+			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
+			return CurrentSession{}, fmt.Errorf("launch mode %s requires file-backed logging", launchMode)
+		}
+		cmd, err := startProcessSession(processLogFile, executable, configPath, launchMode)
 		_ = logFile.Close()
 		if err != nil {
 			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
@@ -840,13 +861,16 @@ func ensureSudo() error {
 	return cmd.Run()
 }
 
-func writeLogHeader(file *os.File, current CurrentSession, profile model.Profile) {
+func writeLogHeader(file interface{ Write([]byte) (int, error) }, current CurrentSession, profile model.Profile) {
 	_, _ = fmt.Fprintf(file, "=== vless-tun session start ===\n")
 	_, _ = fmt.Fprintf(file, "session_id: %s\n", current.ID)
 	_, _ = fmt.Fprintf(file, "started_at: %s\n", current.StartedAt.Format(time.RFC3339))
 	_, _ = fmt.Fprintf(file, "profile: %s | %s | %s\n", profile.ID, profile.DisplayName(), profile.Endpoint())
 	_, _ = fmt.Fprintf(file, "engine: %s\n", firstNonEmpty(current.Engine, config.EngineSingbox))
 	_, _ = fmt.Fprintf(file, "config_path: %s\n", current.ConfigPath)
+	if current.LogMaxLines > 0 {
+		_, _ = fmt.Fprintf(file, "log_max_lines: %d\n", current.LogMaxLines)
+	}
 	_, _ = fmt.Fprintf(file, "mode: %s\n", current.Mode)
 	_, _ = fmt.Fprintf(file, "launch_mode: %s\n", current.LaunchMode)
 	if current.LaunchLabel != "" {
@@ -989,7 +1013,7 @@ func waitForStartupDNSReadiness(current CurrentSession, options StartOptions, ti
 	consecutiveSuccesses := 0
 	lastIssue := "pending"
 	lastLoggedIssue := ""
-	appendSessionLog(current.LogPath, "startup_readiness_begin hosts=%s timeout=%s method=%s\n", strings.Join(hosts, ","), timeout, current.DNSHandoffMode)
+	appendSessionLog(current, logLevelInfo, "startup_readiness_begin hosts=%s timeout=%s method=%s\n", strings.Join(hosts, ","), timeout, current.DNSHandoffMode)
 
 	for {
 		alive, pid, err := startupSessionAlive(current)
@@ -1007,20 +1031,20 @@ func waitForStartupDNSReadiness(current CurrentSession, options StartOptions, ti
 		if ready {
 			consecutiveSuccesses++
 			if consecutiveSuccesses >= resolveProbeSuccesses {
-				appendSessionLog(current.LogPath, "startup_readiness_ok hosts=%s checks=%d\n", strings.Join(hosts, ","), consecutiveSuccesses)
+				appendSessionLog(current, logLevelInfo, "startup_readiness_ok hosts=%s checks=%d\n", strings.Join(hosts, ","), consecutiveSuccesses)
 				return nil
 			}
 		} else {
 			consecutiveSuccesses = 0
 			lastIssue = issue
 			if issue != "" && issue != lastLoggedIssue {
-				appendSessionLog(current.LogPath, "startup_readiness_pending reason=%s\n", issue)
+				appendSessionLog(current, logLevelDebug, "startup_readiness_pending reason=%s\n", issue)
 				lastLoggedIssue = issue
 			}
 		}
 
 		if time.Now().After(deadline) {
-			appendSessionLog(current.LogPath, "startup_readiness_failed reason=%s\n", lastIssue)
+			appendSessionLog(current, logLevelWarn, "startup_readiness_failed reason=%s\n", lastIssue)
 			return fmt.Errorf("timed out waiting for public DNS readiness (%s); inspect %s", lastIssue, current.LogPath)
 		}
 		time.Sleep(interval)
@@ -1104,6 +1128,7 @@ func LastRelevantLogLine(path string) string {
 			strings.HasPrefix(line, "engine:"),
 			strings.HasPrefix(line, "sidecar:"),
 			strings.HasPrefix(line, "config_path:"),
+			strings.HasPrefix(line, "log_max_lines:"),
 			strings.HasPrefix(line, "mode:"),
 			strings.HasPrefix(line, "launch_mode:"),
 			strings.HasPrefix(line, "launch_label:"),

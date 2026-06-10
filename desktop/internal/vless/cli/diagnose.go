@@ -49,6 +49,8 @@ func (a *App) runDiagnoseTunnel(args []string) int {
 	fmt.Fprintf(a.stdout, "diagnostic: tunnel\n")
 	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.NetworkMode())
 	fmt.Fprintf(a.stdout, "engine: %s\n", cfg.EngineType())
+	fmt.Fprintf(a.stdout, "logging_level: %s\n", cfg.LogLevel())
+	fmt.Fprintf(a.stdout, "logging_max_lines: %d\n", cfg.LogMaxLines())
 	printConfiguredLaunch(a.stdout, launchCfg)
 
 	for _, target := range targets {
@@ -109,6 +111,8 @@ func (a *App) runDiagnoseConfig(args []string) int {
 	fmt.Fprintf(a.stdout, "source_mode: %s\n", cfg.SourceMode())
 	fmt.Fprintf(a.stdout, "cache_dir: %s\n", cfg.CacheDir)
 	fmt.Fprintf(a.stdout, "engine: %s\n", cfg.EngineType())
+	fmt.Fprintf(a.stdout, "logging_level: %s\n", cfg.LogLevel())
+	fmt.Fprintf(a.stdout, "logging_max_lines: %d\n", cfg.LogMaxLines())
 	fmt.Fprintf(a.stdout, "rendered_config: %s (%s)\n", cfg.SingboxConfigPath(), stateLabel(fileExists(cfg.SingboxConfigPath())))
 	if cfg.EngineType() == config.EngineXray || fileExists(cfg.XrayConfigPath()) {
 		fmt.Fprintf(a.stdout, "xray_config: %s (%s)\n", cfg.XrayConfigPath(), stateLabel(fileExists(cfg.XrayConfigPath())))
@@ -147,6 +151,9 @@ func printCurrentSession(out interface{ Write([]byte) (int, error) }, current *s
 	}
 	if current.LogPath != "" {
 		fmt.Fprintf(out, "log_file: %s\n", current.LogPath)
+	}
+	if current.LogMaxLines > 0 {
+		fmt.Fprintf(out, "log_max_lines: %d\n", current.LogMaxLines)
 	}
 	for _, sidecar := range current.Sidecars {
 		fmt.Fprintf(out, "sidecar: %s pid=%d log=%s\n", sidecar.Name, sidecar.PID, sidecar.LogPath)

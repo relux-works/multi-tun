@@ -65,6 +65,9 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		return 1
 	}
 	options = options.withEffectiveSelection(selection)
+	if warning := runtimeLoggingPerformanceWarning(cfg); warning != "" {
+		fmt.Fprintf(a.stderr, "warning: %s\n", warning)
+	}
 	launchCfg := cfg.LaunchOrDefault()
 
 	if current, state, alive, err := currentSessionState(cfg.CacheDir, launchCfg); err == nil && current != nil && alive {
@@ -99,6 +102,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		SystemDNSServers:  systemDNSServers(cfg),
 		PrivilegedLaunch:  cfg.LaunchOrDefault(),
 		Sidecars:          prepared.sidecars,
+		LogMaxLines:       cfg.LogMaxLines(),
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
@@ -147,6 +151,9 @@ func (a *App) runReconnect(args []string) int {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 1
 	}
+	if warning := runtimeLoggingPerformanceWarning(cfg); warning != "" {
+		fmt.Fprintf(a.stderr, "warning: %s\n", warning)
+	}
 
 	stoppedSessions, err := stopConfiguredSessions(*configPath, *force, *timeout)
 	if err != nil {
@@ -184,6 +191,7 @@ func (a *App) runReconnect(args []string) int {
 		SystemDNSServers:  systemDNSServers(cfg),
 		PrivilegedLaunch:  cfg.LaunchOrDefault(),
 		Sidecars:          prepared.sidecars,
+		LogMaxLines:       cfg.LogMaxLines(),
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
