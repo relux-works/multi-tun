@@ -19,6 +19,8 @@ type Profile struct {
 	PublicKey   string            `json:"public_key,omitempty"`
 	ShortID     string            `json:"short_id,omitempty"`
 	Flow        string            `json:"flow,omitempty"`
+	Encryption  string            `json:"encryption,omitempty"`
+	SpiderX     string            `json:"spider_x,omitempty"`
 	Query       map[string]string `json:"query,omitempty"`
 }
 

@@ -114,6 +114,8 @@ func ParseVLESSURI(raw string) (model.Profile, error) {
 		PublicKey:   firstNonEmpty(queryValues.Get("pbk"), queryValues.Get("publicKey")),
 		ShortID:     firstNonEmpty(queryValues.Get("sid"), queryValues.Get("shortId")),
 		Flow:        queryValues.Get("flow"),
+		Encryption:  queryValues.Get("encryption"),
+		SpiderX:     queryValues.Get("spx"),
 		Query:       query,
 	}
 

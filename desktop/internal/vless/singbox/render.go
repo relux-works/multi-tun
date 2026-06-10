@@ -27,10 +27,39 @@ func Render(cfg config.ProjectConfig, profile model.Profile) ([]byte, error) {
 }
 
 func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options RenderOptions) ([]byte, error) {
-	transport, err := buildTransport(profile)
+	proxyOutbound, err := buildVLESSOutbound(cfg, profile)
 	if err != nil {
 		return nil, err
 	}
+	return renderWithProxyOutbound(cfg, profile, options, proxyRenderBackend{
+		Outbound:              proxyOutbound,
+		UseUpstreamDirectDNS:  upstreamHostNeedsDirectDNS(profile),
+		UpstreamRouteExcludes: upstreamRouteExcludeCIDRs(profile),
+	})
+}
+
+func RenderXrayFrontendWithOptions(cfg config.ProjectConfig, profile model.Profile, options RenderOptions) ([]byte, error) {
+	proxyOutbound := map[string]any{
+		"type":        "socks",
+		"tag":         "proxy",
+		"server":      cfg.XraySocksListen(),
+		"server_port": cfg.XraySocksPort(),
+		"version":     "5",
+	}
+	return renderWithProxyOutbound(cfg, profile, options, proxyRenderBackend{
+		Outbound:           proxyOutbound,
+		DirectProcessNames: cfg.XrayProcessNames(),
+	})
+}
+
+type proxyRenderBackend struct {
+	Outbound              map[string]any
+	UseUpstreamDirectDNS  bool
+	UpstreamRouteExcludes []string
+	DirectProcessNames    []string
+}
+
+func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, options RenderOptions, backend proxyRenderBackend) ([]byte, error) {
 	mode := cfg.NetworkMode()
 	bypassSuffixes := cfg.NormalizedBypassSuffixes()
 	bypassExcludes := cfg.NormalizedBypassExcludes()
@@ -39,22 +68,11 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 	useOverlayDNS := mode == config.RenderModeTun && overlayDNS != nil
 	proxyResolver := cfg.ProxyResolver()
 
-	proxyOutbound := map[string]any{
-		"type":        "vless",
-		"tag":         "proxy",
-		"server":      profile.Host,
-		"server_port": profile.Port,
-		"uuid":        profile.UUID,
+	if backend.Outbound == nil {
+		return nil, fmt.Errorf("proxy outbound is required")
 	}
-	if profile.Flow != "" {
-		proxyOutbound["flow"] = profile.Flow
-	}
-	if tlsConfig := buildTLS(profile); tlsConfig != nil {
-		proxyOutbound["tls"] = tlsConfig
-	}
-	if transport != nil {
-		proxyOutbound["transport"] = transport
-	}
+	proxyOutbound := backend.Outbound
+	useUpstreamDirectDNS := backend.UseUpstreamDirectDNS
 
 	useBypassRules := len(bypassSuffixes) > 0
 	useBypassExcludes := len(bypassExcludes) > 0
@@ -65,7 +83,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 	if useOverlayDNS {
 		directDomainResolver = "dns-proxy"
 	}
-	upstreamRouteExcludes := upstreamRouteExcludeCIDRs(profile)
+	upstreamRouteExcludes := normalizeRouteExcludes(backend.UpstreamRouteExcludes)
 
 	dnsServers := []any{
 		map[string]any{
@@ -80,7 +98,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 			},
 		},
 	}
-	if !useOverlayDNS || useBypassDNSRules {
+	if !useOverlayDNS || useBypassDNSRules || useUpstreamDirectDNS {
 		dnsServers = append([]any{
 			map[string]any{
 				"type":   "local",
@@ -114,7 +132,7 @@ func RenderWithOptions(cfg config.ProjectConfig, profile model.Profile, options 
 		}, dnsRules...)
 	}
 	routeRuleSet := []any{}
-	routeRules := baseRouteRules(mode)
+	routeRules := append(processNameDirectRules(backend.DirectProcessNames), baseRouteRules(cfg, mode)...)
 
 	if len(upstreamRouteExcludes) > 0 {
 		routeRuleSet = append(routeRuleSet, map[string]any{
@@ -328,16 +346,25 @@ func upstreamRouteExcludeCIDRs(profile model.Profile) []string {
 	return []string{netip.PrefixFrom(addr, bits).String()}
 }
 
-func baseRouteRules(mode string) []any {
+func upstreamHostNeedsDirectDNS(profile model.Profile) bool {
+	host := strings.TrimSpace(profile.Host)
+	if host == "" {
+		return false
+	}
+	_, err := netip.ParseAddr(host)
+	return err != nil
+}
+
+func baseRouteRules(cfg config.ProjectConfig, mode string) []any {
 	rules := []any{
-		map[string]any{
-			"action": "sniff",
-		},
 		map[string]any{
 			"ip_is_private": true,
 			"action":        "route",
 			"outbound":      "direct",
 		},
+	}
+	if cfg.SniffEnabled() {
+		rules = append([]any{buildSniffRule(cfg)}, rules...)
 	}
 	if mode == config.RenderModeTun {
 		rules = append([]any{
@@ -348,6 +375,19 @@ func baseRouteRules(mode string) []any {
 		}, rules...)
 	}
 	return rules
+}
+
+func buildSniffRule(cfg config.ProjectConfig) map[string]any {
+	rule := map[string]any{
+		"action": "sniff",
+	}
+	if sniffers := cfg.NormalizedSniffers(); len(sniffers) > 0 {
+		rule["sniffer"] = sniffers
+	}
+	if timeout := cfg.SniffTimeout(); timeout != "" {
+		rule["timeout"] = timeout
+	}
+	return rule
 }
 
 func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS, upstreamRouteExcludes []string) ([]any, error) {
@@ -398,6 +438,65 @@ func Write(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
+func buildVLESSOutbound(cfg config.ProjectConfig, profile model.Profile) (map[string]any, error) {
+	transport, err := buildTransport(profile)
+	if err != nil {
+		return nil, err
+	}
+
+	proxyOutbound := map[string]any{
+		"type":        "vless",
+		"tag":         "proxy",
+		"server":      profile.Host,
+		"server_port": profile.Port,
+		"uuid":        profile.UUID,
+	}
+	if profile.Flow != "" {
+		proxyOutbound["flow"] = profile.Flow
+	}
+	if tlsConfig := buildTLS(cfg, profile); tlsConfig != nil {
+		proxyOutbound["tls"] = tlsConfig
+	}
+	if transport != nil {
+		proxyOutbound["transport"] = transport
+	}
+	if upstreamHostNeedsDirectDNS(profile) {
+		proxyOutbound["domain_resolver"] = "dns-direct"
+	}
+	return proxyOutbound, nil
+}
+
+func processNameDirectRules(processNames []string) []any {
+	processNames = configNormalStrings(processNames)
+	if len(processNames) == 0 {
+		return nil
+	}
+	return []any{
+		map[string]any{
+			"process_name": processNames,
+			"action":       "route",
+			"outbound":     "direct",
+		},
+	}
+}
+
+func configNormalStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 func buildTransport(profile model.Profile) (map[string]any, error) {
 	switch profile.Network {
 	case "", "tcp":
@@ -415,7 +514,7 @@ func buildTransport(profile model.Profile) (map[string]any, error) {
 	}
 }
 
-func buildTLS(profile model.Profile) map[string]any {
+func buildTLS(cfg config.ProjectConfig, profile model.Profile) map[string]any {
 	switch profile.Security {
 	case "", "none":
 		return nil
@@ -432,6 +531,7 @@ func buildTLS(profile model.Profile) map[string]any {
 				"fingerprint": profile.Fingerprint,
 			}
 		}
+		applyTLSClientOptions(cfg, tlsConfig)
 		return tlsConfig
 	case "reality":
 		tlsConfig := map[string]any{
@@ -454,10 +554,29 @@ func buildTLS(profile model.Profile) map[string]any {
 			reality := tlsConfig["reality"].(map[string]any)
 			reality["short_id"] = profile.ShortID
 		}
+		applyTLSClientOptions(cfg, tlsConfig)
 		return tlsConfig
 	default:
-		return map[string]any{
+		tlsConfig := map[string]any{
 			"enabled": true,
 		}
+		applyTLSClientOptions(cfg, tlsConfig)
+		return tlsConfig
+	}
+}
+
+func applyTLSClientOptions(cfg config.ProjectConfig, tlsConfig map[string]any) {
+	options := cfg.TLSOptions()
+	if options.Fragment != nil {
+		tlsConfig["fragment"] = *options.Fragment
+	}
+	if options.FragmentFallbackDelay != "" {
+		tlsConfig["fragment_fallback_delay"] = options.FragmentFallbackDelay
+	}
+	if options.RecordFragment != nil {
+		tlsConfig["record_fragment"] = *options.RecordFragment
+	}
+	if curvePreferences := cfg.NormalizedCurvePreferences(); len(curvePreferences) > 0 {
+		tlsConfig["curve_preferences"] = curvePreferences
 	}
 }
