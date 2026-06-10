@@ -408,6 +408,8 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 Refreshes the selected provider subscription cache before rendering, including explicit profile aliases such as `fortinetz nl`, so provider-side endpoint, SNI, fingerprint, and profile changes are picked up at start time. Use `--refresh=false` only when the subscription endpoint is unavailable and the last cached snapshot is good enough to start from.
 
+If the configured profile alias no longer matches any profile in the refreshed subscription, `start` fails before rendering or starting the tunnel, prints the available profiles, and points at the `servers.<name>.profiles.<alias>.selector` value to update.
+
 Short provider starts work through positional selection overrides:
 
 ```bash

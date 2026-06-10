@@ -55,7 +55,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		return exitCode
 	}
 
-	cfg, _, err := loadEffectiveConfig(options.configPath, config.SelectionOptions{
+	cfg, selection, err := loadEffectiveConfig(options.configPath, config.SelectionOptions{
 		Server:   options.serverName,
 		Profile:  options.configProfile,
 		Selector: options.profileSelector,
@@ -64,6 +64,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
 	}
+	options = options.withEffectiveSelection(selection)
 	launchCfg := cfg.LaunchOrDefault()
 
 	if current, state, alive, err := currentSessionState(cfg.CacheDir, launchCfg); err == nil && current != nil && alive {
@@ -141,7 +142,7 @@ func (a *App) runReconnect(args []string) int {
 		return 2
 	}
 
-	cfg, _, err := loadEffectiveConfig(*configPath, selectionOptions)
+	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 1
@@ -166,7 +167,7 @@ func (a *App) runReconnect(args []string) int {
 		outputPath:      *outputPath,
 		refresh:         *refresh,
 		refreshSet:      true,
-	})
+	}.withEffectiveSelection(selection))
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 1
@@ -321,7 +322,7 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 
 	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.DefaultProfileSelector())
 	if err != nil {
-		return preparedStart{}, err
+		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), options, effectiveStartRefresh(cfg, options))
 	}
 
 	renderOptions := resolveRenderOptions(cfg.NetworkMode())
@@ -375,6 +376,64 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		sidecars:      sidecars,
 		renderOptions: renderOptions,
 	}, nil
+}
+
+func (options startOptions) withEffectiveSelection(selection config.EffectiveSelection) startOptions {
+	if strings.TrimSpace(options.serverName) == "" {
+		options.serverName = selection.Server
+	}
+	if strings.TrimSpace(options.configProfile) == "" {
+		options.configProfile = selection.Profile
+	}
+	if strings.TrimSpace(options.profileSelector) == "" {
+		options.profileSelector = selection.Selector
+	}
+	return options
+}
+
+func formatProfileSelectionError(cause error, profiles []model.Profile, selector string, options startOptions, refreshed bool) error {
+	var builder strings.Builder
+	sourceLabel := "cached"
+	if refreshed {
+		sourceLabel = "refreshed"
+	}
+	serverName := strings.TrimSpace(options.serverName)
+	configProfile := strings.TrimSpace(options.configProfile)
+	if serverName != "" && configProfile != "" {
+		fmt.Fprintf(&builder, "configured profile %q for server %q did not match any %s subscription profile", configProfile, serverName, sourceLabel)
+	} else if serverName != "" {
+		fmt.Fprintf(&builder, "configured server %q did not match any %s subscription profile", serverName, sourceLabel)
+	} else {
+		fmt.Fprintf(&builder, "profile selection did not match any %s subscription profile", sourceLabel)
+	}
+	trimmedSelector := strings.TrimSpace(selector)
+	if trimmedSelector != "" {
+		fmt.Fprintf(&builder, "\nselector: %s", trimmedSelector)
+	}
+	if cause != nil {
+		fmt.Fprintf(&builder, "\nreason: %v", cause)
+	}
+	if len(profiles) > 0 {
+		builder.WriteString("\n\navailable profiles:")
+		for idx, profile := range profiles {
+			if idx >= 20 {
+				fmt.Fprintf(&builder, "\n- ... %d more", len(profiles)-idx)
+				break
+			}
+			fmt.Fprintf(&builder, "\n- %s", formatProfile(profile))
+		}
+	}
+	if serverName != "" && configProfile != "" {
+		fmt.Fprintf(&builder, "\n\nupdate config: servers.%s.profiles.%s.selector = \"<id, name, endpoint, or substring from available profiles>\"", serverName, configProfile)
+	} else {
+		builder.WriteString("\n\nupdate the selected profile selector in config")
+	}
+	if serverName != "" {
+		fmt.Fprintf(&builder, "\nor run: vless-tun list %s", serverName)
+	} else {
+		builder.WriteString("\nor run: vless-tun list")
+	}
+	return errors.New(builder.String())
 }
 
 func effectiveStartRefresh(cfg config.ProjectConfig, options startOptions) bool {
