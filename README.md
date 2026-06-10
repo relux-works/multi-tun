@@ -2,11 +2,11 @@
 
 `multi-tun` currently hosts local CLIs for:
 
-- `vless-tun` for DenseVPN / DanceVPN over `sing-box`
+- `vless-tun` for DenseVPN / DanceVPN over `sing-box`, with optional Xray-core sidecar support for VLESS profiles that need Xray-only fields
 - `openconnect-tun` for Cisco AnyConnect / ASA profile inspection and future OpenConnect runtime work
 - `dump` for manual VPN capture sessions and local dump artifacts
 
-The `vless-tun` flow replaces the `v2RayTun` client path with a controllable `sing-box` workflow for DenseVPN / DanceVPN subscriptions.
+The `vless-tun` flow replaces the `v2RayTun` client path with a controllable desktop workflow for DenseVPN / DanceVPN subscriptions. `sing-box` remains the default runtime and TUN frontend; selected profiles can opt into an Xray-core sidecar when the provider requires VLESS features that `sing-box` does not parse.
 
 Current scope:
 
@@ -14,12 +14,14 @@ Current scope:
 - decode plaintext or base64 subscription payloads
 - parse `vless://` profiles, including Reality + gRPC variants
 - cache the latest subscription snapshot locally
-- render a `sing-box` TUN config with optional suffix-based direct bypasses
+- render a `sing-box` TUN config with optional suffix-based direct bypasses, or an Xray sidecar config plus `sing-box` TUN frontend for Xray-selected profiles
 
 This repo also keeps live notes from previous VPN investigations:
 
 - `v2raytun-dancevpn-routing.md`
 - `corp-vpn-wifi-bypass.md`
+
+Release notes and migration guidance live in [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
 Operational instructions live under [`instructions/`](instructions/README.md):
 
@@ -93,7 +95,7 @@ openconnect-tun start ural ural-outside --mode split-include --dry-run
 dump status
 ```
 
-`./scripts/setup.sh` installs the shipped desktop toolchain end-to-end: it ensures the runtime prerequisites such as `sing-box`, builds the bundled `desktop/cmd/vpn-auth` Swift helper, and links the resulting binaries into `~/.local/bin`.
+`./scripts/setup.sh` installs the shipped desktop toolchain end-to-end: it ensures the default runtime prerequisites such as `sing-box`, builds the bundled `desktop/cmd/vpn-auth` Swift helper, and links the resulting binaries into `~/.local/bin`. `xray` is an optional runtime prerequisite only for configs that set `engine.type=xray`.
 
 That installed toolchain now also includes `android-release`, the local Go helper for:
 
@@ -111,16 +113,18 @@ Generated artifacts:
 
 - cache snapshot: `servers.<name>.cache_dir/snapshot.json`
 - rendered sing-box config: `servers.<name>.artifacts.singbox_config_path`
+- rendered Xray sidecar config when `engine.type=xray`: `servers.<name>.artifacts.xray_config_path`, or a derived `xray_*.json` next to the sing-box config
 
 ## Tools
 
 | Tool | Used for | How to run | Outputs |
 | --- | --- | --- | --- |
 | `task-board` | File-based task tracking for repo work | `task-board q --format compact 'summary()'`, `task-board m 'set_notes(TASK-ID, text="...")'` | `.task-board/` |
-| `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered sing-box JSON |
+| `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered runtime JSON |
 | `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
 | `vpn-core` | Privileged helper backend for tunnel startup and packet capture support; also includes a user-space VLESS subscription metadata probe | `vpn-core install`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | LaunchDaemon state, helper logs under runtime cache paths |
 | `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
+| `xray` | Optional VLESS engine sidecar for profiles that require Xray-only VLESS fields such as `encryption=mlkem...` | `xray run -c <xray-config.json>` through `vless-tun start` when `engine.type=xray` | Sidecar config and sidecar logs under the selected `vless-tun` cache/artifact paths |
 | `Docker` / `Colima` | Linux container labs and controlled SNI-gate experiments | `artifacts/fortinetz-cascade-whitelist/lab/run-macmini-sni-lab.sh nl` | `.temp/fortinetz-cascade/sni-lab-remote/`; remote scratch under `/Users/administrator/.cache/multi-tun/fortinetz-sni-lab` |
 | `ssh` / `rsync` | Remote Mac mini lab orchestration without disturbing the local tunnel | `ssh relux-works-dedicated-macmini ...`, used by the lab runner | `.temp/fortinetz-cascade/remote-*.log` |
 | `go` | Desktop CLI builds and tests | `go test ./...`, `go build -o vless-tun ./desktop/cmd/vless-tun` | local binaries, test logs in `.temp/` when captured |
@@ -402,7 +406,7 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 ### `vless-tun start`
 
-Renders the selected profile to the configured sing-box JSON and then starts `sing-box` in the background.
+For selector-less auto profiles such as `dance/default`, refreshes the selected provider subscription cache before rendering so provider-side endpoint changes are picked up at start time. Explicit profile selectors start from the cache by default unless `--refresh` is passed. Use `--refresh=false` with an auto profile only when the subscription endpoint is unavailable and the last cached snapshot is good enough to start from.
 
 Short provider starts work through positional selection overrides:
 
@@ -420,6 +424,12 @@ Each start creates a new timestamped session log and metadata pair under:
 - `~/.cache/vless-tun/sessions/sing-box-session-<UTC timestamp>.log`
 - `~/.cache/vless-tun/sessions/session-<UTC timestamp>.json`
 
+When `engine.type=xray`, `vless-tun` starts Xray as a local SOCKS sidecar first, then starts the `sing-box` TUN frontend. The sidecar gets its own log:
+
+- `~/.cache/vless-tun/sessions/xray-session-<UTC timestamp>.log`
+
+Before starting a sidecar, `start` scans for stale sidecar processes that match the configured sidecar executable/name and the same generated sidecar config path. Matching stale processes receive `SIGTERM`, with `SIGKILL` escalation if they do not exit. This cleanup is intentionally scoped to the generated config path; it does not broadly kill every `xray` process on the host.
+
 The currently active session pointer is stored at:
 
 - `~/.cache/vless-tun/runtime/current-session.json`
@@ -436,7 +446,7 @@ In `network.mode=tun`, `start` resolves the launch backend automatically. If the
 
 ### `vless-tun reconnect`
 
-Reloads the local config, refreshes the subscription cache by default, rerenders the selected profile, stops any currently recorded session across all configured VLESS server cache directories, and starts a fresh `sing-box` session.
+Reloads the local config, stops any currently recorded session across all configured VLESS server cache directories, refreshes the subscription cache by default, rerenders the selected profile, and starts a fresh `vless-tun` session with the selected engine.
 
 This is the command to use after changing:
 
@@ -447,13 +457,16 @@ This is the command to use after changing:
 - `routing.routes`
 - `dns.proxy_resolver`
 - `servers.<name>.artifacts.singbox_config_path`
+- `servers.<name>.artifacts.xray_config_path`
+- `engine`
 - any other render-time setting in `~/.config/vless-tun/config.json`
 
 ### `vless-tun status`
 
 Shows the current local view of the tunnel state:
 
-- whether a recorded `sing-box` session is active, stale, or absent
+- whether a recorded `vless-tun` session is active, stale, or absent
+- the selected engine and any recorded sidecar processes
 - the current session ID, PID, launch mode, start timestamp, and log file path
 - whether the configured TUN interface exists
 - whether the rendered config file exists
@@ -471,18 +484,22 @@ This is a heuristic runtime status, not a control plane.
 
 ### `vless-tun stop`
 
-Stops the currently recorded `sing-box` session using `SIGTERM` by default. Use `--force` if you want it to escalate to `SIGKILL` after the timeout.
+Stops the currently recorded `vless-tun` session using `SIGTERM` by default. For `engine.type=xray`, this also stops the Xray sidecar. Use `--force` if you want it to escalate to `SIGKILL` after the timeout.
 
 ### `vless-tun render`
 
-Selects a cached profile and writes a sing-box JSON config with:
+Selects a cached profile and writes runtime JSON config with:
 
 - a TUN inbound
 - proxy detour for the rest of the traffic
 - optional direct DNS and direct outbound for configured suffix bypasses
 - automatic direct routing and TUN route exclusion for IP-literal upstream VLESS endpoints, so the proxy server itself is not captured by broad full-TUN routes
+- default route sniffing, unless disabled through `singbox.sniff`
+- optional outbound TLS fragmentation, TLS record fragmentation, fallback delay, and TLS curve preferences from `singbox.tls`
 
 If `routing.bypass_suffixes` is empty, the renderer produces a simple full-tunnel config with no suffix-based bypasses.
+
+With the default `engine.type=sing-box`, the generated sing-box config contains the VLESS outbound directly. With `engine.type=xray`, `render` writes an Xray VLESS sidecar config and a sing-box TUN frontend config whose proxy outbound points at the local Xray SOCKS inbound. The frontend adds a direct `process_name` rule for Xray so the sidecar's upstream connection is not captured by the TUN.
 
 ### `vpn-core inspect-vless-url`
 
@@ -526,6 +543,9 @@ Example config:
       "artifacts": {
         "singbox_config_path": "~/.config/vless-tun/generated/sing-box_dance.json"
       },
+      "engine": {
+        "type": "sing-box"
+      },
       "routing": {
         "bypass_suffixes": [
           ".ru",
@@ -552,6 +572,9 @@ Example config:
       "artifacts": {
         "singbox_config_path": "~/.config/vless-tun/generated/sing-box_fortinetz.json"
       },
+      "engine": {
+        "type": "sing-box"
+      },
       "routing": {
         "bypass_suffixes": [
           ".ru",
@@ -569,6 +592,42 @@ Example config:
         },
         "de": {
           "selector": "Germany"
+        }
+      }
+    },
+    "freedom": {
+      "source": {
+        "mode": "proxy",
+        "url": "https://example.com/freedom/REPLACE_ME"
+      },
+      "cache_dir": "~/.cache/vless-tun/freedom",
+      "artifacts": {
+        "singbox_config_path": "~/.config/vless-tun/generated/sing-box_freedom.json",
+        "xray_config_path": "~/.config/vless-tun/generated/xray_freedom.json"
+      },
+      "engine": {
+        "type": "xray",
+        "xray": {
+          "executable": "xray",
+          "socks_listen": "127.0.0.1",
+          "socks_port": 20808,
+          "process_names": ["xray"]
+        }
+      },
+      "routing": {
+        "bypass_suffixes": [
+          ".ru",
+          ".рф"
+        ],
+        "bypass_exclude_suffixes": [
+          ".telegram.org",
+          "t.me"
+        ],
+        "routes": []
+      },
+      "profiles": {
+        "default": {
+          "selector": ""
         }
       }
     }
@@ -604,7 +663,14 @@ Field reference:
 - `servers.<name>.source.url`: the actual source address; in `proxy` mode this is an HTTP endpoint that resolves to one or more `vless://` entries, and in `direct` mode this is a literal `vless://...` URI
 - `servers.<name>.cache_dir`: local runtime/cache directory for that server's refresh snapshots, session logs, and runtime metadata
 - `servers.<name>.artifacts.singbox_config_path`: generated sing-box config path for that server
+- `servers.<name>.artifacts.xray_config_path`: generated Xray sidecar config path for `engine.type=xray`; if omitted, the path is derived from the sing-box config name
 - `servers.<name>.profiles.<profile>.selector`: optional selector by exact id, exact name, endpoint, or substring when the source resolves to multiple remote profiles; empty means first profile
+- `servers.<name>.engine.type`: required runtime engine for each configured server in multi-server configs; valid values are `sing-box` and `xray`
+- `engine` may also exist globally or per profile for shared settings and overrides, but every `servers.<name>` block still needs its own explicit `engine.type`
+- `engine.xray.executable`: Xray binary name or absolute path. The binary must be installed and runnable before `start` or `reconnect`
+- `engine.xray.socks_listen`: local Xray SOCKS inbound address, default `127.0.0.1`
+- `engine.xray.socks_port`: local Xray SOCKS inbound port, default `20808`
+- `engine.xray.process_names`: process names routed `direct` by the generated sing-box TUN frontend, defaulting to the Xray executable basename
 - `network.mode`: currently `tun`
 - `network.tun.interface_name`: TUN interface name for `tun` mode
 - `network.tun.addresses`: TUN addresses for `tun` mode
@@ -612,11 +678,69 @@ Field reference:
 - `routing.bypass_suffixes`: domains that should go `direct`; set `[]` for full-tunnel bring-up
 - `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists
 - `routing.routes`: CIDRs/IPs that should route `direct`
+- `singbox` may exist globally, per server, or per profile; more specific values override broader values
+- `singbox.sniff.enabled`: controls the generated sing-box route sniff action. Default is `true`, preserving the previous renderer behavior
+- `singbox.sniff.sniffers`: optional sing-box sniffers list such as `["tls", "http"]`
+- `singbox.sniff.timeout`: optional sniff timeout string such as `"1s"`
+- `singbox.tls.fragment`: optional boolean for sing-box outbound TLS fragmentation
+- `singbox.tls.record_fragment`: optional boolean for sing-box outbound TLS record fragmentation
+- `singbox.tls.fragment_fallback_delay`: optional delay string for fragmentation fallback, such as `"500ms"`
+- `singbox.tls.curve_preferences`: optional TLS curve preference list such as `["X25519MLKEM768", "X25519"]`
 - `dns.proxy_resolver`: upstream DNS endpoint for proxied traffic
-- `logging.level`: sing-box log level written into the generated config; new configs default to `warn` so normal full-TUN sessions do not write every connection to disk
+- `logging.level`: runtime log level written into generated configs; new configs default to `warn` so normal full-TUN sessions do not write every connection to disk. Xray sidecar rendering maps `warn` to Xray's `warning`
 - `launch.mode`: optional override for the runtime backend. Omit `launch` in the happy path and `vless-tun` will resolve to the shared `vpn-core` backend automatically when it is available
 - `launch.label` and `launch.plist_path`: legacy compatibility overrides only; the shared daemon now belongs to `vpn-core`, not to each `sing-box` session
 - legacy flat configs with root-level `source`, `cache_dir`, `artifacts`, and `default.profile_selector` still load; new multi-server configs are preferred for more than one provider/source
+
+Example per-server sing-box tuning:
+
+```json
+{
+  "servers": {
+    "freedom": {
+      "singbox": {
+        "sniff": {
+          "enabled": true,
+          "sniffers": ["tls", "http"],
+          "timeout": "1s"
+        },
+        "tls": {
+          "fragment": true,
+          "record_fragment": true,
+          "fragment_fallback_delay": "500ms",
+          "curve_preferences": ["X25519MLKEM768", "X25519"]
+        }
+      }
+    }
+  }
+}
+```
+
+Example per-server Xray engine override:
+
+```json
+{
+  "servers": {
+    "freedom": {
+      "artifacts": {
+        "singbox_config_path": "~/.config/vless-tun/generated/sing-box_freedom.json",
+        "xray_config_path": "~/.config/vless-tun/generated/xray_freedom.json"
+      },
+      "engine": {
+        "type": "xray",
+        "xray": {
+          "executable": "xray",
+          "socks_listen": "127.0.0.1",
+          "socks_port": 20808,
+          "process_names": ["xray"]
+        }
+      }
+    }
+  }
+}
+```
+
+VLESS URI parameters such as `encryption=mlkem...` and `spx=...` are parsed into the profile cache. With `engine.type=xray`, they are written into the Xray sidecar config. `singbox.tls.curve_preferences` is a sing-box TLS setting; it is not a replacement for unsupported VLESS outbound `encryption` fields in sing-box versions that reject them.
 
 ### Full TUN on macOS
 
@@ -659,7 +783,8 @@ go build -o cisco-dump ./desktop/cmd/cisco-dump
 ## Notes
 
 - This version manages the local `sing-box` session lifecycle with `start`, `status`, `stop`, and a configurable privileged TUN backend for macOS.
-- `reconnect` is the "apply latest config" path: it rereads local config, refreshes the subscription by default, rerenders, stops any recorded VLESS session across configured server cache directories, and starts the selected session.
+- `start` refreshes selector-less auto profiles such as `dance/default` before rendering, so they follow provider-side endpoint changes. Explicit profile selectors start from cache by default unless `--refresh` is passed; `--refresh=false` is the explicit cached fallback for auto profiles.
+- `reconnect` is the "restart with latest config" path: it rereads local config, stops any recorded VLESS session across configured server cache directories, refreshes the subscription by default, rerenders, and starts the selected session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
 - `system_proxy` render mode has been removed; legacy configs should use `network.mode=tun` and drop any old `network.system_proxy` block.
