@@ -77,6 +77,24 @@ func TestParseProfiles(t *testing.T) {
 	}
 }
 
+func TestParseVLESSURIExtractsPostQuantumAndSpiderXParams(t *testing.T) {
+	t.Parallel()
+
+	profile, err := ParseVLESSURI("vless://00000000-0000-0000-0000-000000000000@example.com:443?type=tcp&security=reality&encryption=mlkem768x25519plus.native.0rtt.example&spx=%2Fabc123&flow=xtls-rprx-vision#pq")
+	if err != nil {
+		t.Fatalf("ParseVLESSURI returned error: %v", err)
+	}
+	if got, want := profile.Encryption, "mlkem768x25519plus.native.0rtt.example"; got != want {
+		t.Fatalf("Encryption = %q, want %q", got, want)
+	}
+	if got, want := profile.SpiderX, "/abc123"; got != want {
+		t.Fatalf("SpiderX = %q, want %q", got, want)
+	}
+	if got, want := profile.Flow, "xtls-rprx-vision"; got != want {
+		t.Fatalf("Flow = %q, want %q", got, want)
+	}
+}
+
 func TestSelectProfile(t *testing.T) {
 	t.Parallel()
 

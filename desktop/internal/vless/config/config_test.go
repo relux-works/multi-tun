@@ -92,6 +92,35 @@ func TestSingboxConfigPathPrefersArtifactsPath(t *testing.T) {
 	}
 }
 
+func TestEngineDefaultsToSingboxAndDerivesXrayConfigPath(t *testing.T) {
+	t.Parallel()
+
+	cfg := ProjectConfig{
+		Artifacts: ArtifactsConfig{
+			SingboxConfigPath: "/tmp/generated/sing-box_freedom.json",
+		},
+	}
+
+	if got, want := cfg.EngineType(), EngineSingbox; got != want {
+		t.Fatalf("EngineType() = %q, want %q", got, want)
+	}
+	if got, want := cfg.XrayExecutable(), "xray"; got != want {
+		t.Fatalf("XrayExecutable() = %q, want %q", got, want)
+	}
+	if got, want := cfg.XraySocksListen(), "127.0.0.1"; got != want {
+		t.Fatalf("XraySocksListen() = %q, want %q", got, want)
+	}
+	if got, want := cfg.XraySocksPort(), 20808; got != want {
+		t.Fatalf("XraySocksPort() = %d, want %d", got, want)
+	}
+	if got, want := cfg.XrayConfigPath(), "/tmp/generated/xray_freedom.json"; got != want {
+		t.Fatalf("XrayConfigPath() = %q, want %q", got, want)
+	}
+	if got, want := cfg.XrayProcessNames(), []string{"xray"}; !equalStrings(got, want) {
+		t.Fatalf("XrayProcessNames() = %v, want %v", got, want)
+	}
+}
+
 func TestLoadPreferredSchemaUsesPreferredFields(t *testing.T) {
 	t.Parallel()
 
@@ -260,6 +289,152 @@ func TestEffectiveServerProfileMergesRoutingOverrides(t *testing.T) {
 	}
 }
 
+func TestEffectiveServerProfileMergesSingboxOverrides(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Singbox = &SingboxConfig{
+		Sniff: &SniffConfig{
+			Enabled: boolPtr(false),
+		},
+		TLS: TLSClientConfig{
+			Fragment:              boolPtr(true),
+			FragmentFallbackDelay: "250ms",
+			CurvePreferences:      []string{"X25519"},
+		},
+	}
+	cfg.Current = &CurrentConfig{
+		Server:  "freedom",
+		Profile: "default",
+	}
+	cfg.Servers = map[string]ServerConfig{
+		"freedom": {
+			Source: SourceConfig{
+				Mode: SourceModeProxy,
+				URL:  "https://example.com/freedom",
+			},
+			CacheDir: "/tmp/freedom-cache",
+			Artifacts: &ArtifactsConfig{
+				SingboxConfigPath: "/tmp/freedom.json",
+			},
+			Singbox: &SingboxConfig{
+				Sniff: &SniffConfig{
+					Enabled:  boolPtr(true),
+					Sniffers: []string{"tls", "http"},
+					Timeout:  "1s",
+				},
+			},
+			Profiles: map[string]ProfileConfig{
+				"default": {
+					Singbox: &SingboxConfig{
+						TLS: TLSClientConfig{
+							RecordFragment:   boolPtr(true),
+							CurvePreferences: []string{"X25519MLKEM768"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	effective, _, err := cfg.Effective(SelectionOptions{})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if !effective.SniffEnabled() {
+		t.Fatal("SniffEnabled() = false, want true")
+	}
+	if got, want := effective.NormalizedSniffers(), []string{"tls", "http"}; !equalStrings(got, want) {
+		t.Fatalf("NormalizedSniffers() = %v, want %v", got, want)
+	}
+	if got, want := effective.SniffTimeout(), "1s"; got != want {
+		t.Fatalf("SniffTimeout() = %q, want %q", got, want)
+	}
+	tls := effective.TLSOptions()
+	if tls.Fragment == nil || !*tls.Fragment {
+		t.Fatalf("TLSOptions().Fragment = %#v, want true", tls.Fragment)
+	}
+	if tls.RecordFragment == nil || !*tls.RecordFragment {
+		t.Fatalf("TLSOptions().RecordFragment = %#v, want true", tls.RecordFragment)
+	}
+	if got, want := tls.FragmentFallbackDelay, "250ms"; got != want {
+		t.Fatalf("TLSOptions().FragmentFallbackDelay = %q, want %q", got, want)
+	}
+	if got, want := effective.NormalizedCurvePreferences(), []string{"X25519MLKEM768"}; !equalStrings(got, want) {
+		t.Fatalf("NormalizedCurvePreferences() = %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveServerProfileMergesEngineOverrides(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Engine = &EngineConfig{
+		Type: EngineSingbox,
+		Xray: &XrayEngineConfig{
+			Executable:   "/opt/bin/root-xray",
+			SocksListen:  "127.0.0.1",
+			SocksPort:    20808,
+			ProcessNames: []string{"root-xray"},
+		},
+	}
+	cfg.Current = &CurrentConfig{
+		Server:  "freedom",
+		Profile: "default",
+	}
+	cfg.Servers = map[string]ServerConfig{
+		"freedom": {
+			Source: SourceConfig{
+				Mode: SourceModeProxy,
+				URL:  "https://example.com/freedom",
+			},
+			CacheDir: "/tmp/freedom-cache",
+			Artifacts: &ArtifactsConfig{
+				SingboxConfigPath: "/tmp/sing-box_freedom.json",
+			},
+			Engine: &EngineConfig{
+				Type: EngineXray,
+				Xray: &XrayEngineConfig{
+					Executable: "/opt/homebrew/bin/xray",
+				},
+			},
+			Profiles: map[string]ProfileConfig{
+				"default": {
+					Engine: &EngineConfig{
+						Xray: &XrayEngineConfig{
+							SocksPort:    21808,
+							ProcessNames: []string{"xray", "xray"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	effective, _, err := cfg.Effective(SelectionOptions{})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if got, want := effective.EngineType(), EngineXray; got != want {
+		t.Fatalf("EngineType() = %q, want %q", got, want)
+	}
+	if got, want := effective.XrayExecutable(), "/opt/homebrew/bin/xray"; got != want {
+		t.Fatalf("XrayExecutable() = %q, want %q", got, want)
+	}
+	if got, want := effective.XraySocksListen(), "127.0.0.1"; got != want {
+		t.Fatalf("XraySocksListen() = %q, want %q", got, want)
+	}
+	if got, want := effective.XraySocksPort(), 21808; got != want {
+		t.Fatalf("XraySocksPort() = %d, want %d", got, want)
+	}
+	if got, want := effective.XrayConfigPath(), "/tmp/xray_freedom.json"; got != want {
+		t.Fatalf("XrayConfigPath() = %q, want %q", got, want)
+	}
+	if got, want := effective.XrayProcessNames(), []string{"xray"}; !equalStrings(got, want) {
+		t.Fatalf("XrayProcessNames() = %v, want %v", got, want)
+	}
+}
+
 func TestEffectiveServerOverrideDoesNotReuseCurrentProfileFromDifferentServer(t *testing.T) {
 	t.Parallel()
 
@@ -350,6 +525,42 @@ func TestSetCurrentUsesDefaultProfileWhenProfileOmitted(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresExplicitEngineTypeForEachConfiguredServer(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {"server": "dance", "profile": "default"},
+  "servers": {
+    "dance": {
+      "source": {"mode": "proxy", "url": "https://example.com/dance"},
+      "cache_dir": "/tmp/vless-dance",
+      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "profiles": {"default": {"selector": "Sweden"}}
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want missing engine error")
+	}
+	for _, want := range []string{"servers.dance.engine.type is required", "sing-box", "xray", `"engine": { "type": "sing-box" }`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Load() error = %q, want substring %q", err, want)
+		}
+	}
+}
+
 func TestSetCurrentUsesOnlyProfileWhenProfileOmitted(t *testing.T) {
 	t.Parallel()
 
@@ -410,6 +621,10 @@ func equalStrings(got []string, want []string) bool {
 	return true
 }
 
+func boolPtr(value bool) *bool {
+	return &value
+}
+
 func writeSetCurrentConfig(t *testing.T) string {
 	t.Helper()
 
@@ -424,6 +639,7 @@ func writeSetCurrentConfig(t *testing.T) string {
       "source": {"mode": "proxy", "url": "https://example.com/dance"},
       "cache_dir": "/tmp/vless-dance",
       "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "engine": {"type": "sing-box"},
       "profiles": {
         "default": {"selector": "Sweden"}
       }
@@ -432,6 +648,7 @@ func writeSetCurrentConfig(t *testing.T) string {
       "source": {"mode": "proxy", "url": "https://example.com/fortinetz"},
       "cache_dir": "/tmp/vless-fortinetz",
       "artifacts": {"singbox_config_path": "/tmp/fortinetz.json"},
+      "engine": {"type": "sing-box"},
       "profiles": {
         "nl": {"selector": "Netherlands"},
         "de": {"selector": "Germany"}
@@ -441,6 +658,7 @@ func writeSetCurrentConfig(t *testing.T) string {
       "source": {"mode": "proxy", "url": "https://example.com/freedom"},
       "cache_dir": "/tmp/vless-freedom",
       "artifacts": {"singbox_config_path": "/tmp/freedom.json"},
+      "engine": {"type": "xray"},
       "profiles": {
         "fr": {"selector": "France"}
       }

@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,9 @@ const (
 	SourceModeDirect = "direct"
 
 	RenderModeTun = "tun"
+
+	EngineSingbox = "sing-box"
+	EngineXray    = "xray"
 
 	LaunchModeAuto    = "auto"
 	LaunchModeSudo    = "sudo"
@@ -35,6 +39,8 @@ type ProjectConfig struct {
 	Network   NetworkConfig           `json:"network,omitempty"`
 	Launch    *LaunchConfig           `json:"launch,omitempty"`
 	Routing   RoutingConfig           `json:"routing,omitempty"`
+	Engine    *EngineConfig           `json:"engine,omitempty"`
+	Singbox   *SingboxConfig          `json:"singbox,omitempty"`
 	DNS       DNSConfig               `json:"dns,omitempty"`
 	Logging   LoggingConfig           `json:"logging,omitempty"`
 	Artifacts ArtifactsConfig         `json:"artifacts,omitempty"`
@@ -75,6 +81,8 @@ type ServerConfig struct {
 	CacheDir  string                   `json:"cache_dir,omitempty"`
 	Artifacts *ArtifactsConfig         `json:"artifacts,omitempty"`
 	Routing   *RoutingConfig           `json:"routing,omitempty"`
+	Engine    *EngineConfig            `json:"engine,omitempty"`
+	Singbox   *SingboxConfig           `json:"singbox,omitempty"`
 	Profiles  map[string]ProfileConfig `json:"profiles,omitempty"`
 }
 
@@ -82,6 +90,8 @@ type ProfileConfig struct {
 	Selector        string         `json:"selector,omitempty"`
 	ProfileSelector string         `json:"profile_selector,omitempty"`
 	Routing         *RoutingConfig `json:"routing,omitempty"`
+	Engine          *EngineConfig  `json:"engine,omitempty"`
+	Singbox         *SingboxConfig `json:"singbox,omitempty"`
 }
 
 type SourceConfig struct {
@@ -109,6 +119,36 @@ type RoutingConfig struct {
 	Routes         []string `json:"routes,omitempty"`
 }
 
+type EngineConfig struct {
+	Type string            `json:"type,omitempty"`
+	Xray *XrayEngineConfig `json:"xray,omitempty"`
+}
+
+type XrayEngineConfig struct {
+	Executable   string   `json:"executable,omitempty"`
+	SocksListen  string   `json:"socks_listen,omitempty"`
+	SocksPort    int      `json:"socks_port,omitempty"`
+	ProcessNames []string `json:"process_names,omitempty"`
+}
+
+type SingboxConfig struct {
+	Sniff *SniffConfig    `json:"sniff,omitempty"`
+	TLS   TLSClientConfig `json:"tls,omitempty"`
+}
+
+type SniffConfig struct {
+	Enabled  *bool    `json:"enabled,omitempty"`
+	Sniffers []string `json:"sniffers,omitempty"`
+	Timeout  string   `json:"timeout,omitempty"`
+}
+
+type TLSClientConfig struct {
+	Fragment              *bool    `json:"fragment,omitempty"`
+	FragmentFallbackDelay string   `json:"fragment_fallback_delay,omitempty"`
+	RecordFragment        *bool    `json:"record_fragment,omitempty"`
+	CurvePreferences      []string `json:"curve_preferences,omitempty"`
+}
+
 type DNSConfig struct {
 	ProxyResolver ProxyDNSConfig `json:"proxy_resolver,omitempty"`
 }
@@ -119,6 +159,7 @@ type LoggingConfig struct {
 
 type ArtifactsConfig struct {
 	SingboxConfigPath string `json:"singbox_config_path,omitempty"`
+	XrayConfigPath    string `json:"xray_config_path,omitempty"`
 }
 
 type LaunchConfig struct {
@@ -320,6 +361,11 @@ func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectCon
 
 	artifacts := c.Artifacts
 	routing := c.Routing
+	engine := cloneEngineConfig(c.Engine)
+	if engine == nil || strings.TrimSpace(engine.Type) == "" {
+		engine = &EngineConfig{Type: EngineSingbox}
+	}
+	singbox := cloneSingboxConfig(c.Singbox)
 	profile := ProfileConfig{
 		Selector: selector,
 	}
@@ -334,6 +380,8 @@ func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectCon
 			CacheDir:  c.CacheDir,
 			Artifacts: &artifacts,
 			Routing:   &routing,
+			Engine:    engine,
+			Singbox:   singbox,
 			Profiles: map[string]ProfileConfig{
 				profileName: profile,
 			},
@@ -343,6 +391,8 @@ func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectCon
 	c.Source = SourceConfig{}
 	c.Default = nil
 	c.Routing = RoutingConfig{}
+	c.Engine = nil
+	c.Singbox = nil
 	c.Artifacts = ArtifactsConfig{}
 	c.SubscriptionURL = ""
 	c.SelectedProfile = ""
@@ -382,11 +432,32 @@ func ResolveInitPath(path string) string {
 }
 
 func (c ProjectConfig) Validate() error {
+	if err := c.validateExplicitServerEngines(); err != nil {
+		return err
+	}
 	effective, _, err := c.Effective(SelectionOptions{})
 	if err != nil {
 		return err
 	}
 	return effective.validateFlat()
+}
+
+func (c ProjectConfig) validateExplicitServerEngines() error {
+	if len(c.Servers) == 0 {
+		return nil
+	}
+
+	for name, server := range c.Servers {
+		if server.Engine == nil || strings.TrimSpace(server.Engine.Type) == "" {
+			return fmt.Errorf("servers.%s.engine.type is required; set it to one of: %s, %s. Example: \"servers\": { %q: { \"engine\": { \"type\": %q } } }. Use %q for the Xray sidecar engine", name, EngineSingbox, EngineXray, name, EngineSingbox, EngineXray)
+		}
+		switch normalizeEngineType(server.Engine.Type) {
+		case EngineSingbox, EngineXray:
+		default:
+			return fmt.Errorf("servers.%s.engine.type must be one of: %s, %s", name, EngineSingbox, EngineXray)
+		}
+	}
+	return nil
 }
 
 func (c ProjectConfig) validateFlat() error {
@@ -406,6 +477,14 @@ func (c ProjectConfig) validateFlat() error {
 	}
 	if c.SingboxConfigPath() == "" {
 		return errors.New("artifacts.singbox_config_path is required")
+	}
+	switch c.EngineType() {
+	case EngineSingbox, EngineXray:
+	default:
+		return errors.New("engine.type must be one of: sing-box, xray")
+	}
+	if c.EngineType() == EngineXray && c.XraySocksPort() <= 0 {
+		return errors.New("engine.xray.socks_port must be positive")
 	}
 	proxyResolver := c.ProxyResolver()
 	if proxyResolver.Address == "" {
@@ -465,10 +544,14 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 	effective.CacheDir = firstNonEmpty(serverCfg.CacheDir, c.CacheDir)
 	effective.Artifacts = mergeArtifactsConfig(c.Artifacts, serverCfg.Artifacts)
 	effective.Routing = mergeRoutingConfig(c.Routing, serverCfg.Routing)
+	effective.Engine = mergeEngineConfig(c.Engine, serverCfg.Engine)
+	effective.Singbox = mergeSingboxConfig(c.Singbox, serverCfg.Singbox)
 
 	selector := firstNonEmpty(options.Selector, c.legacyDefaultProfileSelector())
 	if hasProfile {
 		effective.Routing = mergeRoutingConfig(effective.Routing, profileCfg.Routing)
+		effective.Engine = mergeEngineConfig(effective.Engine, profileCfg.Engine)
+		effective.Singbox = mergeSingboxConfig(effective.Singbox, profileCfg.Singbox)
 		selector = firstNonEmpty(options.Selector, profileCfg.Selector, profileCfg.ProfileSelector, c.legacyDefaultProfileSelector())
 	}
 	effective.setDefaultProfileSelector(selector)
@@ -605,6 +688,9 @@ func mergeArtifactsConfig(base ArtifactsConfig, override *ArtifactsConfig) Artif
 	if path := strings.TrimSpace(override.SingboxConfigPath); path != "" {
 		result.SingboxConfigPath = path
 	}
+	if path := strings.TrimSpace(override.XrayConfigPath); path != "" {
+		result.XrayConfigPath = path
+	}
 	return result
 }
 
@@ -621,6 +707,111 @@ func mergeRoutingConfig(base RoutingConfig, override *RoutingConfig) RoutingConf
 	}
 	if override.Routes != nil {
 		result.Routes = cloneStrings(override.Routes)
+	}
+	return result
+}
+
+func mergeEngineConfig(base *EngineConfig, override *EngineConfig) *EngineConfig {
+	if base == nil && override == nil {
+		return nil
+	}
+
+	result := cloneEngineConfig(base)
+	if result == nil {
+		result = &EngineConfig{}
+	}
+	if override == nil {
+		return result
+	}
+
+	if engineType := strings.TrimSpace(override.Type); engineType != "" {
+		result.Type = engineType
+	}
+	result.Xray = mergeXrayEngineConfig(result.Xray, override.Xray)
+	return result
+}
+
+func mergeXrayEngineConfig(base *XrayEngineConfig, override *XrayEngineConfig) *XrayEngineConfig {
+	if base == nil && override == nil {
+		return nil
+	}
+
+	result := cloneXrayEngineConfig(base)
+	if result == nil {
+		result = &XrayEngineConfig{}
+	}
+	if override == nil {
+		return result
+	}
+
+	if executable := strings.TrimSpace(override.Executable); executable != "" {
+		result.Executable = executable
+	}
+	if listen := strings.TrimSpace(override.SocksListen); listen != "" {
+		result.SocksListen = listen
+	}
+	if override.SocksPort > 0 {
+		result.SocksPort = override.SocksPort
+	}
+	if override.ProcessNames != nil {
+		result.ProcessNames = cloneStrings(override.ProcessNames)
+	}
+	return result
+}
+
+func mergeSingboxConfig(base *SingboxConfig, override *SingboxConfig) *SingboxConfig {
+	if base == nil && override == nil {
+		return nil
+	}
+
+	result := cloneSingboxConfig(base)
+	if result == nil {
+		result = &SingboxConfig{}
+	}
+	if override == nil {
+		return result
+	}
+
+	if override.Sniff != nil {
+		result.Sniff = mergeSniffConfig(result.Sniff, override.Sniff)
+	}
+	result.TLS = mergeTLSClientConfig(result.TLS, override.TLS)
+	return result
+}
+
+func mergeSniffConfig(base *SniffConfig, override *SniffConfig) *SniffConfig {
+	result := cloneSniffConfig(base)
+	if result == nil {
+		result = &SniffConfig{}
+	}
+	if override.Enabled != nil {
+		enabled := *override.Enabled
+		result.Enabled = &enabled
+	}
+	if override.Sniffers != nil {
+		result.Sniffers = cloneStrings(override.Sniffers)
+	}
+	if timeout := strings.TrimSpace(override.Timeout); timeout != "" {
+		result.Timeout = timeout
+	}
+	return result
+}
+
+func mergeTLSClientConfig(base TLSClientConfig, override TLSClientConfig) TLSClientConfig {
+	result := cloneTLSClientConfig(base)
+	if override.Fragment != nil {
+		fragment := *override.Fragment
+		result.Fragment = &fragment
+	}
+	if fallbackDelay := strings.TrimSpace(override.FragmentFallbackDelay); fallbackDelay != "" {
+		result.FragmentFallbackDelay = fallbackDelay
+	}
+	if override.RecordFragment != nil {
+		recordFragment := *override.RecordFragment
+		result.RecordFragment = &recordFragment
+	}
+	if override.CurvePreferences != nil {
+		result.CurvePreferences = cloneStrings(override.CurvePreferences)
 	}
 	return result
 }
@@ -656,6 +847,9 @@ func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
 	if path := strings.TrimSpace(c.Artifacts.SingboxConfigPath); path != "" && !filepath.IsAbs(path) {
 		c.Artifacts.SingboxConfigPath = filepath.Join(baseDir, path)
 	}
+	if path := strings.TrimSpace(c.Artifacts.XrayConfigPath); path != "" && !filepath.IsAbs(path) {
+		c.Artifacts.XrayConfigPath = filepath.Join(baseDir, path)
+	}
 	if c.Render != nil {
 		if path := strings.TrimSpace(c.Render.OutputPath); path != "" && !filepath.IsAbs(path) {
 			c.Render.OutputPath = filepath.Join(baseDir, path)
@@ -668,6 +862,9 @@ func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
 		if server.Artifacts != nil {
 			if path := strings.TrimSpace(server.Artifacts.SingboxConfigPath); path != "" && !filepath.IsAbs(path) {
 				server.Artifacts.SingboxConfigPath = filepath.Join(baseDir, path)
+			}
+			if path := strings.TrimSpace(server.Artifacts.XrayConfigPath); path != "" && !filepath.IsAbs(path) {
+				server.Artifacts.XrayConfigPath = filepath.Join(baseDir, path)
 			}
 		}
 		c.Servers[name] = server
@@ -714,6 +911,16 @@ func (c ProjectConfig) SingboxConfigPath() string {
 		return effective.SingboxConfigPath()
 	}
 	return firstNonEmpty(strings.TrimSpace(c.Artifacts.SingboxConfigPath), c.legacyRenderOutputPath())
+}
+
+func (c ProjectConfig) XrayConfigPath() string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.XrayConfigPath()
+	}
+	if path := strings.TrimSpace(c.Artifacts.XrayConfigPath); path != "" {
+		return path
+	}
+	return deriveXrayConfigPath(c.SingboxConfigPath())
 }
 
 func (c ProjectConfig) TunInterfaceName() string {
@@ -770,6 +977,82 @@ func (c ProjectConfig) Routes() []string {
 	return nil
 }
 
+func (c ProjectConfig) Sniff() SniffConfig {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.Sniff()
+	}
+	if c.Singbox == nil || c.Singbox.Sniff == nil {
+		return SniffConfig{}
+	}
+	return *cloneSniffConfig(c.Singbox.Sniff)
+}
+
+func (c ProjectConfig) TLSOptions() TLSClientConfig {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.TLSOptions()
+	}
+	if c.Singbox == nil {
+		return TLSClientConfig{}
+	}
+	return cloneTLSClientConfig(c.Singbox.TLS)
+}
+
+func (c ProjectConfig) EngineConfig() EngineConfig {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.EngineConfig()
+	}
+	if c.Engine == nil {
+		return EngineConfig{}
+	}
+	return *cloneEngineConfig(c.Engine)
+}
+
+func (c ProjectConfig) EngineType() string {
+	engineType := normalizeEngineType(c.EngineConfig().Type)
+	switch engineType {
+	case "":
+		return EngineSingbox
+	default:
+		return engineType
+	}
+}
+
+func (c ProjectConfig) XrayExecutable() string {
+	engine := c.EngineConfig()
+	if engine.Xray == nil {
+		return "xray"
+	}
+	return firstNonEmpty(engine.Xray.Executable, "xray")
+}
+
+func (c ProjectConfig) XraySocksListen() string {
+	engine := c.EngineConfig()
+	if engine.Xray == nil {
+		return "127.0.0.1"
+	}
+	return firstNonEmpty(engine.Xray.SocksListen, "127.0.0.1")
+}
+
+func (c ProjectConfig) XraySocksPort() int {
+	engine := c.EngineConfig()
+	if engine.Xray != nil && engine.Xray.SocksPort > 0 {
+		return engine.Xray.SocksPort
+	}
+	return 20808
+}
+
+func (c ProjectConfig) XrayProcessNames() []string {
+	engine := c.EngineConfig()
+	if engine.Xray != nil && engine.Xray.ProcessNames != nil {
+		return normalizeStrings(engine.Xray.ProcessNames)
+	}
+	executable := filepath.Base(c.XrayExecutable())
+	if executable == "" || executable == "." || executable == string(filepath.Separator) {
+		return []string{"xray"}
+	}
+	return []string{executable}
+}
+
 func (c ProjectConfig) effectiveFromServers() (ProjectConfig, bool) {
 	if len(c.Servers) == 0 {
 		return ProjectConfig{}, false
@@ -791,6 +1074,26 @@ func (c ProjectConfig) NormalizedBypassExcludes() []string {
 
 func (c ProjectConfig) NormalizedRoutes() []string {
 	return normalizeRoutes(c.Routes())
+}
+
+func (c ProjectConfig) NormalizedSniffers() []string {
+	return normalizeStrings(c.Sniff().Sniffers)
+}
+
+func (c ProjectConfig) NormalizedCurvePreferences() []string {
+	return normalizeStrings(c.TLSOptions().CurvePreferences)
+}
+
+func (c ProjectConfig) SniffEnabled() bool {
+	sniff := c.Sniff()
+	if sniff.Enabled == nil {
+		return true
+	}
+	return *sniff.Enabled
+}
+
+func (c ProjectConfig) SniffTimeout() string {
+	return strings.TrimSpace(c.Sniff().Timeout)
 }
 
 func (c ProjectConfig) ProxyResolver() ProxyDNSConfig {
@@ -870,6 +1173,31 @@ func normalizeRoutes(values []string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func normalizeStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func normalizeEngineType(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "singbox" {
+		return EngineSingbox
+	}
+	return value
 }
 
 func writeJSON(path string, value any) error {
@@ -982,11 +1310,94 @@ func (c ProjectConfig) legacyRenderLogLevel() string {
 	return strings.TrimSpace(c.Render.LogLevel)
 }
 
+func deriveXrayConfigPath(singboxPath string) string {
+	singboxPath = strings.TrimSpace(singboxPath)
+	if singboxPath == "" {
+		return ""
+	}
+
+	dir := filepath.Dir(singboxPath)
+	base := filepath.Base(singboxPath)
+	switch {
+	case strings.HasPrefix(base, "sing-box"):
+		base = "xray" + strings.TrimPrefix(base, "sing-box")
+	case strings.HasPrefix(base, "singbox"):
+		base = "xray" + strings.TrimPrefix(base, "singbox")
+	default:
+		ext := filepath.Ext(base)
+		base = strings.TrimSuffix(base, ext) + "-xray" + ext
+	}
+	return filepath.Join(dir, base)
+}
+
 func cloneStrings(values []string) []string {
 	if values == nil {
 		return nil
 	}
 	return append([]string(nil), values...)
+}
+
+func cloneEngineConfig(value *EngineConfig) *EngineConfig {
+	if value == nil {
+		return nil
+	}
+	return &EngineConfig{
+		Type: strings.TrimSpace(value.Type),
+		Xray: cloneXrayEngineConfig(value.Xray),
+	}
+}
+
+func cloneXrayEngineConfig(value *XrayEngineConfig) *XrayEngineConfig {
+	if value == nil {
+		return nil
+	}
+	return &XrayEngineConfig{
+		Executable:   strings.TrimSpace(value.Executable),
+		SocksListen:  strings.TrimSpace(value.SocksListen),
+		SocksPort:    value.SocksPort,
+		ProcessNames: cloneStrings(value.ProcessNames),
+	}
+}
+
+func cloneSingboxConfig(value *SingboxConfig) *SingboxConfig {
+	if value == nil {
+		return nil
+	}
+	return &SingboxConfig{
+		Sniff: cloneSniffConfig(value.Sniff),
+		TLS:   cloneTLSClientConfig(value.TLS),
+	}
+}
+
+func cloneSniffConfig(value *SniffConfig) *SniffConfig {
+	if value == nil {
+		return nil
+	}
+	result := &SniffConfig{
+		Sniffers: cloneStrings(value.Sniffers),
+		Timeout:  strings.TrimSpace(value.Timeout),
+	}
+	if value.Enabled != nil {
+		enabled := *value.Enabled
+		result.Enabled = &enabled
+	}
+	return result
+}
+
+func cloneTLSClientConfig(value TLSClientConfig) TLSClientConfig {
+	result := TLSClientConfig{
+		FragmentFallbackDelay: strings.TrimSpace(value.FragmentFallbackDelay),
+		CurvePreferences:      cloneStrings(value.CurvePreferences),
+	}
+	if value.Fragment != nil {
+		fragment := *value.Fragment
+		result.Fragment = &fragment
+	}
+	if value.RecordFragment != nil {
+		recordFragment := *value.RecordFragment
+		result.RecordFragment = &recordFragment
+	}
+	return result
 }
 
 func firstNonEmpty(values ...string) string {

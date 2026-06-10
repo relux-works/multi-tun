@@ -13,6 +13,55 @@
       "artifacts": {
         "singbox_config_path": "configs/generated/sing-box_dance.json"
       },
+      "engine": {
+        "type": "sing-box"
+      },
+      "routing": {
+        "bypass_suffixes": [
+          ".ru",
+          ".рф"
+        ],
+        "bypass_exclude_suffixes": [
+          ".telegram.org",
+          "t.me",
+          ".telegram.me",
+          ".telegra.ph",
+          ".telesco.pe"
+        ],
+        "routes": []
+      },
+      "profiles": {
+        "default": {
+          "selector": "",
+          "singbox": {
+            "sniff": {
+              "enabled": true
+            }
+          }
+        }
+      }
+    },
+    "freedom": {
+      "source": {
+        "mode": "proxy",
+        "url": "https://example.com/freedom/REPLACE_ME"
+      },
+      "cache_dir": ".cache/vless-tun/freedom",
+      "artifacts": {
+        "singbox_config_path": "configs/generated/sing-box_freedom.json",
+        "xray_config_path": "configs/generated/xray_freedom.json"
+      },
+      "engine": {
+        "type": "xray",
+        "xray": {
+          "executable": "xray",
+          "socks_listen": "127.0.0.1",
+          "socks_port": 20808,
+          "process_names": [
+            "xray"
+          ]
+        }
+      },
       "routing": {
         "bypass_suffixes": [
           ".ru",
