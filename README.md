@@ -426,6 +426,8 @@ Each start creates a new timestamped session log and metadata pair under:
 - `~/.cache/vless-tun/sessions/sing-box-session-<UTC timestamp>.log`
 - `~/.cache/vless-tun/sessions/session-<UTC timestamp>.json`
 
+With the default `logging.max_lines=1000`, helper-backed sessions retain only the last 1000 lines in the current `sing-box` log. This keeps accidental `logging.level=info` runs from creating multi-million-line files, but verbose engine logging can still cost CPU; use `logging.level=warn` for normal TUN runtime.
+
 When `engine.type=xray`, `vless-tun` starts Xray as a local SOCKS sidecar first, then starts the `sing-box` TUN frontend. The sidecar gets its own log:
 
 - `~/.cache/vless-tun/sessions/xray-session-<UTC timestamp>.log`
@@ -652,7 +654,8 @@ Example config:
     }
   },
   "logging": {
-    "level": "warn"
+    "level": "warn",
+    "max_lines": 1000
   }
 }
 ```
@@ -689,7 +692,8 @@ Field reference:
 - `singbox.tls.fragment_fallback_delay`: optional delay string for fragmentation fallback, such as `"500ms"`
 - `singbox.tls.curve_preferences`: optional TLS curve preference list such as `["X25519MLKEM768", "X25519"]`
 - `dns.proxy_resolver`: upstream DNS endpoint for proxied traffic
-- `logging.level`: runtime log level written into generated configs; new configs default to `warn` so normal full-TUN sessions do not write every connection to disk. Xray sidecar rendering maps `warn` to Xray's `warning`
+- `logging.level`: runtime log level written into generated configs; valid values are `trace`, `debug`, `info`, `warn`, `error`, `fatal`, and `panic`. New configs default to `warn` so normal full-TUN sessions do not write every connection to disk. Xray sidecar rendering maps `warn` to Xray's `warning`
+- `logging.max_lines`: maximum number of tail lines retained in bounded session logs, default `1000`. Set `0` to disable bounding. The shared `vpn-core` helper applies this to long-running `sing-box` stdout/stderr; `vless-tun` internal runtime events also use the same bounded append path
 - `launch.mode`: optional override for the runtime backend. Omit `launch` in the happy path and `vless-tun` will resolve to the shared `vpn-core` backend automatically when it is available
 - `launch.label` and `launch.plist_path`: legacy compatibility overrides only; the shared daemon now belongs to `vpn-core`, not to each `sing-box` session
 - legacy flat configs with root-level `source`, `cache_dir`, `artifacts`, and `default.profile_selector` still load; new multi-server configs are preferred for more than one provider/source
