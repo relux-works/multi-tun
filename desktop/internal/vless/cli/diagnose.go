@@ -48,6 +48,7 @@ func (a *App) runDiagnoseTunnel(args []string) int {
 	launchCfg := cfg.LaunchOrDefault()
 	fmt.Fprintf(a.stdout, "diagnostic: tunnel\n")
 	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.NetworkMode())
+	fmt.Fprintf(a.stdout, "engine: %s\n", cfg.EngineType())
 	printConfiguredLaunch(a.stdout, launchCfg)
 
 	for _, target := range targets {
@@ -106,7 +107,13 @@ func (a *App) runDiagnoseConfig(args []string) int {
 	}
 	fmt.Fprintf(a.stdout, "source_mode: %s\n", cfg.SourceMode())
 	fmt.Fprintf(a.stdout, "cache_dir: %s\n", cfg.CacheDir)
+	fmt.Fprintf(a.stdout, "engine: %s\n", cfg.EngineType())
 	fmt.Fprintf(a.stdout, "rendered_config: %s (%s)\n", cfg.SingboxConfigPath(), stateLabel(fileExists(cfg.SingboxConfigPath())))
+	if cfg.EngineType() == config.EngineXray || fileExists(cfg.XrayConfigPath()) {
+		fmt.Fprintf(a.stdout, "xray_config: %s (%s)\n", cfg.XrayConfigPath(), stateLabel(fileExists(cfg.XrayConfigPath())))
+		fmt.Fprintf(a.stdout, "xray_executable: %s\n", cfg.XrayExecutable())
+		fmt.Fprintf(a.stdout, "xray_socks: %s:%d\n", cfg.XraySocksListen(), cfg.XraySocksPort())
+	}
 	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.BypassSuffixes()))
 	printConfiguredLaunch(a.stdout, cfg.LaunchOrDefault())
 	return 0
@@ -134,8 +141,14 @@ func printCurrentSession(out interface{ Write([]byte) (int, error) }, current *s
 	}
 	fmt.Fprintf(out, "session_launch_mode: %s\n", current.LaunchMode)
 	fmt.Fprintf(out, "pid: %d\n", current.PID)
+	if current.Engine != "" {
+		fmt.Fprintf(out, "session_engine: %s\n", current.Engine)
+	}
 	if current.LogPath != "" {
 		fmt.Fprintf(out, "log_file: %s\n", current.LogPath)
+	}
+	for _, sidecar := range current.Sidecars {
+		fmt.Fprintf(out, "sidecar: %s pid=%d log=%s\n", sidecar.Name, sidecar.PID, sidecar.LogPath)
 	}
 }
 

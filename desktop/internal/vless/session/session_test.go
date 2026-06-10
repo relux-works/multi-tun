@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,8 +22,17 @@ func TestSaveAndLoadCurrent(t *testing.T) {
 		ID:         "20260324T120000Z",
 		PID:        12345,
 		StartedAt:  time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
+		Engine:     config.EngineXray,
 		LogPath:    filepath.Join(cacheDir, "sessions", "sing-box-session-20260324T120000Z.log"),
 		LaunchMode: config.LaunchModeDirect,
+		Sidecars: []SidecarSession{
+			{
+				Name:    "xray",
+				PID:     22222,
+				Command: []string{"/opt/homebrew/bin/xray", "run", "-c", "/tmp/xray.json"},
+				LogPath: filepath.Join(cacheDir, "sessions", "xray-session-20260324T120000Z.log"),
+			},
+		},
 	}
 
 	if err := SaveCurrent(cacheDir, want); err != nil {
@@ -33,8 +43,11 @@ func TestSaveAndLoadCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCurrent returned error: %v", err)
 	}
-	if got.ID != want.ID || got.PID != want.PID || got.LogPath != want.LogPath {
+	if got.ID != want.ID || got.PID != want.PID || got.Engine != want.Engine || got.LogPath != want.LogPath {
 		t.Fatalf("loaded session = %#v, want %#v", got, want)
+	}
+	if len(got.Sidecars) != 1 || got.Sidecars[0].Name != "xray" || got.Sidecars[0].PID != 22222 {
+		t.Fatalf("loaded sidecars = %#v, want %#v", got.Sidecars, want.Sidecars)
 	}
 }
 
@@ -63,6 +76,266 @@ func TestProcessAliveCurrentProcess(t *testing.T) {
 	}
 	if !alive {
 		t.Fatal("expected current process to be alive")
+	}
+}
+
+func TestCleanupOrphanSidecarsKillsOnlyMatchingConfigProcess(t *testing.T) {
+	prevList := sidecarProcessListSession
+	prevAlive := sidecarProcessAliveSession
+	prevSignalPID := sidecarSignalPIDSession
+	prevSignalGroup := sidecarSignalGroupSession
+	t.Cleanup(func() {
+		sidecarProcessListSession = prevList
+		sidecarProcessAliveSession = prevAlive
+		sidecarSignalPIDSession = prevSignalPID
+		sidecarSignalGroupSession = prevSignalGroup
+	})
+
+	sidecarProcessListSession = func() ([]byte, error) {
+		return []byte(strings.Join([]string{
+			" 111   1 111 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json",
+			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
+			" 333   1 333 /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
+		}, "\n")), nil
+	}
+	sidecarProcessAliveSession = func(pid int) (bool, error) {
+		return false, nil
+	}
+
+	var pidSignals []int
+	var groupSignals []int
+	sidecarSignalPIDSession = func(pid int, signal syscall.Signal) error {
+		if signal != syscall.SIGTERM {
+			t.Fatalf("sidecarSignalPIDSession signal = %v, want SIGTERM", signal)
+		}
+		pidSignals = append(pidSignals, pid)
+		return nil
+	}
+	sidecarSignalGroupSession = func(pid int, signal syscall.Signal) error {
+		if signal != syscall.SIGTERM {
+			t.Fatalf("sidecarSignalGroupSession signal = %v, want SIGTERM", signal)
+		}
+		groupSignals = append(groupSignals, pid)
+		return nil
+	}
+
+	logPath := filepath.Join(t.TempDir(), "session.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+
+	err = cleanupOrphanSidecars([]SidecarOptions{
+		{
+			Name:       "xray",
+			Executable: "/opt/homebrew/opt/xray/libexec/xray",
+			Args:       []string{"run", "-c", "/tmp/xray_freedom.json"},
+		},
+	}, logFile, time.Millisecond)
+	if closeErr := logFile.Close(); closeErr != nil {
+		t.Fatalf("Close() error = %v", closeErr)
+	}
+	if err != nil {
+		t.Fatalf("cleanupOrphanSidecars() error = %v", err)
+	}
+
+	if len(pidSignals) != 0 {
+		t.Fatalf("pid signals = %#v, want none", pidSignals)
+	}
+	if len(groupSignals) != 1 || groupSignals[0] != 111 {
+		t.Fatalf("group signals = %#v, want [111]", groupSignals)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"orphan_sidecar_cleanup_begin targets=xray:/tmp/xray_freedom.json",
+		"orphan_sidecar_cleanup_kill name=xray pid=111",
+		"orphan_sidecar_cleanup_done killed=1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("session log missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestCleanupOrphanSidecarsUsesPIDWhenProcessGroupDiffers(t *testing.T) {
+	prevList := sidecarProcessListSession
+	prevAlive := sidecarProcessAliveSession
+	prevSignalPID := sidecarSignalPIDSession
+	prevSignalGroup := sidecarSignalGroupSession
+	t.Cleanup(func() {
+		sidecarProcessListSession = prevList
+		sidecarProcessAliveSession = prevAlive
+		sidecarSignalPIDSession = prevSignalPID
+		sidecarSignalGroupSession = prevSignalGroup
+	})
+
+	sidecarProcessListSession = func() ([]byte, error) {
+		return []byte(" 444   1 999 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c=/tmp/xray_freedom.json\n"), nil
+	}
+	sidecarProcessAliveSession = func(pid int) (bool, error) {
+		return false, nil
+	}
+
+	var pidSignals []int
+	var groupSignals []int
+	sidecarSignalPIDSession = func(pid int, signal syscall.Signal) error {
+		pidSignals = append(pidSignals, pid)
+		return nil
+	}
+	sidecarSignalGroupSession = func(pid int, signal syscall.Signal) error {
+		groupSignals = append(groupSignals, pid)
+		return nil
+	}
+
+	logFile, err := os.Create(filepath.Join(t.TempDir(), "session.log"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer logFile.Close()
+
+	err = cleanupOrphanSidecars([]SidecarOptions{
+		{
+			Name:       "xray",
+			Executable: "xray",
+			Args:       []string{"run", "-c=/tmp/xray_freedom.json"},
+		},
+	}, logFile, time.Millisecond)
+	if err != nil {
+		t.Fatalf("cleanupOrphanSidecars() error = %v", err)
+	}
+
+	if len(groupSignals) != 0 {
+		t.Fatalf("group signals = %#v, want none", groupSignals)
+	}
+	if len(pidSignals) != 1 || pidSignals[0] != 444 {
+		t.Fatalf("pid signals = %#v, want [444]", pidSignals)
+	}
+}
+
+func TestCleanupOrphanSidecarsFallsBackToPIDWhenGroupSignalDenied(t *testing.T) {
+	prevList := sidecarProcessListSession
+	prevAlive := sidecarProcessAliveSession
+	prevSignalPID := sidecarSignalPIDSession
+	prevSignalGroup := sidecarSignalGroupSession
+	t.Cleanup(func() {
+		sidecarProcessListSession = prevList
+		sidecarProcessAliveSession = prevAlive
+		sidecarSignalPIDSession = prevSignalPID
+		sidecarSignalGroupSession = prevSignalGroup
+	})
+
+	sidecarProcessListSession = func() ([]byte, error) {
+		return []byte(" 555   1 555 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json\n"), nil
+	}
+	sidecarProcessAliveSession = func(pid int) (bool, error) {
+		return false, nil
+	}
+
+	var pidSignals []int
+	var groupSignals []int
+	sidecarSignalGroupSession = func(pid int, signal syscall.Signal) error {
+		groupSignals = append(groupSignals, pid)
+		return syscall.EPERM
+	}
+	sidecarSignalPIDSession = func(pid int, signal syscall.Signal) error {
+		pidSignals = append(pidSignals, pid)
+		return nil
+	}
+
+	logFile, err := os.Create(filepath.Join(t.TempDir(), "session.log"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer logFile.Close()
+
+	err = cleanupOrphanSidecars([]SidecarOptions{
+		{
+			Name:       "xray",
+			Executable: "xray",
+			Args:       []string{"run", "-c", "/tmp/xray_freedom.json"},
+		},
+	}, logFile, time.Millisecond)
+	if err != nil {
+		t.Fatalf("cleanupOrphanSidecars() error = %v", err)
+	}
+	if len(groupSignals) != 1 || groupSignals[0] != 555 {
+		t.Fatalf("group signals = %#v, want [555]", groupSignals)
+	}
+	if len(pidSignals) != 1 || pidSignals[0] != 555 {
+		t.Fatalf("pid signals = %#v, want [555]", pidSignals)
+	}
+}
+
+func TestCleanupOrphanSidecarsSkipsOptionsWithoutConfigPath(t *testing.T) {
+	prevList := sidecarProcessListSession
+	t.Cleanup(func() {
+		sidecarProcessListSession = prevList
+	})
+
+	called := false
+	sidecarProcessListSession = func() ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+
+	logFile, err := os.Create(filepath.Join(t.TempDir(), "session.log"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer logFile.Close()
+
+	err = cleanupOrphanSidecars([]SidecarOptions{
+		{
+			Name:       "xray",
+			Executable: "xray",
+			Args:       []string{"run"},
+		},
+	}, logFile, time.Millisecond)
+	if err != nil {
+		t.Fatalf("cleanupOrphanSidecars() error = %v", err)
+	}
+	if called {
+		t.Fatal("sidecarProcessListSession was called for sidecar without config path")
+	}
+}
+
+func TestWaitForSidecarStartDiscoversForkedSidecar(t *testing.T) {
+	prevList := sidecarProcessListSession
+	prevAlive := sidecarProcessAliveSession
+	t.Cleanup(func() {
+		sidecarProcessListSession = prevList
+		sidecarProcessAliveSession = prevAlive
+	})
+
+	sidecarProcessAliveSession = func(pid int) (bool, error) {
+		if pid != 111 {
+			t.Fatalf("ProcessAlive pid = %d, want initial pid 111", pid)
+		}
+		return false, nil
+	}
+	sidecarProcessListSession = func() ([]byte, error) {
+		return []byte(" 777   1 777 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json\n"), nil
+	}
+
+	got, err := waitForSidecarStart(SidecarSession{
+		Name:    "xray",
+		PID:     111,
+		LogPath: filepath.Join(t.TempDir(), "xray.log"),
+	}, SidecarOptions{
+		Name:       "xray",
+		Executable: "xray",
+		Args:       []string{"run", "-c", "/tmp/xray_freedom.json"},
+	}, time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForSidecarStart() error = %v", err)
+	}
+	if got.PID != 777 {
+		t.Fatalf("waitForSidecarStart() pid = %d, want discovered pid 777", got.PID)
 	}
 }
 

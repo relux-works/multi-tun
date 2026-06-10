@@ -14,6 +14,7 @@ import (
 	"multi-tun/desktop/internal/vless/session"
 	"multi-tun/desktop/internal/vless/singbox"
 	"multi-tun/desktop/internal/vless/subscription"
+	"multi-tun/desktop/internal/vless/xray"
 )
 
 type startOptions struct {
@@ -23,6 +24,7 @@ type startOptions struct {
 	profileSelector string
 	outputPath      string
 	refresh         bool
+	refreshSet      bool
 }
 
 type sessionTarget struct {
@@ -65,7 +67,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	launchCfg := cfg.LaunchOrDefault()
 
 	if current, state, alive, err := currentSessionState(cfg.CacheDir, launchCfg); err == nil && current != nil && alive {
-		fmt.Fprintf(a.stderr, "%s failed: sing-box session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
+		fmt.Fprintf(a.stderr, "%s failed: vless-tun session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
 		return 1
 	}
 
@@ -76,14 +78,18 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	}
 
 	if current, state, alive, err := currentSessionState(cfg.CacheDir, launchCfg); err == nil && current != nil && !alive {
-		_ = session.ClearCurrent(cfg.CacheDir)
+		if err := cleanupStaleCurrentSession(cfg.CacheDir, launchCfg); err != nil {
+			fmt.Fprintf(a.stderr, "%s failed: cleanup stale session: %v\n", commandName, err)
+			return 1
+		}
 	} else if err == nil && current != nil && alive {
-		fmt.Fprintf(a.stderr, "%s failed: sing-box session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
+		fmt.Fprintf(a.stderr, "%s failed: vless-tun session %s is already %s (pid=%d)\n", commandName, current.ID, state, current.PID)
 		return 1
 	}
 
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:              cfg.NetworkMode(),
+		Engine:            prepared.engine,
 		BypassSuffixes:    cfg.BypassSuffixes(),
 		InterfaceName:     cfg.TunInterfaceName(),
 		TunAddresses:      cfg.TunAddresses(),
@@ -91,17 +97,23 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
 		SystemDNSServers:  systemDNSServers(cfg),
 		PrivilegedLaunch:  cfg.LaunchOrDefault(),
+		Sidecars:          prepared.sidecars,
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
 	}
 
-	fmt.Fprintf(a.stdout, "started sing-box session %s\n", started.ID)
+	fmt.Fprintf(a.stdout, "started vless-tun session %s\n", started.ID)
 	fmt.Fprintf(a.stdout, "pid=%d profile=%s (%s)\n", started.PID, started.ProfileName, started.ProfileID)
+	fmt.Fprintf(a.stdout, "engine=%s\n", started.Engine)
 	fmt.Fprintf(a.stdout, "mode=%s\n", started.Mode)
 	fmt.Fprintf(a.stdout, "launch_mode=%s\n", started.LaunchMode)
 	fmt.Fprintf(a.stdout, "config=%s\n", started.ConfigPath)
+	if prepared.xrayTarget != "" {
+		fmt.Fprintf(a.stdout, "xray_config=%s\n", prepared.xrayTarget)
+	}
+	printSidecarStarts(a.stdout, started.Sidecars)
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
 	return 0
@@ -135,19 +147,6 @@ func (a *App) runReconnect(args []string) int {
 		return 1
 	}
 
-	prepared, err := a.prepareStart(cfg, startOptions{
-		configPath:      *configPath,
-		serverName:      selectionOptions.Server,
-		configProfile:   selectionOptions.Profile,
-		profileSelector: selectionOptions.Selector,
-		outputPath:      *outputPath,
-		refresh:         *refresh,
-	})
-	if err != nil {
-		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		return 1
-	}
-
 	stoppedSessions, err := stopConfiguredSessions(*configPath, *force, *timeout)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
@@ -159,8 +158,23 @@ func (a *App) runReconnect(args []string) int {
 		return 1
 	}
 
+	prepared, err := a.prepareStart(cfg, startOptions{
+		configPath:      *configPath,
+		serverName:      selectionOptions.Server,
+		configProfile:   selectionOptions.Profile,
+		profileSelector: selectionOptions.Selector,
+		outputPath:      *outputPath,
+		refresh:         *refresh,
+		refreshSet:      true,
+	})
+	if err != nil {
+		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		return 1
+	}
+
 	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:              cfg.NetworkMode(),
+		Engine:            prepared.engine,
 		BypassSuffixes:    cfg.BypassSuffixes(),
 		InterfaceName:     cfg.TunInterfaceName(),
 		TunAddresses:      cfg.TunAddresses(),
@@ -168,13 +182,14 @@ func (a *App) runReconnect(args []string) int {
 		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
 		SystemDNSServers:  systemDNSServers(cfg),
 		PrivilegedLaunch:  cfg.LaunchOrDefault(),
+		Sidecars:          prepared.sidecars,
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 1
 	}
 
-	fmt.Fprintf(a.stdout, "reconnected sing-box session %s\n", started.ID)
+	fmt.Fprintf(a.stdout, "reconnected vless-tun session %s\n", started.ID)
 	if len(stoppedSessions) == 0 {
 		fmt.Fprintln(a.stdout, "previous_session: none")
 	} else {
@@ -188,9 +203,14 @@ func (a *App) runReconnect(args []string) int {
 		}
 	}
 	fmt.Fprintf(a.stdout, "pid=%d profile=%s (%s)\n", started.PID, started.ProfileName, started.ProfileID)
+	fmt.Fprintf(a.stdout, "engine=%s\n", started.Engine)
 	fmt.Fprintf(a.stdout, "mode=%s\n", started.Mode)
 	fmt.Fprintf(a.stdout, "launch_mode=%s\n", started.LaunchMode)
 	fmt.Fprintf(a.stdout, "config=%s\n", started.ConfigPath)
+	if prepared.xrayTarget != "" {
+		fmt.Fprintf(a.stdout, "xray_config=%s\n", prepared.xrayTarget)
+	}
+	printSidecarStarts(a.stdout, started.Sidecars)
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
 	return 0
@@ -249,7 +269,10 @@ func (a *App) runStop(args []string) int {
 
 type preparedStart struct {
 	profile       model.Profile
+	engine        string
 	target        string
+	xrayTarget    string
+	sidecars      []session.SidecarOptions
 	renderOptions singbox.RenderOptions
 }
 
@@ -267,6 +290,12 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 	if err := fs.Parse(args); err != nil {
 		return startOptions{}, 2, err
 	}
+	refreshSet := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "refresh" {
+			refreshSet = true
+		}
+	})
 	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, *profileSelector, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", name, err)
@@ -280,11 +309,12 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 		profileSelector: selectionOptions.Selector,
 		outputPath:      *outputPath,
 		refresh:         *refresh,
+		refreshSet:      refreshSet,
 	}, 0, nil
 }
 
 func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (preparedStart, error) {
-	snapshot, err := a.loadSnapshot(cfg, options.refresh)
+	snapshot, err := a.loadSnapshot(cfg, effectiveStartRefresh(cfg, options))
 	if err != nil {
 		return preparedStart{}, err
 	}
@@ -295,14 +325,43 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	}
 
 	renderOptions := resolveRenderOptions(cfg.NetworkMode())
-	data, err := singbox.RenderWithOptions(cfg, profile, renderOptions)
-	if err != nil {
-		return preparedStart{}, err
-	}
-
 	target := cfg.SingboxConfigPath()
 	if options.outputPath != "" {
 		target = options.outputPath
+	}
+	engine := cfg.EngineType()
+	var data []byte
+	var xrayData []byte
+	var xrayTarget string
+	var sidecars []session.SidecarOptions
+	switch engine {
+	case config.EngineSingbox:
+		data, err = singbox.RenderWithOptions(cfg, profile, renderOptions)
+	case config.EngineXray:
+		xrayTarget = cfg.XrayConfigPath()
+		xrayData, err = xray.Render(cfg, profile)
+		if err != nil {
+			return preparedStart{}, err
+		}
+		data, err = singbox.RenderXrayFrontendWithOptions(cfg, profile, renderOptions)
+		if err != nil {
+			return preparedStart{}, err
+		}
+		if err := xray.Write(xrayTarget, xrayData); err != nil {
+			return preparedStart{}, err
+		}
+		sidecars = []session.SidecarOptions{
+			{
+				Name:       "xray",
+				Executable: cfg.XrayExecutable(),
+				Args:       []string{"run", "-c", xrayTarget},
+			},
+		}
+	default:
+		err = fmt.Errorf("unsupported engine %q", engine)
+	}
+	if err != nil {
+		return preparedStart{}, err
 	}
 	if err := singbox.Write(target, data); err != nil {
 		return preparedStart{}, err
@@ -310,9 +369,19 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 
 	return preparedStart{
 		profile:       profile,
+		engine:        engine,
 		target:        target,
+		xrayTarget:    xrayTarget,
+		sidecars:      sidecars,
 		renderOptions: renderOptions,
 	}, nil
+}
+
+func effectiveStartRefresh(cfg config.ProjectConfig, options startOptions) bool {
+	if options.refreshSet {
+		return options.refresh
+	}
+	return strings.TrimSpace(cfg.DefaultProfileSelector()) == ""
 }
 
 func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
@@ -324,6 +393,11 @@ func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, f
 		return &stopped, state, err
 	}
 	return &stopped, state, nil
+}
+
+func cleanupStaleCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig) error {
+	_, _, err := stopCurrentSessionFunc(cacheDir, launch, true, 1500*time.Millisecond)
+	return err
 }
 
 func stopConfiguredSessions(configPath string, force bool, timeout time.Duration) ([]stopSessionResult, error) {
@@ -431,7 +505,7 @@ func printStopResult(out io.Writer, label string, stopped *session.CurrentSessio
 	}
 	switch state {
 	case "stopped", "killed":
-		fmt.Fprintf(out, "%s sing-box session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
+		fmt.Fprintf(out, "%s vless-tun session %s (pid=%d)\n", state, stopped.ID, stopped.PID)
 	case "stale":
 		fmt.Fprintf(out, "cleared stale session %s (pid=%d)\n", stopped.ID, stopped.PID)
 	default:
@@ -439,6 +513,16 @@ func printStopResult(out io.Writer, label string, stopped *session.CurrentSessio
 	}
 	if stopped.LogPath != "" {
 		fmt.Fprintf(out, "log=%s\n", stopped.LogPath)
+	}
+}
+
+func printSidecarStarts(out io.Writer, sidecars []session.SidecarSession) {
+	for _, sidecar := range sidecars {
+		fmt.Fprintf(out, "sidecar=%s pid=%d", sidecar.Name, sidecar.PID)
+		if sidecar.LogPath != "" {
+			fmt.Fprintf(out, " log=%s", sidecar.LogPath)
+		}
+		fmt.Fprintln(out)
 	}
 }
 
