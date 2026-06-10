@@ -12,7 +12,7 @@ Build local CLIs and agent guidance that can:
 
 1. manage a live DenseVPN subscription URL
 2. refresh and parse `vless://` profiles from that URL
-3. render a `sing-box` client config either as a simple full tunnel or a deterministic `.ru` bypass
+3. render a `sing-box` client config either as a simple full tunnel or a deterministic `.ru` bypass, or render an Xray sidecar plus `sing-box` TUN frontend for profiles that require Xray-only VLESS fields
 4. inspect Cisco AnyConnect / ASA profile metadata and CLI-visible profile lists for future OpenConnect automation
 5. fit the usual skill-style repo layout with board, setup script, docs, and agent guidance
 
@@ -36,9 +36,19 @@ Build local CLIs and agent guidance that can:
 
 ### Profile Model
 
-- Extract profile name, host, port, UUID, network type, TLS/Reality settings, and transport details.
+- Extract profile name, host, port, UUID, network type, TLS/Reality settings, transport details, and diagnostic VLESS query fields such as `encryption` and `spx`.
 - Select an active configured server/profile through `current.server` and `current.profile`, with CLI overrides for `--server`, `--profile`, and direct subscription `--selector`.
 - Keep remote VLESS profiles in the refresh cache; config profile entries are local aliases/selectors plus routing policy, not copied subscription payloads.
+
+### Engine Selection
+
+- Require explicit `servers.<name>.engine.type` in multi-server VLESS configs so runtime selection is reviewable per server.
+- Accept `sing-box` and `xray` as engine types, and include those values plus the `servers.<name>.engine.type` path in validation errors.
+- Keep legacy flat configs compatible by defaulting to `sing-box`.
+- Allow shared `engine` settings globally and per configured profile, while keeping each configured server's engine type explicit.
+- Support `engine.type=xray` for VLESS profiles that require Xray-only outbound fields such as `encryption=mlkem...`.
+- For `engine.type=xray`, render an Xray VLESS sidecar config with a local SOCKS inbound and render a `sing-box` TUN frontend whose proxy outbound points to that SOCKS inbound.
+- For `engine.type=xray`, route configured Xray process names `direct` in the `sing-box` frontend so the sidecar's upstream connection is not captured by the TUN.
 
 ### sing-box Rendering
 
@@ -47,6 +57,8 @@ Build local CLIs and agent guidance that can:
 - Generate a proxy outbound from the parsed VLESS profile.
 - Generate `direct` and `block` outbounds.
 - Enable DNS hijack.
+- Enable sniffing by default and allow `singbox.sniff` overrides globally, per configured server, or per configured profile.
+- Allow optional `singbox.tls` overrides for outbound TLS fragmentation, TLS record fragmentation, fallback delay, and curve preferences.
 - Support direct route CIDRs from `routing.routes`.
 - In TUN mode, exclude IP-literal upstream VLESS endpoints from generated TUN routes and route those endpoint CIDRs `direct`, preventing broad full-tunnel routes from capturing the tunnel's own server traffic.
 - When a VLESS TUN session is layered above active OpenConnect split DNS, keep the public resolver handoff scoped to the VLESS TUN interface without copying corporate split domains into macOS search suffixes.
@@ -67,12 +79,13 @@ Build local CLIs and agent guidance that can:
 - `refresh`: fetch and cache subscription
 - `list`: inspect cached profiles for the selected configured server
 - `set-current`: persist `current.server` and `current.profile`; profile may be omitted when the selected server has a `default` profile or exactly one profile
-- `run`: start `sing-box` in the background from the rendered config and persist session metadata; provider/profile shortcuts such as `start dance`, `start freedom`, and `start fortinetz nl` override the default config selection
-- `reconnect`: refresh local state, stop recorded `sing-box` sessions across configured server cache directories, and start the selected profile in one command
-- `status`: show local runtime state, launch backend, cached selection, and configured bypasses
+- `run`: refresh selector-less auto profiles before rendering, start the selected `vless-tun` runtime engine in the background, and persist session metadata; provider/profile shortcuts such as `start dance`, `start freedom`, and `start fortinetz nl` override the default config selection, while explicit profile selectors start from cache unless `--refresh` is passed
+- before starting configured engine sidecars, `run`/`start` must clean stale sidecar processes only when they match the configured sidecar executable/name and generated sidecar config path; cleanup must not use broad process-name kills
+- `reconnect`: stop recorded `vless-tun` sessions across configured server cache directories, refresh local state, and start the selected profile in one command
+- `status`: show local runtime state, selected engine, sidecars, launch backend, cached selection, and configured bypasses
 - `diagnose`: inspect tunnel/runtime state without requiring provider/profile selection; `diagnose config` validates config selection separately
-- `stop`: stop the recorded `sing-box` session without requiring provider/profile selection
-- `render`: emit sing-box config
+- `stop`: stop the recorded `vless-tun` session without requiring provider/profile selection
+- `render`: emit selected runtime config, including both Xray sidecar and `sing-box` frontend configs for `engine.type=xray`
 - in `network.mode=tun` on macOS, startup must reject nested-tunnel bring-up when the upstream VLESS server route already points at another VPN interface (`utun*`, `tun*`, `ppp*`, `ipsec*`)
 - `openconnect-tun setup`: scaffold `~/.config/openconnect-tun/config.json` plus placeholder keychain entries from one user-facing VPN profile name
 - `openconnect-tun status`: inspect AnyConnect CLI state and active connection metadata
@@ -90,7 +103,7 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
 - `openconnect-tun stop`: stop the active OpenConnect process cleanly
 - `dump start|status|stop|inspect`: canonical packet-dump workflow for tunnel-aware VPN diagnostics; `cisco-dump` remains as a compatibility alias
-- `scripts/setup.sh`: install the shipped toolchain end-to-end, including `sing-box` for VLESS runtime plus `vpn-auth` and its TOTP prerequisite path for aggregate OpenConnect auth; on macOS it should default to host-native Apple Silicon vs Intel builds and allow explicit `--mac-arch arm64|amd64` artifact-only cross-builds
+- `scripts/setup.sh`: install the shipped toolchain end-to-end, including `sing-box` for the default VLESS runtime plus `vpn-auth` and its TOTP prerequisite path for aggregate OpenConnect auth; on macOS it should default to host-native Apple Silicon vs Intel builds and allow explicit `--mac-arch arm64|amd64` artifact-only cross-builds. Xray remains an optional prerequisite for configurations that set `engine.type=xray`
 
 ## Non-Goals For This Iteration
 
