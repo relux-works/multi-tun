@@ -84,6 +84,7 @@ var (
 
 type StartOptions struct {
 	Mode              string
+	Engine            string
 	BypassSuffixes    []string
 	InterfaceName     string
 	TunAddresses      []string
@@ -91,31 +92,47 @@ type StartOptions struct {
 	OverlayDNSDomains []string
 	SystemDNSServers  []string
 	PrivilegedLaunch  config.PrivilegedLaunchConfig
+	Sidecars          []SidecarOptions
+}
+
+type SidecarOptions struct {
+	Name       string
+	Executable string
+	Args       []string
 }
 
 type CurrentSession struct {
-	ID                       string    `json:"id"`
-	PID                      int       `json:"pid"`
-	StartedAt                time.Time `json:"started_at"`
-	ConfigPath               string    `json:"config_path"`
-	LogPath                  string    `json:"log_path"`
-	MetadataPath             string    `json:"metadata_path"`
-	ProfileID                string    `json:"profile_id"`
-	ProfileName              string    `json:"profile_name"`
-	ProfileEndpoint          string    `json:"profile_endpoint"`
-	Mode                     string    `json:"mode"`
-	BypassSuffixes           []string  `json:"bypass_suffixes"`
-	Command                  []string  `json:"command"`
-	LaunchMode               string    `json:"launch_mode,omitempty"`
-	LaunchLabel              string    `json:"launch_label,omitempty"`
-	LaunchPlistPath          string    `json:"launch_plist_path,omitempty"`
-	DNSHandoffMode           string    `json:"dns_handoff_mode,omitempty"`
-	DNSHandoffService        string    `json:"dns_handoff_service,omitempty"`
-	DNSHandoffServiceID      string    `json:"dns_handoff_service_id,omitempty"`
-	DNSHandoffInterface      string    `json:"dns_handoff_interface,omitempty"`
-	DNSHandoffServers        []string  `json:"dns_handoff_servers,omitempty"`
-	DNSHandoffRestoreServers []string  `json:"dns_handoff_restore_servers,omitempty"`
-	DNSHandoffRestoreAuto    bool      `json:"dns_handoff_restore_auto,omitempty"`
+	ID                       string           `json:"id"`
+	PID                      int              `json:"pid"`
+	StartedAt                time.Time        `json:"started_at"`
+	Engine                   string           `json:"engine,omitempty"`
+	ConfigPath               string           `json:"config_path"`
+	LogPath                  string           `json:"log_path"`
+	MetadataPath             string           `json:"metadata_path"`
+	ProfileID                string           `json:"profile_id"`
+	ProfileName              string           `json:"profile_name"`
+	ProfileEndpoint          string           `json:"profile_endpoint"`
+	Mode                     string           `json:"mode"`
+	BypassSuffixes           []string         `json:"bypass_suffixes"`
+	Command                  []string         `json:"command"`
+	Sidecars                 []SidecarSession `json:"sidecars,omitempty"`
+	LaunchMode               string           `json:"launch_mode,omitempty"`
+	LaunchLabel              string           `json:"launch_label,omitempty"`
+	LaunchPlistPath          string           `json:"launch_plist_path,omitempty"`
+	DNSHandoffMode           string           `json:"dns_handoff_mode,omitempty"`
+	DNSHandoffService        string           `json:"dns_handoff_service,omitempty"`
+	DNSHandoffServiceID      string           `json:"dns_handoff_service_id,omitempty"`
+	DNSHandoffInterface      string           `json:"dns_handoff_interface,omitempty"`
+	DNSHandoffServers        []string         `json:"dns_handoff_servers,omitempty"`
+	DNSHandoffRestoreServers []string         `json:"dns_handoff_restore_servers,omitempty"`
+	DNSHandoffRestoreAuto    bool             `json:"dns_handoff_restore_auto,omitempty"`
+}
+
+type SidecarSession struct {
+	Name    string   `json:"name"`
+	PID     int      `json:"pid"`
+	Command []string `json:"command,omitempty"`
+	LogPath string   `json:"log_path,omitempty"`
 }
 
 func Start(cacheDir, configPath string, profile model.Profile, options StartOptions) (CurrentSession, error) {
@@ -145,6 +162,7 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	session := CurrentSession{
 		ID:              sessionID,
 		StartedAt:       now,
+		Engine:          firstNonEmpty(options.Engine, config.EngineSingbox),
 		ConfigPath:      configPath,
 		LogPath:         logPath,
 		MetadataPath:    metadataPath,
@@ -172,12 +190,30 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		return CurrentSession{}, err
 	}
 
+	if err := cleanupOrphanSidecars(options.Sidecars, logFile, 1500*time.Millisecond); err != nil {
+		_, _ = fmt.Fprintf(logFile, "orphan_sidecar_cleanup_failed: %v\n", err)
+		_ = logFile.Close()
+		return CurrentSession{}, err
+	}
+
+	sidecars, err := startSidecars(cacheDir, sessionID, options.Sidecars)
+	if err != nil {
+		_, _ = fmt.Fprintf(logFile, "sidecar_start_failed: %v\n", err)
+		if cleanupErr := cleanupOrphanSidecars(options.Sidecars, logFile, 1500*time.Millisecond); cleanupErr != nil {
+			_, _ = fmt.Fprintf(logFile, "sidecar_start_cleanup_failed: %v\n", cleanupErr)
+		}
+		_ = logFile.Close()
+		return CurrentSession{}, err
+	}
+	session.Sidecars = sidecars
+
 	var release func() error
 	switch launchMode {
 	case config.LaunchModeHelper:
 		_ = logFile.Close()
 		pid, err := startWithVPNCore(session, executable)
 		if err != nil {
+			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
 			return CurrentSession{}, err
 		}
 		session.PID = pid
@@ -185,6 +221,7 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		cmd, err := startProcessSession(logFile, executable, configPath, launchMode)
 		_ = logFile.Close()
 		if err != nil {
+			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
 			return CurrentSession{}, err
 		}
 		session.PID = cmd.Process.Pid
@@ -255,6 +292,9 @@ func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, tim
 		current.PID = pid
 	}
 	if !alive {
+		if err := stopSidecars(current.Sidecars, force, timeout); err != nil {
+			return CurrentSession{}, "", err
+		}
 		if err := restoreSystemDNSHandoff(current); err != nil {
 			return CurrentSession{}, "", err
 		}
@@ -269,6 +309,9 @@ func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, tim
 		if err := stopHelperSession(current, force, timeout); err != nil {
 			return CurrentSession{}, "", err
 		}
+		if err := stopSidecars(current.Sidecars, force, timeout); err != nil {
+			return CurrentSession{}, "", err
+		}
 		if err := restoreSystemDNSHandoff(current); err != nil {
 			return CurrentSession{}, "", err
 		}
@@ -278,6 +321,9 @@ func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, tim
 		return current, "stopped", nil
 	case config.LaunchModeLaunchd:
 		if err := stopLaunchdSessionFunc(current, timeout); err != nil {
+			return CurrentSession{}, "", err
+		}
+		if err := stopSidecars(current.Sidecars, force, timeout); err != nil {
 			return CurrentSession{}, "", err
 		}
 		if err := restoreSystemDNSHandoff(current); err != nil {
@@ -481,6 +527,163 @@ func startProcessSession(logFile *os.File, executable, configPath, launchMode st
 	return cmd, nil
 }
 
+func startSidecars(cacheDir, sessionID string, options []SidecarOptions) ([]SidecarSession, error) {
+	if len(options) == 0 {
+		return nil, nil
+	}
+
+	sidecars := make([]SidecarSession, 0, len(options))
+	for _, option := range options {
+		sidecar, err := startSidecar(cacheDir, sessionID, option)
+		if err != nil {
+			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
+			return nil, err
+		}
+		sidecars = append(sidecars, sidecar)
+	}
+	return sidecars, nil
+}
+
+func startSidecar(cacheDir, sessionID string, option SidecarOptions) (SidecarSession, error) {
+	name := strings.TrimSpace(option.Name)
+	if name == "" {
+		name = "sidecar"
+	}
+	executable := strings.TrimSpace(option.Executable)
+	if executable == "" {
+		return SidecarSession{}, fmt.Errorf("%s sidecar executable is required", name)
+	}
+	resolvedExecutable, err := execLookPath(executable)
+	if err != nil {
+		return SidecarSession{}, fmt.Errorf("%s sidecar executable %q: %w", name, executable, err)
+	}
+
+	logPath := filepath.Join(SessionsDir(cacheDir), safeSidecarName(name)+"-session-"+sessionID+".log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return SidecarSession{}, err
+	}
+	defer logFile.Close()
+
+	command := append([]string{resolvedExecutable}, option.Args...)
+	_, _ = fmt.Fprintf(logFile, "=== vless-tun sidecar start ===\n")
+	_, _ = fmt.Fprintf(logFile, "session_id: %s\n", sessionID)
+	_, _ = fmt.Fprintf(logFile, "sidecar: %s\n", name)
+	_, _ = fmt.Fprintf(logFile, "command: %s\n", joinOrNone(command))
+	_, _ = fmt.Fprintf(logFile, "--- %s output follows ---\n", name)
+
+	cmd := execCommand(resolvedExecutable, option.Args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return SidecarSession{}, err
+	}
+	if err := cmd.Process.Release(); err != nil {
+		_ = signalGroup(cmd.Process.Pid, syscall.SIGKILL)
+		return SidecarSession{}, err
+	}
+
+	sidecar := SidecarSession{
+		Name:    name,
+		PID:     cmd.Process.Pid,
+		Command: command,
+		LogPath: logPath,
+	}
+	startedSidecar, err := waitForSidecarStart(sidecar, option, 500*time.Millisecond)
+	if err != nil {
+		return SidecarSession{}, err
+	}
+	return startedSidecar, nil
+}
+
+func waitForSidecarStart(sidecar SidecarSession, option SidecarOptions, timeout time.Duration) (SidecarSession, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		alive, err := sidecarProcessAliveSession(sidecar.PID)
+		if err != nil {
+			return SidecarSession{}, err
+		}
+		if !alive {
+			if discovered, found, err := findRunningSidecar(option); err != nil {
+				return SidecarSession{}, err
+			} else if found {
+				sidecar.PID = discovered.PID
+				return sidecar, nil
+			}
+			if last := LastRelevantLogLine(sidecar.LogPath); last != "" {
+				return SidecarSession{}, fmt.Errorf("%s sidecar exited during startup: %s; inspect %s", sidecar.Name, last, sidecar.LogPath)
+			}
+			return SidecarSession{}, fmt.Errorf("%s sidecar exited during startup; inspect %s", sidecar.Name, sidecar.LogPath)
+		}
+		if time.Now().After(deadline) {
+			return sidecar, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func stopSidecars(sidecars []SidecarSession, force bool, timeout time.Duration) error {
+	for i := len(sidecars) - 1; i >= 0; i-- {
+		if err := stopSidecar(sidecars[i], force, timeout); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stopSidecar(sidecar SidecarSession, force bool, timeout time.Duration) error {
+	alive, err := ProcessAlive(sidecar.PID)
+	if err != nil {
+		return err
+	}
+	if !alive {
+		return nil
+	}
+	if err := signalGroup(sidecar.PID, syscall.SIGTERM); err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		alive, err := ProcessAlive(sidecar.PID)
+		if err != nil {
+			return err
+		}
+		if !alive {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !force {
+		return fmt.Errorf("timeout waiting for %s sidecar pid %d to stop", sidecar.Name, sidecar.PID)
+	}
+	if err := signalGroup(sidecar.PID, syscall.SIGKILL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func safeSidecarName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = regexp.MustCompile(`[^a-z0-9._-]+`).ReplaceAllString(value, "-")
+	value = strings.Trim(value, "-.")
+	if value == "" {
+		return "sidecar"
+	}
+	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func stopProcessSession(cacheDir string, current CurrentSession, force bool, timeout time.Duration) (CurrentSession, string, error) {
 	if err := signalGroup(current.PID, syscall.SIGTERM); err != nil {
 		return CurrentSession{}, "", err
@@ -493,6 +696,9 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 			return CurrentSession{}, "", err
 		}
 		if !alive {
+			if err := stopSidecars(current.Sidecars, force, timeout); err != nil {
+				return CurrentSession{}, "", err
+			}
 			if err := restoreSystemDNSHandoff(current); err != nil {
 				return CurrentSession{}, "", err
 			}
@@ -517,6 +723,9 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 			return CurrentSession{}, "", err
 		}
 		if !alive {
+			if err := stopSidecars(current.Sidecars, true, 1500*time.Millisecond); err != nil {
+				return CurrentSession{}, "", err
+			}
 			if err := restoreSystemDNSHandoff(current); err != nil {
 				return CurrentSession{}, "", err
 			}
@@ -533,19 +742,26 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 
 func stopStartedSession(current CurrentSession) error {
 	restoreErr := restoreSystemDNSHandoff(current)
+	var stopErr error
 	switch current.LaunchMode {
 	case config.LaunchModeHelper:
 		if err := killHelperSession(current); err != nil {
-			return err
+			stopErr = err
 		}
 	case config.LaunchModeLaunchd:
 		if err := stopLaunchdSessionFunc(current, 1500*time.Millisecond); err != nil {
-			return err
+			stopErr = err
 		}
 	default:
 		if err := signalGroup(current.PID, syscall.SIGKILL); err != nil {
-			return err
+			stopErr = err
 		}
+	}
+	if err := stopSidecars(current.Sidecars, true, 1500*time.Millisecond); err != nil && stopErr == nil {
+		stopErr = err
+	}
+	if stopErr != nil {
+		return stopErr
 	}
 	if restoreErr != nil {
 		return restoreErr
@@ -629,6 +845,7 @@ func writeLogHeader(file *os.File, current CurrentSession, profile model.Profile
 	_, _ = fmt.Fprintf(file, "session_id: %s\n", current.ID)
 	_, _ = fmt.Fprintf(file, "started_at: %s\n", current.StartedAt.Format(time.RFC3339))
 	_, _ = fmt.Fprintf(file, "profile: %s | %s | %s\n", profile.ID, profile.DisplayName(), profile.Endpoint())
+	_, _ = fmt.Fprintf(file, "engine: %s\n", firstNonEmpty(current.Engine, config.EngineSingbox))
 	_, _ = fmt.Fprintf(file, "config_path: %s\n", current.ConfigPath)
 	_, _ = fmt.Fprintf(file, "mode: %s\n", current.Mode)
 	_, _ = fmt.Fprintf(file, "launch_mode: %s\n", current.LaunchMode)
@@ -640,7 +857,7 @@ func writeLogHeader(file *os.File, current CurrentSession, profile model.Profile
 	}
 	_, _ = fmt.Fprintf(file, "bypasses: %s\n", joinOrNone(current.BypassSuffixes))
 	_, _ = fmt.Fprintf(file, "command: %s\n", joinOrNone(current.Command))
-	_, _ = fmt.Fprintf(file, "--- sing-box output follows ---\n")
+	_, _ = fmt.Fprintf(file, "--- tunnel frontend output follows ---\n")
 }
 
 func guardNestedTunnelStartup(profile model.Profile, mode string) error {
@@ -884,6 +1101,8 @@ func LastRelevantLogLine(path string) string {
 			strings.HasPrefix(line, "session_id:"),
 			strings.HasPrefix(line, "started_at:"),
 			strings.HasPrefix(line, "profile:"),
+			strings.HasPrefix(line, "engine:"),
+			strings.HasPrefix(line, "sidecar:"),
 			strings.HasPrefix(line, "config_path:"),
 			strings.HasPrefix(line, "mode:"),
 			strings.HasPrefix(line, "launch_mode:"),

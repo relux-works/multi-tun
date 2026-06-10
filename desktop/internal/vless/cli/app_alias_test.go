@@ -87,6 +87,75 @@ func TestStartOptionsUsePositionalServerAndProfile(t *testing.T) {
 	if options.configProfile != "default" {
 		t.Fatalf("configProfile = %q, want default", options.configProfile)
 	}
+	if options.refresh {
+		t.Fatal("refresh = true, want parser default false before auto-profile resolution")
+	}
+	if options.refreshSet {
+		t.Fatal("refreshSet = true, want omitted refresh flag")
+	}
+}
+
+func TestStartOptionsAllowCachedFallback(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	options, exitCode, err := app.parseStartOptions("start", []string{"--refresh=false", "dance"}, true)
+	if err != nil {
+		t.Fatalf("parseStartOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("parseStartOptions() exitCode = %d, want 0", exitCode)
+	}
+	if options.refresh {
+		t.Fatal("refresh = true, want cached fallback")
+	}
+	if !options.refreshSet {
+		t.Fatal("refreshSet = false, want explicit cached fallback")
+	}
+	if options.serverName != "dance" {
+		t.Fatalf("serverName = %q, want dance", options.serverName)
+	}
+}
+
+func TestStartOptionsAllowExplicitRefresh(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	options, exitCode, err := app.parseStartOptions("start", []string{"--refresh", "dance"}, false)
+	if err != nil {
+		t.Fatalf("parseStartOptions() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("parseStartOptions() exitCode = %d, want 0", exitCode)
+	}
+	if !options.refresh {
+		t.Fatal("refresh = false, want explicit refresh")
+	}
+	if !options.refreshSet {
+		t.Fatal("refreshSet = false, want explicit refresh")
+	}
+}
+
+func TestEffectiveStartRefreshFollowsAutoProfileOnly(t *testing.T) {
+	autoProfile := config.ProjectConfig{}
+	if !effectiveStartRefresh(autoProfile, startOptions{}) {
+		t.Fatal("effectiveStartRefresh(auto profile) = false, want true")
+	}
+
+	selectedProfile := config.ProjectConfig{Default: &config.DefaultConfig{ProfileSelector: "Germany"}}
+	if effectiveStartRefresh(selectedProfile, startOptions{}) {
+		t.Fatal("effectiveStartRefresh(selected profile) = true, want false")
+	}
+
+	if !effectiveStartRefresh(selectedProfile, startOptions{refresh: true, refreshSet: true}) {
+		t.Fatal("effectiveStartRefresh(explicit refresh) = false, want true")
+	}
+
+	if effectiveStartRefresh(autoProfile, startOptions{refresh: false, refreshSet: true}) {
+		t.Fatal("effectiveStartRefresh(explicit cached fallback) = true, want false")
+	}
 }
 
 func TestStartOptionsRejectFlagAndPositionalServer(t *testing.T) {
@@ -137,6 +206,7 @@ func TestStopTargetsIncludeAllServerCacheDirsWhenNoServerSelected(t *testing.T) 
       "source": {"mode": "proxy", "url": "https://example.com/dance"},
       "cache_dir": "/tmp/vless-dance",
       "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "engine": {"type": "sing-box"},
       "profiles": {
         "default": {"selector": "Sweden"}
       }
@@ -145,6 +215,7 @@ func TestStopTargetsIncludeAllServerCacheDirsWhenNoServerSelected(t *testing.T) 
       "source": {"mode": "proxy", "url": "https://example.com/fortinetz"},
       "cache_dir": "/tmp/vless-fortinetz",
       "artifacts": {"singbox_config_path": "/tmp/fortinetz.json"},
+      "engine": {"type": "sing-box"},
       "profiles": {
         "nl": {"selector": "Netherlands"},
         "de": {"selector": "Germany"}
@@ -154,6 +225,7 @@ func TestStopTargetsIncludeAllServerCacheDirsWhenNoServerSelected(t *testing.T) 
       "source": {"mode": "proxy", "url": "https://example.com/freedom"},
       "cache_dir": "/tmp/vless-freedom",
       "artifacts": {"singbox_config_path": "/tmp/freedom.json"},
+      "engine": {"type": "xray"},
       "profiles": {
         "fr": {"selector": "France"}
       }
@@ -221,6 +293,69 @@ func TestReconnectStopsAllConfiguredSessionCacheDirs(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleCurrentSessionUsesStopLogic(t *testing.T) {
+	previous := stopCurrentSessionFunc
+	defer func() {
+		stopCurrentSessionFunc = previous
+	}()
+
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	launch := config.PrivilegedLaunchConfig{Mode: config.LaunchModeHelper}
+	called := false
+	stopCurrentSessionFunc = func(gotCacheDir string, gotLaunch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
+		called = true
+		if gotCacheDir != cacheDir {
+			t.Fatalf("cacheDir = %q, want %q", gotCacheDir, cacheDir)
+		}
+		if gotLaunch.Mode != launch.Mode {
+			t.Fatalf("launch.mode = %q, want %q", gotLaunch.Mode, launch.Mode)
+		}
+		if !force {
+			t.Fatal("force = false, want true for stale startup cleanup")
+		}
+		if timeout != 1500*time.Millisecond {
+			t.Fatalf("timeout = %s, want 1.5s", timeout)
+		}
+		return &session.CurrentSession{ID: "stale", PID: 4242}, "stale", nil
+	}
+
+	if err := cleanupStaleCurrentSession(cacheDir, launch); err != nil {
+		t.Fatalf("cleanupStaleCurrentSession() error = %v", err)
+	}
+	if !called {
+		t.Fatal("stopCurrentSessionFunc was not called")
+	}
+}
+
+func TestReconnectStopsConfiguredSessionsBeforePreparingNewStart(t *testing.T) {
+	path := writeReconnectUnmatchedProfileConfig(t)
+
+	previous := stopCurrentSessionFunc
+	var stoppedCacheDirs []string
+	stopCurrentSessionFunc = func(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
+		stoppedCacheDirs = append(stoppedCacheDirs, cacheDir)
+		return nil, "none", nil
+	}
+	t.Cleanup(func() {
+		stopCurrentSessionFunc = previous
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"reconnect", "--config", path})
+	if exitCode != 1 {
+		t.Fatalf("Run(reconnect) exitCode = %d, want 1", exitCode)
+	}
+	if len(stoppedCacheDirs) != 1 || stoppedCacheDirs[0] != "/tmp/vless-dance" {
+		t.Fatalf("stoppedCacheDirs = %v, want [/tmp/vless-dance]", stoppedCacheDirs)
+	}
+	if !strings.Contains(stderr.String(), "reconnect failed:") {
+		t.Fatalf("stderr = %q, want reconnect failure", stderr.String())
+	}
+}
+
 func TestDiagnoseDefaultsToTunnelAndRejectsProviderArgument(t *testing.T) {
 	t.Parallel()
 
@@ -251,6 +386,7 @@ func TestDiagnoseConfigUsesPositionalServer(t *testing.T) {
       "source": {"mode": "proxy", "url": "https://example.com/dance"},
       "cache_dir": "/tmp/vless-dance",
       "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "engine": {"type": "sing-box"},
       "profiles": {
         "default": {"selector": "Sweden"}
       }
@@ -372,6 +508,7 @@ func writeCLISelectionConfig(t *testing.T) string {
       "source": {"mode": "proxy", "url": "https://example.com/dance"},
       "cache_dir": "/tmp/vless-dance",
       "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "engine": {"type": "sing-box"},
       "profiles": {
         "default": {"selector": "Sweden"}
       }
@@ -380,6 +517,7 @@ func writeCLISelectionConfig(t *testing.T) string {
       "source": {"mode": "proxy", "url": "https://example.com/fortinetz"},
       "cache_dir": "/tmp/vless-fortinetz",
       "artifacts": {"singbox_config_path": "/tmp/fortinetz.json"},
+      "engine": {"type": "sing-box"},
       "profiles": {
         "nl": {"selector": "Netherlands"},
         "de": {"selector": "Germany"}
@@ -389,8 +527,42 @@ func writeCLISelectionConfig(t *testing.T) string {
       "source": {"mode": "proxy", "url": "https://example.com/freedom"},
       "cache_dir": "/tmp/vless-freedom",
       "artifacts": {"singbox_config_path": "/tmp/freedom.json"},
+      "engine": {"type": "xray"},
       "profiles": {
         "fr": {"selector": "France"}
+      }
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
+}
+
+func writeReconnectUnmatchedProfileConfig(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {
+    "server": "dance",
+    "profile": "default"
+  },
+  "servers": {
+    "dance": {
+      "source": {"mode": "direct", "url": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=tcp#demo"},
+      "cache_dir": "/tmp/vless-dance",
+      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "engine": {"type": "sing-box"},
+      "profiles": {
+        "default": {"selector": "missing-profile"}
       }
     }
   },

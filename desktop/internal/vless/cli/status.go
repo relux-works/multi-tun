@@ -14,6 +14,8 @@ import (
 	"multi-tun/desktop/internal/vless/subscription"
 )
 
+var currentSessionStateStatus = currentSessionState
+
 func (a *App) runStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
@@ -26,10 +28,19 @@ func (a *App) runStatus(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	explicitSelection := statusSelectionExplicit(*serverName, *profileName, *profileSelector, fs.Args())
 	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, *profileSelector, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
 		return 2
+	}
+	if !explicitSelection {
+		if activeSelection, ok, err := activeStatusSelection(*configPath); err != nil {
+			fmt.Fprintf(a.stderr, "status failed: %v\n", err)
+			return 1
+		} else if ok {
+			selectionOptions.Server = activeSelection
+		}
 	}
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
@@ -51,9 +62,11 @@ func (a *App) runStatus(args []string) int {
 
 	connection := deriveConnectionStatus(sessionAlive, interfacePresent)
 	renderedPresent := fileExists(cfg.SingboxConfigPath())
+	xrayRenderedPresent := fileExists(cfg.XrayConfigPath())
 
 	fmt.Fprintf(a.stdout, "connection: %s\n", connection)
 	fmt.Fprintf(a.stdout, "mode: %s\n", mode)
+	fmt.Fprintf(a.stdout, "engine: %s\n", cfg.EngineType())
 	if selection.Server != "" {
 		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
 	}
@@ -69,6 +82,9 @@ func (a *App) runStatus(args []string) int {
 			fmt.Fprintf(a.stdout, "session_id: %s\n", current.ID)
 		}
 		fmt.Fprintf(a.stdout, "pid: %d\n", current.PID)
+		if current.Engine != "" {
+			fmt.Fprintf(a.stdout, "session_engine: %s\n", current.Engine)
+		}
 		fmt.Fprintf(a.stdout, "launch_mode: %s\n", current.LaunchMode)
 		if !current.StartedAt.IsZero() {
 			fmt.Fprintf(a.stdout, "started_at: %s\n", current.StartedAt.Format("2006-01-02T15:04:05Z07:00"))
@@ -78,6 +94,12 @@ func (a *App) runStatus(args []string) int {
 		}
 		if current.LaunchMode == config.LaunchModeLaunchd {
 			fmt.Fprintf(a.stdout, "launch_label: %s\n", current.LaunchLabel)
+		}
+		for _, sidecar := range current.Sidecars {
+			fmt.Fprintf(a.stdout, "sidecar: %s pid=%d (%s)\n", sidecar.Name, sidecar.PID, stateLabel(sidecarAlive(sidecar)))
+			if sidecar.LogPath != "" {
+				fmt.Fprintf(a.stdout, "sidecar_log: %s\n", sidecar.LogPath)
+			}
 		}
 		if len(current.DNSHandoffServers) > 0 {
 			switch current.DNSHandoffMode {
@@ -105,6 +127,9 @@ func (a *App) runStatus(args []string) int {
 		}
 	}
 	fmt.Fprintf(a.stdout, "rendered_config: %s (%s)\n", cfg.SingboxConfigPath(), stateLabel(renderedPresent))
+	if cfg.EngineType() == config.EngineXray || xrayRenderedPresent {
+		fmt.Fprintf(a.stdout, "xray_config: %s (%s)\n", cfg.XrayConfigPath(), stateLabel(xrayRenderedPresent))
+	}
 	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.BypassSuffixes()))
 	if currentState == "stale" && current != nil {
 		if last := session.LastRelevantLogLine(current.LogPath); last != "" {
@@ -130,6 +155,44 @@ func (a *App) runStatus(args []string) int {
 	}
 
 	return 0
+}
+
+func statusSelectionExplicit(serverFlag, profileFlag, selectorFlag string, args []string) bool {
+	if strings.TrimSpace(serverFlag) != "" || strings.TrimSpace(profileFlag) != "" || strings.TrimSpace(selectorFlag) != "" {
+		return true
+	}
+	return len(args) > 0
+}
+
+func activeStatusSelection(configPath string) (string, bool, error) {
+	targets, err := sessionTargetsForConfig(configPath, "")
+	if err != nil {
+		return "", false, err
+	}
+
+	var active string
+	for _, target := range targets {
+		if strings.TrimSpace(target.label) == "" {
+			continue
+		}
+		_, _, alive, err := currentSessionStateStatus(target.cacheDir, target.launch)
+		if err != nil {
+			return "", false, err
+		}
+		if !alive {
+			continue
+		}
+		if active != "" {
+			return "", false, nil
+		}
+		active = target.label
+	}
+	return active, active != "", nil
+}
+
+func sidecarAlive(sidecar session.SidecarSession) bool {
+	alive, err := session.ProcessAlive(sidecar.PID)
+	return err == nil && alive
 }
 
 func currentSessionState(cacheDir string, launch config.PrivilegedLaunchConfig) (*session.CurrentSession, string, bool, error) {

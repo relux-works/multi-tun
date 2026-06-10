@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"multi-tun/desktop/internal/vless/config"
-	"multi-tun/desktop/internal/vless/singbox"
 	"multi-tun/desktop/internal/vless/subscription"
 )
 
@@ -291,29 +290,16 @@ func (a *App) runRender(args []string) int {
 		return 1
 	}
 
-	snapshot, err := a.loadSnapshot(cfg, *refresh)
+	prepared, err := a.prepareStart(cfg, startOptions{
+		configPath:      *configPath,
+		serverName:      selectionOptions.Server,
+		configProfile:   selectionOptions.Profile,
+		profileSelector: selectionOptions.Selector,
+		outputPath:      *outputPath,
+		refresh:         *refresh,
+		refreshSet:      true,
+	})
 	if err != nil {
-		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
-		return 1
-	}
-
-	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.DefaultProfileSelector())
-	if err != nil {
-		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
-		return 1
-	}
-
-	data, err := singbox.RenderWithOptions(cfg, profile, resolveRenderOptions(cfg.NetworkMode()))
-	if err != nil {
-		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
-		return 1
-	}
-
-	target := cfg.SingboxConfigPath()
-	if *outputPath != "" {
-		target = *outputPath
-	}
-	if err := singbox.Write(target, data); err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1
 	}
@@ -324,7 +310,11 @@ func (a *App) runRender(args []string) int {
 	if selection.Profile != "" {
 		fmt.Fprintf(a.stdout, "config_profile: %s\n", selection.Profile)
 	}
-	fmt.Fprintf(a.stdout, "rendered %s using profile %s (%s)\n", target, profile.DisplayName(), profile.ID)
+	fmt.Fprintf(a.stdout, "engine: %s\n", prepared.engine)
+	if prepared.xrayTarget != "" {
+		fmt.Fprintf(a.stdout, "rendered_xray: %s\n", prepared.xrayTarget)
+	}
+	fmt.Fprintf(a.stdout, "rendered %s using profile %s (%s)\n", prepared.target, prepared.profile.DisplayName(), prepared.profile.ID)
 	return 0
 }
 
