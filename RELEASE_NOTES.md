@@ -1,5 +1,99 @@
 # Release Notes
 
+## v1.3.2 - VLESS profile alias mismatch diagnostics
+
+Tag: `v1.3.2`
+Base tag: `v1.3.1`
+
+This release makes refreshed VLESS subscription drift fail with an actionable diagnostic instead of a bare selector error. If a configured profile alias such as `fortinetz nl` no longer matches any active profile after refresh, `vless-tun` now stops before rendering or startup and tells the operator exactly which config selector needs updating.
+
+### Highlights
+
+- `vless-tun start`, `run`, `render`, and `reconnect` now preserve the effective server/profile alias while preparing the selected subscription profile.
+- Profile selector misses now report:
+  - configured server name
+  - configured profile alias
+  - selector value
+  - whether the source was a refreshed or cached subscription snapshot
+  - original match failure reason
+  - available profiles from the current snapshot
+  - the exact `servers.<server>.profiles.<alias>.selector` path to update
+- `--refresh=false` keeps using the cached snapshot, and the diagnostic labels the profile list as cached so offline starts are unambiguous.
+- Documentation now calls out the start-time failure mode for stale profile aliases.
+
+### Config compatibility
+
+No new config keys are required for v1.3.2.
+
+Existing v1.3.1 configs continue to work unchanged. If a provider removes or renames a profile that your config alias points at, update only the selector for that alias:
+
+```json
+"profiles": {
+  "nl": {
+    "selector": "<id, name, endpoint, or substring from available profiles>"
+  }
+}
+```
+
+### Agent upgrade checklist
+
+Use this checklist when updating an existing machine from v1.3.1.
+
+1. Install or rebuild the updated CLI.
+
+```bash
+go build -o ~/.local/bin/vless-tun ./desktop/cmd/vless-tun
+```
+
+2. Start normally. Subscriptions still refresh by default before rendering.
+
+```bash
+vless-tun start fortinetz nl
+```
+
+3. If startup fails because `nl` no longer matches a refreshed profile, inspect the available profiles and update the configured selector.
+
+```bash
+vless-tun list fortinetz
+```
+
+Expected diagnostic shape:
+
+```text
+configured profile "nl" for server "fortinetz" did not match any refreshed subscription profile
+selector: Netherlands
+reason: profile selector "Netherlands" did not match any profile
+
+available profiles:
+- <id> | <name> | <endpoint> | <transport>
+
+update config: servers.fortinetz.profiles.nl.selector = "<id, name, endpoint, or substring from available profiles>"
+or run: vless-tun list fortinetz
+```
+
+4. Use the cached fallback only when you explicitly want to avoid subscription refresh:
+
+```bash
+vless-tun start fortinetz nl --refresh=false
+```
+
+### Operational notes
+
+- This release does not change the default refresh-on-start behavior introduced in v1.3.1.
+- The failure happens before generated configs are rendered and before the TUN runtime starts, so stale aliases should not leave behind half-started sessions.
+- The same diagnostic path is shared by `start`, `run`, `render`, and `reconnect`.
+
+### Validation performed for this release
+
+```bash
+go test ./desktop/internal/vless/cli ./desktop/internal/vless/config
+go test ./...
+git diff --check
+vless-tun start --config .temp/BUG-260610-1sxa23/missing-profile-config.json fortinetz nl
+vless-tun start --refresh=false --config .temp/BUG-260610-1sxa23/missing-profile-config.json fortinetz nl
+vless-tun status
+```
+
 ## v1.3.1 - VLESS subscription refresh and server-level command fixes
 
 Tag: `v1.3.1`
