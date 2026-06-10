@@ -300,7 +300,7 @@ func (a *App) runRender(args []string) int {
 		outputPath:      *outputPath,
 		refresh:         *refresh,
 		refreshSet:      true,
-	})
+	}.withEffectiveSelection(selection))
 	if err != nil {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1

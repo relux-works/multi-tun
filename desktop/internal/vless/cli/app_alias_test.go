@@ -503,6 +503,37 @@ func TestStatusAllowsServerOnlyMultiProfileSelection(t *testing.T) {
 	}
 }
 
+func TestStartReportsAvailableProfilesWhenConfigAliasSelectorMissesAfterRefresh(t *testing.T) {
+	t.Parallel()
+
+	path := writeServerLevelMultiProfileConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	exitCode := app.Run([]string{"start", "--config", path, "fortinetz", "nl"})
+	if exitCode != 1 {
+		t.Fatalf("Run(start) exitCode = %d, want 1", exitCode)
+	}
+	got := stderr.String()
+	for _, want := range []string{
+		`configured profile "nl" for server "fortinetz" did not match any refreshed subscription profile`,
+		"selector: Netherlands",
+		"available profiles:",
+		"fortinetz-nl",
+		`update config: servers.fortinetz.profiles.nl.selector`,
+		"or run: vless-tun list fortinetz",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty stdout on failed start", stdout.String())
+	}
+}
+
 func TestSetCurrentUsesPositionalServerAndWritesConfig(t *testing.T) {
 	t.Parallel()
 
