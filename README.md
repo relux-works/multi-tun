@@ -406,7 +406,7 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 ### `vless-tun start`
 
-For selector-less auto profiles such as `dance/default`, refreshes the selected provider subscription cache before rendering so provider-side endpoint changes are picked up at start time. Explicit profile selectors start from the cache by default unless `--refresh` is passed. Use `--refresh=false` with an auto profile only when the subscription endpoint is unavailable and the last cached snapshot is good enough to start from.
+Refreshes the selected provider subscription cache before rendering, including explicit profile aliases such as `fortinetz nl`, so provider-side endpoint, SNI, fingerprint, and profile changes are picked up at start time. Use `--refresh=false` only when the subscription endpoint is unavailable and the last cached snapshot is good enough to start from.
 
 Short provider starts work through positional selection overrides:
 
@@ -783,7 +783,7 @@ go build -o cisco-dump ./desktop/cmd/cisco-dump
 ## Notes
 
 - This version manages the local `sing-box` session lifecycle with `start`, `status`, `stop`, and a configurable privileged TUN backend for macOS.
-- `start` refreshes selector-less auto profiles such as `dance/default` before rendering, so they follow provider-side endpoint changes. Explicit profile selectors start from cache by default unless `--refresh` is passed; `--refresh=false` is the explicit cached fallback for auto profiles.
+- `start` refreshes the selected provider subscription before rendering by default, so both selector-less auto profiles and explicit profile aliases follow provider-side endpoint changes. `--refresh=false` is the explicit cached fallback for offline starts.
 - `reconnect` is the "restart with latest config" path: it rereads local config, stops any recorded VLESS session across configured server cache directories, refreshes the subscription by default, rerenders, and starts the selected session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.

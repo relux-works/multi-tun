@@ -71,7 +71,7 @@ func TestStartOptionsUsePositionalServerAndProfile(t *testing.T) {
 	var stderr bytes.Buffer
 	app := New(&stdout, &stderr)
 
-	options, exitCode, err := app.parseStartOptions("start", []string{"dance", "default"}, false)
+	options, exitCode, err := app.parseStartOptions("start", []string{"dance", "default"}, true)
 	if err != nil {
 		t.Fatalf("parseStartOptions() error = %v", err)
 	}
@@ -87,8 +87,8 @@ func TestStartOptionsUsePositionalServerAndProfile(t *testing.T) {
 	if options.configProfile != "default" {
 		t.Fatalf("configProfile = %q, want default", options.configProfile)
 	}
-	if options.refresh {
-		t.Fatal("refresh = true, want parser default false before auto-profile resolution")
+	if !options.refresh {
+		t.Fatal("refresh = false, want parser default true")
 	}
 	if options.refreshSet {
 		t.Fatal("refreshSet = true, want omitted refresh flag")
@@ -138,15 +138,15 @@ func TestStartOptionsAllowExplicitRefresh(t *testing.T) {
 	}
 }
 
-func TestEffectiveStartRefreshFollowsAutoProfileOnly(t *testing.T) {
+func TestEffectiveStartRefreshDefaultsToRefresh(t *testing.T) {
 	autoProfile := config.ProjectConfig{}
 	if !effectiveStartRefresh(autoProfile, startOptions{}) {
 		t.Fatal("effectiveStartRefresh(auto profile) = false, want true")
 	}
 
 	selectedProfile := config.ProjectConfig{Default: &config.DefaultConfig{ProfileSelector: "Germany"}}
-	if effectiveStartRefresh(selectedProfile, startOptions{}) {
-		t.Fatal("effectiveStartRefresh(selected profile) = true, want false")
+	if !effectiveStartRefresh(selectedProfile, startOptions{}) {
+		t.Fatal("effectiveStartRefresh(selected profile) = false, want true")
 	}
 
 	if !effectiveStartRefresh(selectedProfile, startOptions{refresh: true, refreshSet: true}) {
