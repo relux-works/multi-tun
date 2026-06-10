@@ -291,6 +291,9 @@ func (a *App) runRender(args []string) int {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 1
 	}
+	if warning := runtimeLoggingPerformanceWarning(cfg); warning != "" {
+		fmt.Fprintf(a.stderr, "warning: %s\n", warning)
+	}
 
 	prepared, err := a.prepareStart(cfg, startOptions{
 		configPath:      *configPath,

@@ -101,6 +101,7 @@
     }
   },
   "logging": {
-    "level": "info"
+    "level": "warn",
+    "max_lines": 1000
   }
 }

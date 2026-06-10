@@ -68,6 +68,8 @@ func (a *App) runStatus(args []string) int {
 	fmt.Fprintf(a.stdout, "connection: %s\n", connection)
 	fmt.Fprintf(a.stdout, "mode: %s\n", mode)
 	fmt.Fprintf(a.stdout, "engine: %s\n", cfg.EngineType())
+	fmt.Fprintf(a.stdout, "logging_level: %s\n", cfg.LogLevel())
+	fmt.Fprintf(a.stdout, "logging_max_lines: %d\n", cfg.LogMaxLines())
 	if selection.Server != "" {
 		fmt.Fprintf(a.stdout, "server: %s\n", selection.Server)
 	}
@@ -92,6 +94,9 @@ func (a *App) runStatus(args []string) int {
 		}
 		if current.LogPath != "" {
 			fmt.Fprintf(a.stdout, "log_file: %s\n", current.LogPath)
+		}
+		if current.LogMaxLines > 0 {
+			fmt.Fprintf(a.stdout, "log_max_lines: %d\n", current.LogMaxLines)
 		}
 		if current.LaunchMode == config.LaunchModeLaunchd {
 			fmt.Fprintf(a.stdout, "launch_label: %s\n", current.LaunchLabel)

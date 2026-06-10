@@ -74,6 +74,50 @@ func TestValidateAcceptsHelperLaunchMode(t *testing.T) {
 	}
 }
 
+func TestDefaultLoggingConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	if got, want := cfg.LogLevel(), DefaultLogLevel; got != want {
+		t.Fatalf("LogLevel() = %q, want %q", got, want)
+	}
+	if got, want := cfg.LogMaxLines(), DefaultLogMaxLines; got != want {
+		t.Fatalf("LogMaxLines() = %d, want %d", got, want)
+	}
+}
+
+func TestValidateRejectsUnknownLoggingLevel(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Logging.Level = "chatty"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want logging level error")
+	}
+	for _, want := range []string{"logging.level", "trace, debug, info, warn, error, fatal, panic", `"logging": {"level": "warn"}`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Validate() error = %q, want substring %q", err, want)
+		}
+	}
+}
+
+func TestValidateRejectsNegativeLoggingMaxLines(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Logging.MaxLines = -1
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want logging max_lines error")
+	}
+	if !strings.Contains(err.Error(), "logging.max_lines must be >= 0") {
+		t.Fatalf("Validate() error = %q, want logging.max_lines", err)
+	}
+}
+
 func TestSingboxConfigPathPrefersArtifactsPath(t *testing.T) {
 	t.Parallel()
 
@@ -150,7 +194,8 @@ func TestLoadPreferredSchemaUsesPreferredFields(t *testing.T) {
     }
   },
   "logging": {
-    "level": "info"
+    "level": "INFO",
+    "max_lines": 500
   },
   "artifacts": {
     "singbox_config_path": "/tmp/generated/sing-box.json"
@@ -171,6 +216,12 @@ func TestLoadPreferredSchemaUsesPreferredFields(t *testing.T) {
 	}
 	if got, want := cfg.TunInterfaceName(), "utun233"; got != want {
 		t.Fatalf("TunInterfaceName() = %q, want %q", got, want)
+	}
+	if got, want := cfg.LogLevel(), "info"; got != want {
+		t.Fatalf("LogLevel() = %q, want %q", got, want)
+	}
+	if got, want := cfg.LogMaxLines(), 500; got != want {
+		t.Fatalf("LogMaxLines() = %d, want %d", got, want)
 	}
 }
 
@@ -216,6 +267,9 @@ func TestSetupWritesPreferredFields(t *testing.T) {
 	}
 	if got, want := loaded.NetworkMode(), RenderModeTun; got != want {
 		t.Fatalf("NetworkMode() = %q, want %q", got, want)
+	}
+	if got, want := loaded.LogMaxLines(), DefaultLogMaxLines; got != want {
+		t.Fatalf("LogMaxLines() = %d, want %d", got, want)
 	}
 }
 

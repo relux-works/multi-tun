@@ -7,7 +7,7 @@ import (
 
 func startWithVPNCore(current CurrentSession, executable string) (int, error) {
 	command := []string{executable, "run", "-c", current.ConfigPath}
-	pid, err := vpnCoreSpawnDetachedSession(command, current.LogPath, true)
+	pid, err := vpnCoreSpawnDetachedSession(command, current.LogPath, current.LogMaxLines, true)
 	if err != nil {
 		return 0, fmt.Errorf("vpn core spawn: %w", err)
 	}

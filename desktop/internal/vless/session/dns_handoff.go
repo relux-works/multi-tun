@@ -33,17 +33,17 @@ var (
 	networkDNSServersSession = func(service string) ([]byte, error) {
 		return execCommand(networksetupPath, "-getdnsservers", service).CombinedOutput()
 	}
-	setDNSServersPrivilegedSession = func(launchMode, logPath, service string, servers []string) error {
+	setDNSServersPrivilegedSession = func(launchMode, logPath string, maxLines int, service string, servers []string) error {
 		args := []string{"-setdnsservers", service}
 		if len(servers) == 0 {
 			args = append(args, "Empty")
 		} else {
 			args = append(args, servers...)
 		}
-		return runPrivilegedLoggedCommand(launchMode, logPath, append([]string{networksetupPath}, args...))
+		return runPrivilegedLoggedCommand(launchMode, logPath, maxLines, append([]string{networksetupPath}, args...))
 	}
-	runScutilPrivilegedSession = func(launchMode, logPath, stdinData string) error {
-		return runPrivilegedLoggedCommandWithInput(launchMode, logPath, []string{scutilPath}, stdinData)
+	runScutilPrivilegedSession = func(launchMode, logPath string, maxLines int, stdinData string) error {
+		return runPrivilegedLoggedCommandWithInput(launchMode, logPath, maxLines, []string{scutilPath}, stdinData)
 	}
 )
 
@@ -66,7 +66,7 @@ func applySystemDNSHandoff(current *CurrentSession, options StartOptions) error 
 	if err := applyScutilDNSHandoff(current, options, dnsServers); err == nil {
 		return nil
 	} else {
-		appendSessionLog(current.LogPath, "dns_handoff_scutil_failed interface=%s err=%v\n", strings.TrimSpace(options.InterfaceName), err)
+		appendSessionLog(*current, logLevelWarn, "dns_handoff_scutil_failed interface=%s err=%v\n", strings.TrimSpace(options.InterfaceName), err)
 	}
 
 	return applyNetworkServiceDNSHandoff(current, dnsServers)
@@ -83,12 +83,12 @@ func applyScutilDNSHandoff(current *CurrentSession, options StartOptions, dnsSer
 	}
 	serviceID := dnsHandoffServiceID(current.ID)
 	stdinData := buildScutilApplyInput(serviceID, interfaceName, tunnelIPv4, dnsServers)
-	appendSessionLog(current.LogPath, "dns_handoff_apply_begin method=%s interface=%s target=%s search=none\n", dnsHandoffModeScutil, interfaceName, strings.Join(dnsServers, ","))
-	if err := runScutilPrivilegedSession(current.LaunchMode, current.LogPath, stdinData); err != nil {
-		appendSessionLog(current.LogPath, "dns_handoff_apply_failed method=%s interface=%s err=%v\n", dnsHandoffModeScutil, interfaceName, err)
+	appendSessionLog(*current, logLevelInfo, "dns_handoff_apply_begin method=%s interface=%s target=%s search=none\n", dnsHandoffModeScutil, interfaceName, strings.Join(dnsServers, ","))
+	if err := runScutilPrivilegedSession(current.LaunchMode, current.LogPath, current.LogMaxLines, stdinData); err != nil {
+		appendSessionLog(*current, logLevelError, "dns_handoff_apply_failed method=%s interface=%s err=%v\n", dnsHandoffModeScutil, interfaceName, err)
 		return err
 	}
-	appendSessionLog(current.LogPath, "dns_handoff_apply_ok method=%s interface=%s service_id=%s target=%s\n", dnsHandoffModeScutil, interfaceName, serviceID, strings.Join(dnsServers, ","))
+	appendSessionLog(*current, logLevelInfo, "dns_handoff_apply_ok method=%s interface=%s service_id=%s target=%s\n", dnsHandoffModeScutil, interfaceName, serviceID, strings.Join(dnsServers, ","))
 
 	current.DNSHandoffMode = dnsHandoffModeScutil
 	current.DNSHandoffService = ""
@@ -116,12 +116,12 @@ func applyNetworkServiceDNSHandoff(current *CurrentSession, dnsServers []string)
 		return err
 	}
 
-	appendSessionLog(current.LogPath, "dns_handoff_apply_begin method=%s service=%s target=%s restore=%s\n", dnsHandoffModeFallback, service, strings.Join(dnsServers, ","), formatRestoreServers(restoreServers, restoreAuto))
-	if err := setDNSServersPrivilegedSession(current.LaunchMode, current.LogPath, service, dnsServers); err != nil {
-		appendSessionLog(current.LogPath, "dns_handoff_apply_failed method=%s service=%s target=%s err=%v\n", dnsHandoffModeFallback, service, strings.Join(dnsServers, ","), err)
+	appendSessionLog(*current, logLevelInfo, "dns_handoff_apply_begin method=%s service=%s target=%s restore=%s\n", dnsHandoffModeFallback, service, strings.Join(dnsServers, ","), formatRestoreServers(restoreServers, restoreAuto))
+	if err := setDNSServersPrivilegedSession(current.LaunchMode, current.LogPath, current.LogMaxLines, service, dnsServers); err != nil {
+		appendSessionLog(*current, logLevelError, "dns_handoff_apply_failed method=%s service=%s target=%s err=%v\n", dnsHandoffModeFallback, service, strings.Join(dnsServers, ","), err)
 		return err
 	}
-	appendSessionLog(current.LogPath, "dns_handoff_apply_ok method=%s service=%s target=%s\n", dnsHandoffModeFallback, service, strings.Join(dnsServers, ","))
+	appendSessionLog(*current, logLevelInfo, "dns_handoff_apply_ok method=%s service=%s target=%s\n", dnsHandoffModeFallback, service, strings.Join(dnsServers, ","))
 
 	current.DNSHandoffMode = dnsHandoffModeFallback
 	current.DNSHandoffService = service
@@ -147,24 +147,24 @@ func restoreSystemDNSHandoff(current CurrentSession) error {
 		if serviceID == "" {
 			return nil
 		}
-		appendSessionLog(current.LogPath, "dns_handoff_restore_begin method=%s interface=%s service_id=%s\n", dnsHandoffModeScutil, current.DNSHandoffInterface, serviceID)
-		if err := runScutilPrivilegedSession(current.LaunchMode, current.LogPath, buildScutilRemoveInput(serviceID)); err != nil {
-			appendSessionLog(current.LogPath, "dns_handoff_restore_failed method=%s service_id=%s err=%v\n", dnsHandoffModeScutil, serviceID, err)
+		appendSessionLog(current, logLevelInfo, "dns_handoff_restore_begin method=%s interface=%s service_id=%s\n", dnsHandoffModeScutil, current.DNSHandoffInterface, serviceID)
+		if err := runScutilPrivilegedSession(current.LaunchMode, current.LogPath, current.LogMaxLines, buildScutilRemoveInput(serviceID)); err != nil {
+			appendSessionLog(current, logLevelError, "dns_handoff_restore_failed method=%s service_id=%s err=%v\n", dnsHandoffModeScutil, serviceID, err)
 			return err
 		}
-		appendSessionLog(current.LogPath, "dns_handoff_restore_ok method=%s service_id=%s\n", dnsHandoffModeScutil, serviceID)
+		appendSessionLog(current, logLevelInfo, "dns_handoff_restore_ok method=%s service_id=%s\n", dnsHandoffModeScutil, serviceID)
 		return nil
 	case strings.TrimSpace(current.DNSHandoffService) != "":
-		appendSessionLog(current.LogPath, "dns_handoff_restore_begin method=%s service=%s restore=%s\n", dnsHandoffModeFallback, current.DNSHandoffService, formatRestoreServers(current.DNSHandoffRestoreServers, current.DNSHandoffRestoreAuto))
+		appendSessionLog(current, logLevelInfo, "dns_handoff_restore_begin method=%s service=%s restore=%s\n", dnsHandoffModeFallback, current.DNSHandoffService, formatRestoreServers(current.DNSHandoffRestoreServers, current.DNSHandoffRestoreAuto))
 		servers := append([]string(nil), current.DNSHandoffRestoreServers...)
 		if current.DNSHandoffRestoreAuto {
 			servers = nil
 		}
-		if err := setDNSServersPrivilegedSession(current.LaunchMode, current.LogPath, current.DNSHandoffService, servers); err != nil {
-			appendSessionLog(current.LogPath, "dns_handoff_restore_failed method=%s service=%s err=%v\n", dnsHandoffModeFallback, current.DNSHandoffService, err)
+		if err := setDNSServersPrivilegedSession(current.LaunchMode, current.LogPath, current.LogMaxLines, current.DNSHandoffService, servers); err != nil {
+			appendSessionLog(current, logLevelError, "dns_handoff_restore_failed method=%s service=%s err=%v\n", dnsHandoffModeFallback, current.DNSHandoffService, err)
 			return err
 		}
-		appendSessionLog(current.LogPath, "dns_handoff_restore_ok method=%s service=%s\n", dnsHandoffModeFallback, current.DNSHandoffService)
+		appendSessionLog(current, logLevelInfo, "dns_handoff_restore_ok method=%s service=%s\n", dnsHandoffModeFallback, current.DNSHandoffService)
 		return nil
 	default:
 		return nil
@@ -350,32 +350,32 @@ func parseDNSServers(output, service string) ([]string, bool, error) {
 	return lines, false, nil
 }
 
-func runPrivilegedLoggedCommand(launchMode, logPath string, command []string) error {
-	return runPrivilegedLoggedCommandWithInput(launchMode, logPath, command, "")
+func runPrivilegedLoggedCommand(launchMode, logPath string, maxLines int, command []string) error {
+	return runPrivilegedLoggedCommandWithInput(launchMode, logPath, maxLines, command, "")
 }
 
-func runPrivilegedLoggedCommandWithInput(launchMode, logPath string, command []string, stdinData string) error {
+func runPrivilegedLoggedCommandWithInput(launchMode, logPath string, maxLines int, command []string, stdinData string) error {
 	if len(command) == 0 {
 		return fmt.Errorf("missing privileged command")
 	}
 
 	switch launchMode {
 	case config.LaunchModeHelper:
-		return vpncore.Run(vpncore.DefaultServiceConfig(), append([]string(nil), command...), stdinData, logPath)
+		return vpncore.RunWithLogOptions(vpncore.DefaultServiceConfig(), append([]string(nil), command...), stdinData, logPath, vpncore.LogOptions{MaxLines: maxLines})
 	case config.LaunchModeDirect:
-		return runLoggedCommand(command, stdinData, logPath)
+		return runLoggedCommand(command, stdinData, logPath, maxLines)
 	case config.LaunchModeSudo:
 		if err := ensureSudo(); err != nil {
 			return fmt.Errorf("sudo authentication: %w", err)
 		}
-		return runLoggedCommand(append([]string{"sudo"}, command...), stdinData, logPath)
+		return runLoggedCommand(append([]string{"sudo"}, command...), stdinData, logPath, maxLines)
 	default:
 		return fmt.Errorf("system DNS handoff is unsupported for launch mode %q", launchMode)
 	}
 }
 
-func runLoggedCommand(command []string, stdinData, logPath string) error {
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+func runLoggedCommand(command []string, stdinData, logPath string, maxLines int) error {
+	logFile, err := openSessionLog(logPath, maxLines)
 	if err != nil {
 		return err
 	}
@@ -388,18 +388,6 @@ func runLoggedCommand(command []string, stdinData, logPath string) error {
 		cmd.Stdin = strings.NewReader(stdinData)
 	}
 	return cmd.Run()
-}
-
-func appendSessionLog(path, format string, args ...any) {
-	if strings.TrimSpace(path) == "" {
-		return
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-	_, _ = fmt.Fprintf(file, format, args...)
 }
 
 func formatRestoreServers(servers []string, automatic bool) string {

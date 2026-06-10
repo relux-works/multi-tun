@@ -28,7 +28,11 @@ const (
 
 	defaultLaunchdLabel     = "works.relux.vless-tun"
 	defaultLaunchdPlistPath = "/Library/LaunchDaemons/works.relux.vless-tun.plist"
+	DefaultLogLevel         = "warn"
+	DefaultLogMaxLines      = 1000
 )
+
+var allowedLogLevels = []string{"trace", "debug", "info", "warn", "error", "fatal", "panic"}
 
 type ProjectConfig struct {
 	Current   *CurrentConfig          `json:"current,omitempty"`
@@ -155,7 +159,8 @@ type DNSConfig struct {
 }
 
 type LoggingConfig struct {
-	Level string `json:"level,omitempty"`
+	Level    string `json:"level,omitempty"`
+	MaxLines int    `json:"max_lines,omitempty"`
 }
 
 type ArtifactsConfig struct {
@@ -242,7 +247,8 @@ func DefaultForPath(path string) ProjectConfig {
 			},
 		},
 		Logging: LoggingConfig{
-			Level: "warn",
+			Level:    DefaultLogLevel,
+			MaxLines: DefaultLogMaxLines,
 		},
 		Artifacts: ArtifactsConfig{
 			SingboxConfigPath: "configs/generated/sing-box.json",
@@ -513,6 +519,12 @@ func (c ProjectConfig) validateFlat() error {
 	case LaunchModeAuto, LaunchModeSudo, LaunchModeDirect, LaunchModeHelper, LaunchModeLaunchd:
 	default:
 		return errors.New("launch.mode must be one of: auto, sudo, direct, helper, launchd")
+	}
+	if err := validateLogLevel(c.LogLevel()); err != nil {
+		return err
+	}
+	if c.LogMaxLines() < 0 {
+		return errors.New("logging.max_lines must be >= 0; set 0 to disable bounded tail logs or a positive line count such as 1000")
 	}
 	return nil
 }
@@ -942,7 +954,11 @@ func (c ProjectConfig) TunAddresses() []string {
 }
 
 func (c ProjectConfig) LogLevel() string {
-	return firstNonEmpty(strings.TrimSpace(c.Logging.Level), c.legacyRenderLogLevel())
+	return normalizeLogLevel(firstNonEmpty(strings.TrimSpace(c.Logging.Level), c.legacyRenderLogLevel()))
+}
+
+func (c ProjectConfig) LogMaxLines() int {
+	return c.Logging.MaxLines
 }
 
 func (c ProjectConfig) BypassSuffixes() []string {
@@ -1202,6 +1218,23 @@ func normalizeEngineType(value string) string {
 		return EngineSingbox
 	}
 	return value
+}
+
+func normalizeLogLevel(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func validateLogLevel(value string) error {
+	level := normalizeLogLevel(value)
+	if level == "" {
+		return nil
+	}
+	for _, allowed := range allowedLogLevels {
+		if level == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("logging.level must be one of: %s; set it under top-level \"logging\": {\"level\": %q}", strings.Join(allowedLogLevels, ", "), DefaultLogLevel)
 }
 
 func writeJSON(path string, value any) error {
