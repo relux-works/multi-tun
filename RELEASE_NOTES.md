@@ -1,5 +1,106 @@
 # Release Notes
 
+## v1.3.1 - VLESS subscription refresh and server-level command fixes
+
+Tag: `v1.3.1`
+Base tag: `v1.3.0`
+
+This release tightens VLESS provider handling after the Xray engine migration. It fixes multi-profile server diagnostics and makes `start` refresh subscriptions by default for every selected server/profile, so provider-side Reality SNI, fingerprint, and endpoint changes are picked up before rendering.
+
+### Highlights
+
+- `vless-tun start` and `vless-tun run` now refresh the selected server subscription by default, including explicit profile aliases such as `fortinetz nl`.
+- `--refresh=false` remains available as the explicit offline/cache fallback when the subscription endpoint is unavailable and the last cached snapshot is known-good.
+- Server-level commands no longer require a selected profile when the server has multiple configured profile aliases:
+  - `vless-tun refresh <server>`
+  - `vless-tun list <server>`
+  - `vless-tun status <server>`
+  - `vless-tun diagnose config <server>`
+- `status <server>` now reports the requested server instead of failing on `current.profile` from another server or drifting back to `current.server`.
+- Documentation now describes refresh-on-start as the default lifecycle behavior.
+
+### Config compatibility
+
+No new config keys are required for v1.3.1.
+
+Existing v1.3.0 configs continue to work unchanged:
+
+- keep explicit `servers.<name>.engine.type` blocks from v1.3.0
+- keep `sing-box` for normal VLESS Reality servers
+- keep `xray` only for servers that need Xray-only VLESS fields such as `encryption=mlkem...`
+
+### Agent upgrade checklist
+
+Use this checklist when updating an existing machine from v1.3.0.
+
+1. Install or rebuild the updated CLI.
+
+```bash
+go build -o ~/.local/bin/vless-tun ./desktop/cmd/vless-tun
+```
+
+2. Confirm `start` and `run` show refresh enabled by default.
+
+```bash
+vless-tun start --help
+vless-tun run --help
+```
+
+Expected flag text:
+
+```text
+-refresh
+    Fetch subscription before rendering and starting (default true)
+```
+
+3. Refresh and inspect each multi-profile provider without choosing a profile.
+
+```bash
+vless-tun refresh fortinetz
+vless-tun list fortinetz
+vless-tun diagnose config fortinetz
+vless-tun status fortinetz
+```
+
+4. Render/check the explicit profiles you actually use.
+
+```bash
+vless-tun render fortinetz nl
+sing-box check -c ~/.config/vless-tun/generated/sing-box_fortinetz.json
+```
+
+5. Start normally. The default path now refreshes first.
+
+```bash
+vless-tun start fortinetz nl
+```
+
+Use the cached fallback only when you explicitly want to avoid subscription refresh:
+
+```bash
+vless-tun start fortinetz nl --refresh=false
+```
+
+### Operational notes
+
+- `refresh`, `list`, `status`, and `diagnose config` are now safe server-level probes for multi-profile servers.
+- `start` is the lifecycle command that pulls fresh provider state before rendering. `status` still does not connect anything or refresh by default.
+- If a provider changes SNI/fingerprint/Reality parameters, restarting with the new CLI should pick up the fresh subscription automatically.
+
+### Validation performed for this release
+
+```bash
+go test ./desktop/internal/vless/cli ./desktop/internal/vless/config
+go test ./...
+git diff --check
+vless-tun refresh fortinetz
+vless-tun status fortinetz
+vless-tun diagnose config fortinetz
+vless-tun list fortinetz
+vless-tun start --help
+vless-tun run --help
+```
+
 ## v1.3.0 - VLESS Xray engine and explicit config migration
 
 Tag: `v1.3.0`
