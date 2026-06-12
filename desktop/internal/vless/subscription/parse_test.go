@@ -3,6 +3,7 @@ package subscription
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"multi-tun/desktop/internal/vless/model"
@@ -119,7 +120,7 @@ func TestSelectProfile(t *testing.T) {
 	}
 }
 
-func TestSelectProfileEmptySelectorPrefersTCP(t *testing.T) {
+func TestSelectProfileEmptySelectorRequiresExplicitChoiceForMultiProfile(t *testing.T) {
 	t.Parallel()
 
 	profiles := []model.Profile{
@@ -139,16 +140,16 @@ func TestSelectProfileEmptySelectorPrefersTCP(t *testing.T) {
 		},
 	}
 
-	profile, err := SelectProfile(profiles, "")
-	if err != nil {
-		t.Fatalf("SelectProfile returned error: %v", err)
+	_, err := SelectProfile(profiles, "")
+	if err == nil {
+		t.Fatal("SelectProfile returned nil error")
 	}
-	if got, want := profile.ID, "tcp"; got != want {
-		t.Fatalf("profile.ID = %q, want %q", got, want)
+	if !strings.Contains(err.Error(), "configure selector or transport") {
+		t.Fatalf("SelectProfile error = %q, want selector or transport guidance", err)
 	}
 }
 
-func TestSelectProfileWhitespaceSelectorPrefersTCP(t *testing.T) {
+func TestSelectProfileWhitespaceSelectorRequiresExplicitChoiceForMultiProfile(t *testing.T) {
 	t.Parallel()
 
 	profiles := []model.Profile{
@@ -156,16 +157,16 @@ func TestSelectProfileWhitespaceSelectorPrefersTCP(t *testing.T) {
 		{ID: "tcp", Host: "example.com", Port: 8444, Network: "tcp"},
 	}
 
-	profile, err := SelectProfile(profiles, " \t\n ")
-	if err != nil {
-		t.Fatalf("SelectProfile returned error: %v", err)
+	_, err := SelectProfile(profiles, " \t\n ")
+	if err == nil {
+		t.Fatal("SelectProfile returned nil error")
 	}
-	if got, want := profile.ID, "tcp"; got != want {
-		t.Fatalf("profile.ID = %q, want %q", got, want)
+	if !strings.Contains(err.Error(), "configure selector or transport") {
+		t.Fatalf("SelectProfile error = %q, want selector or transport guidance", err)
 	}
 }
 
-func TestSelectProfileExplicitSelectorCanChooseGRPC(t *testing.T) {
+func TestSelectProfileTransportCanChooseTCP(t *testing.T) {
 	t.Parallel()
 
 	profiles := []model.Profile{
@@ -179,6 +180,81 @@ func TestSelectProfileExplicitSelectorCanChooseGRPC(t *testing.T) {
 		{
 			ID:      "tcp",
 			Name:    "provider tcp backup",
+			Host:    "example.com",
+			Port:    8444,
+			Network: "tcp",
+		},
+	}
+
+	profile, err := SelectProfileWithOptions(profiles, SelectOptions{Transport: "tcp"})
+	if err != nil {
+		t.Fatalf("SelectProfileWithOptions returned error: %v", err)
+	}
+	if got, want := profile.ID, "tcp"; got != want {
+		t.Fatalf("profile.ID = %q, want %q", got, want)
+	}
+}
+
+func TestSelectProfileTransportCanChooseGRPC(t *testing.T) {
+	t.Parallel()
+
+	profiles := []model.Profile{
+		{
+			ID:      "austria-grpc",
+			Name:    "provider default",
+			Host:    "example.com",
+			Port:    8443,
+			Network: "grpc",
+		},
+		{
+			ID:      "austria-tcp",
+			Name:    "provider backup",
+			Host:    "example.com",
+			Port:    8444,
+			Network: "tcp",
+		},
+	}
+
+	profile, err := SelectProfileWithOptions(profiles, SelectOptions{Transport: "grpc"})
+	if err != nil {
+		t.Fatalf("SelectProfileWithOptions returned error: %v", err)
+	}
+	if got, want := profile.ID, "austria-grpc"; got != want {
+		t.Fatalf("profile.ID = %q, want %q", got, want)
+	}
+}
+
+func TestSelectProfileTransportRequiresSelectorWhenAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	profiles := []model.Profile{
+		{ID: "tcp-a", Host: "a.example.com", Port: 8444, Network: "tcp"},
+		{ID: "tcp-b", Host: "b.example.com", Port: 8444, Network: "tcp"},
+	}
+
+	_, err := SelectProfileWithOptions(profiles, SelectOptions{Transport: "tcp"})
+	if err == nil {
+		t.Fatal("SelectProfileWithOptions returned nil error")
+	}
+	if !strings.Contains(err.Error(), `transport "tcp" matched multiple profiles`) {
+		t.Fatalf("SelectProfileWithOptions error = %q, want ambiguous transport", err)
+	}
+}
+
+func TestSelectProfileExplicitSelectorCanChooseTransportName(t *testing.T) {
+	t.Parallel()
+
+	profiles := []model.Profile{
+		{
+			ID:      "austria-grpc",
+			Name:    "provider default",
+			Host:    "example.com",
+			Port:    8443,
+			Network: "grpc",
+		},
+		{
+			ID:      "austria-tcp",
+			Name:    "provider backup",
 			Host:    "example.com",
 			Port:    8444,
 			Network: "tcp",
@@ -189,7 +265,23 @@ func TestSelectProfileExplicitSelectorCanChooseGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectProfile returned error: %v", err)
 	}
-	if got, want := profile.ID, "grpc"; got != want {
+	if got, want := profile.ID, "austria-grpc"; got != want {
+		t.Fatalf("profile.ID = %q, want %q", got, want)
+	}
+}
+
+func TestSelectProfileSingleProfileDoesNotRequireSelector(t *testing.T) {
+	t.Parallel()
+
+	profiles := []model.Profile{
+		{ID: "only", Host: "example.com", Port: 8444, Network: "tcp"},
+	}
+
+	profile, err := SelectProfile(profiles, "")
+	if err != nil {
+		t.Fatalf("SelectProfile returned error: %v", err)
+	}
+	if got, want := profile.ID, "only"; got != want {
 		t.Fatalf("profile.ID = %q, want %q", got, want)
 	}
 }

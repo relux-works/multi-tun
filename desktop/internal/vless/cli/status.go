@@ -23,17 +23,19 @@ func (a *App) runStatus(args []string) int {
 	configPath := fs.String("config", "", "Path to config file")
 	serverName := fs.String("server", "", "Configured VLESS server name")
 	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
-	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, transport, or substring")
+	transport := fs.String("transport", "", "Subscription profile transport: tcp or grpc")
 	refresh := fs.Bool("refresh", false, "Fetch subscription before reading status")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	explicitSelection := statusSelectionExplicit(*serverName, *profileName, *profileSelector, fs.Args())
+	explicitSelection := statusSelectionExplicit(*serverName, *profileName, *profileSelector, *transport, fs.Args())
 	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, *profileSelector, fs.Args())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
 		return 2
 	}
+	selectionOptions.Transport = strings.TrimSpace(*transport)
 	if !explicitSelection {
 		if activeSelection, ok, err := activeStatusSelection(*configPath); err != nil {
 			fmt.Fprintf(a.stderr, "status failed: %v\n", err)
@@ -98,6 +100,9 @@ func (a *App) runStatus(args []string) int {
 		if current.LogMaxLines > 0 {
 			fmt.Fprintf(a.stdout, "log_max_lines: %d\n", current.LogMaxLines)
 		}
+		if sessionProfile := formatSessionProfile(current); sessionProfile != "" {
+			fmt.Fprintf(a.stdout, "session_profile: %s\n", sessionProfile)
+		}
 		if current.LaunchMode == config.LaunchModeLaunchd {
 			fmt.Fprintf(a.stdout, "launch_label: %s\n", current.LaunchLabel)
 		}
@@ -148,7 +153,10 @@ func (a *App) runStatus(args []string) int {
 		return 0
 	}
 
-	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.DefaultProfileSelector())
+	profile, err := subscription.SelectProfileWithOptions(snapshot.Profiles, subscription.SelectOptions{
+		Selector:  cfg.DefaultProfileSelector(),
+		Transport: cfg.DefaultProfileTransport(),
+	})
 	if err != nil {
 		fmt.Fprintf(a.stdout, "selected_profile: unresolved (%v)\n", err)
 	} else {
@@ -163,8 +171,8 @@ func (a *App) runStatus(args []string) int {
 	return 0
 }
 
-func statusSelectionExplicit(serverFlag, profileFlag, selectorFlag string, args []string) bool {
-	if strings.TrimSpace(serverFlag) != "" || strings.TrimSpace(profileFlag) != "" || strings.TrimSpace(selectorFlag) != "" {
+func statusSelectionExplicit(serverFlag, profileFlag, selectorFlag, transportFlag string, args []string) bool {
+	if strings.TrimSpace(serverFlag) != "" || strings.TrimSpace(profileFlag) != "" || strings.TrimSpace(selectorFlag) != "" || strings.TrimSpace(transportFlag) != "" {
 		return true
 	}
 	return len(args) > 0
@@ -235,7 +243,29 @@ func deriveConnectionStatus(sessionAlive bool, interfacePresent bool) string {
 }
 
 func formatProfile(profile model.Profile) string {
-	return fmt.Sprintf("%s | %s | %s | %s", profile.ID, profile.DisplayName(), profile.Endpoint(), profile.Network)
+	return fmt.Sprintf("%s | %s | %s | %s", profile.ID, profile.DisplayName(), profile.Endpoint(), profileTransport(profile))
+}
+
+func formatSessionProfile(current *session.CurrentSession) string {
+	if current == nil || current.ProfileID == "" {
+		return ""
+	}
+	parts := []string{current.ProfileID}
+	if strings.TrimSpace(current.ProfileName) != "" {
+		parts = append(parts, current.ProfileName)
+	}
+	if strings.TrimSpace(current.ProfileEndpoint) != "" {
+		parts = append(parts, current.ProfileEndpoint)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func profileTransport(profile model.Profile) string {
+	transport := strings.TrimSpace(profile.Network)
+	if transport == "" {
+		return "tcp"
+	}
+	return transport
 }
 
 func stateLabel(state bool) string {

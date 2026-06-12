@@ -140,13 +140,16 @@ func TestActiveStatusSelectionKeepsCurrentWhenMultipleSessionsActive(t *testing.
 }
 
 func TestStatusSelectionExplicit(t *testing.T) {
-	if !statusSelectionExplicit("freedom", "", "", nil) {
+	if !statusSelectionExplicit("freedom", "", "", "", nil) {
 		t.Fatal("server flag should make status selection explicit")
 	}
-	if !statusSelectionExplicit("", "", "", []string{"freedom"}) {
+	if !statusSelectionExplicit("", "", "", "", []string{"freedom"}) {
 		t.Fatal("positional server should make status selection explicit")
 	}
-	if statusSelectionExplicit("", "", "", nil) {
+	if !statusSelectionExplicit("", "", "", "grpc", nil) {
+		t.Fatal("transport flag should make status selection explicit")
+	}
+	if statusSelectionExplicit("", "", "", "", nil) {
 		t.Fatal("empty selection should not be explicit")
 	}
 }

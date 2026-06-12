@@ -22,6 +22,7 @@ type startOptions struct {
 	serverName      string
 	configProfile   string
 	profileSelector string
+	transport       string
 	outputPath      string
 	refresh         bool
 	refreshSet      bool
@@ -56,9 +57,10 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	}
 
 	cfg, selection, err := loadEffectiveConfig(options.configPath, config.SelectionOptions{
-		Server:   options.serverName,
-		Profile:  options.configProfile,
-		Selector: options.profileSelector,
+		Server:    options.serverName,
+		Profile:   options.configProfile,
+		Selector:  options.profileSelector,
+		Transport: options.transport,
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
@@ -131,7 +133,8 @@ func (a *App) runReconnect(args []string) int {
 	configPath := fs.String("config", "", "Path to config file")
 	serverName := fs.String("server", "", "Configured VLESS server name")
 	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
-	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, transport, or substring")
+	transport := fs.String("transport", "", "Subscription profile transport: tcp or grpc")
 	outputPath := fs.String("output", "", "Override render.output_path")
 	refresh := fs.Bool("refresh", true, "Fetch subscription before rendering and reconnecting")
 	force := fs.Bool("force", false, "Escalate from SIGTERM to SIGKILL if sing-box does not stop in time")
@@ -145,6 +148,7 @@ func (a *App) runReconnect(args []string) int {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		return 2
 	}
+	selectionOptions.Transport = strings.TrimSpace(*transport)
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
@@ -171,6 +175,7 @@ func (a *App) runReconnect(args []string) int {
 		serverName:      selectionOptions.Server,
 		configProfile:   selectionOptions.Profile,
 		profileSelector: selectionOptions.Selector,
+		transport:       firstNonEmptyLocal(selectionOptions.Transport, *transport),
 		outputPath:      *outputPath,
 		refresh:         *refresh,
 		refreshSet:      true,
@@ -292,7 +297,8 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 	configPath := fs.String("config", "", "Path to config file")
 	serverName := fs.String("server", "", "Configured VLESS server name")
 	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
-	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, transport, or substring")
+	transport := fs.String("transport", "", "Subscription profile transport: tcp or grpc")
 	outputPath := fs.String("output", "", "Override render.output_path")
 	refresh := fs.Bool("refresh", refreshDefault, "Fetch subscription before rendering and starting")
 
@@ -316,6 +322,7 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 		serverName:      selectionOptions.Server,
 		configProfile:   selectionOptions.Profile,
 		profileSelector: selectionOptions.Selector,
+		transport:       firstNonEmptyLocal(selectionOptions.Transport, *transport),
 		outputPath:      *outputPath,
 		refresh:         *refresh,
 		refreshSet:      refreshSet,
@@ -328,9 +335,12 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		return preparedStart{}, err
 	}
 
-	profile, err := subscription.SelectProfile(snapshot.Profiles, cfg.DefaultProfileSelector())
+	profile, err := subscription.SelectProfileWithOptions(snapshot.Profiles, subscription.SelectOptions{
+		Selector:  cfg.DefaultProfileSelector(),
+		Transport: cfg.DefaultProfileTransport(),
+	})
 	if err != nil {
-		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), options, effectiveStartRefresh(cfg, options))
+		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options, effectiveStartRefresh(cfg, options))
 	}
 
 	renderOptions := resolveRenderOptions(cfg.NetworkMode())
@@ -396,10 +406,13 @@ func (options startOptions) withEffectiveSelection(selection config.EffectiveSel
 	if strings.TrimSpace(options.profileSelector) == "" {
 		options.profileSelector = selection.Selector
 	}
+	if strings.TrimSpace(options.transport) == "" {
+		options.transport = selection.Transport
+	}
 	return options
 }
 
-func formatProfileSelectionError(cause error, profiles []model.Profile, selector string, options startOptions, refreshed bool) error {
+func formatProfileSelectionError(cause error, profiles []model.Profile, selector string, transport string, options startOptions, refreshed bool) error {
 	var builder strings.Builder
 	sourceLabel := "cached"
 	if refreshed {
@@ -418,6 +431,10 @@ func formatProfileSelectionError(cause error, profiles []model.Profile, selector
 	if trimmedSelector != "" {
 		fmt.Fprintf(&builder, "\nselector: %s", trimmedSelector)
 	}
+	trimmedTransport := strings.TrimSpace(transport)
+	if trimmedTransport != "" {
+		fmt.Fprintf(&builder, "\ntransport: %s", trimmedTransport)
+	}
 	if cause != nil {
 		fmt.Fprintf(&builder, "\nreason: %v", cause)
 	}
@@ -432,9 +449,10 @@ func formatProfileSelectionError(cause error, profiles []model.Profile, selector
 		}
 	}
 	if serverName != "" && configProfile != "" {
-		fmt.Fprintf(&builder, "\n\nupdate config: servers.%s.profiles.%s.selector = \"<id, name, endpoint, or substring from available profiles>\"", serverName, configProfile)
+		fmt.Fprintf(&builder, "\n\nupdate config: servers.%s.profiles.%s.transport = \"tcp\" or \"grpc\", and add selector when transport is ambiguous", serverName, configProfile)
+		fmt.Fprintf(&builder, "\nor update config: servers.%s.profiles.%s.selector = \"<id, name, endpoint, transport, or substring from available profiles>\"", serverName, configProfile)
 	} else {
-		builder.WriteString("\n\nupdate the selected profile selector in config")
+		builder.WriteString("\n\nupdate the selected profile selector or transport in config")
 	}
 	if serverName != "" {
 		fmt.Fprintf(&builder, "\nor run: vless-tun list %s", serverName)

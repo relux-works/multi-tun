@@ -129,21 +129,51 @@ func ParseVLESSURI(raw string) (model.Profile, error) {
 	return profile, nil
 }
 
+type SelectOptions struct {
+	Selector  string
+	Transport string
+}
+
 func SelectProfile(profiles []model.Profile, selector string) (model.Profile, error) {
+	return SelectProfileWithOptions(profiles, SelectOptions{Selector: selector})
+}
+
+func SelectProfileWithOptions(profiles []model.Profile, options SelectOptions) (model.Profile, error) {
 	if len(profiles) == 0 {
 		return model.Profile{}, errors.New("no profiles available")
 	}
-	selector = strings.TrimSpace(selector)
-	if selector == "" {
-		return defaultProfile(profiles), nil
+
+	selector := strings.TrimSpace(options.Selector)
+	transport := normalizeProfileTransport(options.Transport)
+	candidates := profiles
+	if transport != "" {
+		candidates = filterProfilesByTransport(profiles, transport)
+		if len(candidates) == 0 {
+			return model.Profile{}, fmt.Errorf("profile transport %q did not match any profile", strings.TrimSpace(options.Transport))
+		}
 	}
 
+	if selector == "" {
+		if len(candidates) == 1 {
+			return candidates[0], nil
+		}
+		if transport != "" {
+			return model.Profile{}, fmt.Errorf("profile transport %q matched multiple profiles; configure selector", strings.TrimSpace(options.Transport))
+		}
+		return model.Profile{}, errors.New("multiple subscription profiles available; configure selector or transport")
+	}
+
+	return selectProfileFromCandidates(candidates, selector)
+}
+
+func selectProfileFromCandidates(profiles []model.Profile, selector string) (model.Profile, error) {
 	needle := strings.ToLower(selector)
 	exactMatches := make([]model.Profile, 0, 1)
 	for _, profile := range profiles {
 		if lowerExactProfileKey(profile) == needle ||
 			strings.ToLower(profile.ID) == needle ||
-			strings.ToLower(profile.DisplayName()) == needle {
+			strings.ToLower(profile.DisplayName()) == needle ||
+			profileTransport(profile) == needle {
 			exactMatches = append(exactMatches, profile)
 		}
 	}
@@ -172,14 +202,26 @@ func SelectProfile(profiles []model.Profile, selector string) (model.Profile, er
 	return model.Profile{}, fmt.Errorf("profile selector %q did not match any profile", selector)
 }
 
-func defaultProfile(profiles []model.Profile) model.Profile {
+func filterProfilesByTransport(profiles []model.Profile, transport string) []model.Profile {
+	matches := make([]model.Profile, 0, len(profiles))
 	for _, profile := range profiles {
-		switch strings.ToLower(strings.TrimSpace(profile.Network)) {
-		case "", "tcp":
-			return profile
+		if profileTransport(profile) == transport {
+			matches = append(matches, profile)
 		}
 	}
-	return profiles[0]
+	return matches
+}
+
+func profileTransport(profile model.Profile) string {
+	transport := normalizeProfileTransport(profile.Network)
+	if transport == "" {
+		return "tcp"
+	}
+	return transport
+}
+
+func normalizeProfileTransport(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func lowerExactProfileKey(profile model.Profile) string {

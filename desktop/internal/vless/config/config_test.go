@@ -545,6 +545,85 @@ func TestEffectiveServerOverrideDoesNotReuseCurrentProfileFromDifferentServer(t 
 	}
 }
 
+func TestEffectiveUsesConfiguredProfileTransport(t *testing.T) {
+	t.Parallel()
+
+	cfg := multiProfileServerSelectionConfig()
+	dance := cfg.Servers["dance"]
+	dance.Profiles["default"] = ProfileConfig{
+		Transport: "grpc",
+	}
+	cfg.Servers["dance"] = dance
+
+	effective, selection, err := cfg.Effective(SelectionOptions{Server: "dance"})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if got, want := selection.Transport, "grpc"; got != want {
+		t.Fatalf("selection.Transport = %q, want %q", got, want)
+	}
+	if got, want := effective.DefaultProfileTransport(), "grpc"; got != want {
+		t.Fatalf("DefaultProfileTransport() = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveTransportOverrideWinsOverConfiguredProfileTransport(t *testing.T) {
+	t.Parallel()
+
+	cfg := multiProfileServerSelectionConfig()
+	dance := cfg.Servers["dance"]
+	dance.Profiles["default"] = ProfileConfig{
+		Transport: "grpc",
+	}
+	cfg.Servers["dance"] = dance
+
+	effective, selection, err := cfg.Effective(SelectionOptions{Server: "dance", Transport: "tcp"})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if got, want := selection.Transport, "tcp"; got != want {
+		t.Fatalf("selection.Transport = %q, want %q", got, want)
+	}
+	if got, want := effective.DefaultProfileTransport(), "tcp"; got != want {
+		t.Fatalf("DefaultProfileTransport() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadRejectsUnknownProfileTransport(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "current": {"server": "dance", "profile": "default"},
+  "servers": {
+    "dance": {
+      "source": {"mode": "proxy", "url": "https://example.com/dance"},
+      "cache_dir": "/tmp/vless-dance",
+      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
+      "engine": {"type": "sing-box"},
+      "profiles": {"default": {"transport": "grcp"}}
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
+  },
+  "dns": {
+    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want transport validation error")
+	}
+	if !strings.Contains(err.Error(), "servers.dance.profiles.default.transport must be one of: tcp, grpc") {
+		t.Fatalf("Load() error = %q, want transport validation", err)
+	}
+}
+
 func TestEffectiveServerOverrideRequiresProfileForMultiProfileByDefault(t *testing.T) {
 	t.Parallel()
 
