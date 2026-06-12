@@ -669,7 +669,7 @@ Field reference:
 - `servers.<name>.cache_dir`: local runtime/cache directory for that server's refresh snapshots, session logs, and runtime metadata
 - `servers.<name>.artifacts.singbox_config_path`: generated sing-box config path for that server
 - `servers.<name>.artifacts.xray_config_path`: generated Xray sidecar config path for `engine.type=xray`; if omitted, the path is derived from the sing-box config name
-- `servers.<name>.profiles.<profile>.selector`: optional selector by exact id, exact name, endpoint, or substring when the source resolves to multiple remote profiles; empty means first profile
+- `servers.<name>.profiles.<profile>.selector`: optional selector by exact id, exact name, endpoint, or substring when the source resolves to multiple remote profiles; empty enables automatic selection, preferring a stable `tcp`/no-transport profile before falling back to provider order
 - `servers.<name>.engine.type`: required runtime engine for each configured server in multi-server configs; valid values are `sing-box` and `xray`
 - `engine` may also exist globally or per profile for shared settings and overrides, but every `servers.<name>` block still needs its own explicit `engine.type`
 - `engine.xray.executable`: Xray binary name or absolute path. The binary must be installed and runnable before `start` or `reconnect`
@@ -789,7 +789,7 @@ go build -o cisco-dump ./desktop/cmd/cisco-dump
 ## Notes
 
 - This version manages the local `sing-box` session lifecycle with `start`, `status`, `stop`, and a configurable privileged TUN backend for macOS.
-- `start` refreshes the selected provider subscription before rendering by default, so both selector-less auto profiles and explicit profile aliases follow provider-side endpoint changes. `--refresh=false` is the explicit cached fallback for offline starts.
+- `start` refreshes the selected provider subscription before rendering by default, so both selector-less auto profiles and explicit profile aliases follow provider-side endpoint changes. Selector-less auto profiles prefer `tcp`/no-transport entries when a provider exposes multiple transports, while explicit selectors can still choose `grpc` or any other supported profile. `--refresh=false` is the explicit cached fallback for offline starts.
 - `reconnect` is the "restart with latest config" path: it rereads local config, stops any recorded VLESS session across configured server cache directories, refreshes the subscription by default, rerenders, and starts the selected session.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.

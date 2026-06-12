@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"multi-tun/desktop/internal/vless/model"
 )
 
 func TestNormalizePayloadPlain(t *testing.T) {
@@ -114,5 +116,80 @@ func TestSelectProfile(t *testing.T) {
 	}
 	if got, want := profile.Port, 8444; got != want {
 		t.Fatalf("profile.Port = %d, want %d", got, want)
+	}
+}
+
+func TestSelectProfileEmptySelectorPrefersTCP(t *testing.T) {
+	t.Parallel()
+
+	profiles := []model.Profile{
+		{
+			ID:      "grpc",
+			Name:    "provider grpc default",
+			Host:    "example.com",
+			Port:    8443,
+			Network: "grpc",
+		},
+		{
+			ID:      "tcp",
+			Name:    "provider tcp backup",
+			Host:    "example.com",
+			Port:    8444,
+			Network: "tcp",
+		},
+	}
+
+	profile, err := SelectProfile(profiles, "")
+	if err != nil {
+		t.Fatalf("SelectProfile returned error: %v", err)
+	}
+	if got, want := profile.ID, "tcp"; got != want {
+		t.Fatalf("profile.ID = %q, want %q", got, want)
+	}
+}
+
+func TestSelectProfileWhitespaceSelectorPrefersTCP(t *testing.T) {
+	t.Parallel()
+
+	profiles := []model.Profile{
+		{ID: "grpc", Host: "example.com", Port: 8443, Network: "grpc"},
+		{ID: "tcp", Host: "example.com", Port: 8444, Network: "tcp"},
+	}
+
+	profile, err := SelectProfile(profiles, " \t\n ")
+	if err != nil {
+		t.Fatalf("SelectProfile returned error: %v", err)
+	}
+	if got, want := profile.ID, "tcp"; got != want {
+		t.Fatalf("profile.ID = %q, want %q", got, want)
+	}
+}
+
+func TestSelectProfileExplicitSelectorCanChooseGRPC(t *testing.T) {
+	t.Parallel()
+
+	profiles := []model.Profile{
+		{
+			ID:      "grpc",
+			Name:    "provider grpc default",
+			Host:    "example.com",
+			Port:    8443,
+			Network: "grpc",
+		},
+		{
+			ID:      "tcp",
+			Name:    "provider tcp backup",
+			Host:    "example.com",
+			Port:    8444,
+			Network: "tcp",
+		},
+	}
+
+	profile, err := SelectProfile(profiles, "grpc")
+	if err != nil {
+		t.Fatalf("SelectProfile returned error: %v", err)
+	}
+	if got, want := profile.ID, "grpc"; got != want {
+		t.Fatalf("profile.ID = %q, want %q", got, want)
 	}
 }

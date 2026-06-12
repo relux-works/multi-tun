@@ -38,6 +38,7 @@ Build local CLIs and agent guidance that can:
 
 - Extract profile name, host, port, UUID, network type, TLS/Reality settings, transport details, and diagnostic VLESS query fields such as `encryption` and `spx`.
 - Select an active configured server/profile through `current.server` and `current.profile`, with CLI overrides for `--server`, `--profile`, and direct subscription `--selector`.
+- When a configured profile has no selector and the subscription exposes multiple transports, prefer a stable `tcp`/no-transport profile before falling back to provider order; explicit selectors must still be able to choose `grpc` or any other supported profile.
 - Keep remote VLESS profiles in the refresh cache; config profile entries are local aliases/selectors plus routing policy, not copied subscription payloads.
 
 ### Engine Selection
