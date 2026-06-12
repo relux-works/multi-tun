@@ -66,6 +66,7 @@ type SelectionOptions struct {
 	Server              string
 	Profile             string
 	Selector            string
+	Transport           string
 	AllowMissingProfile bool
 }
 
@@ -73,6 +74,7 @@ type EffectiveSelection struct {
 	Server          string
 	Profile         string
 	Selector        string
+	Transport       string
 	UsesServerModel bool
 }
 
@@ -92,11 +94,13 @@ type ServerConfig struct {
 }
 
 type ProfileConfig struct {
-	Selector        string         `json:"selector,omitempty"`
-	ProfileSelector string         `json:"profile_selector,omitempty"`
-	Routing         *RoutingConfig `json:"routing,omitempty"`
-	Engine          *EngineConfig  `json:"engine,omitempty"`
-	Singbox         *SingboxConfig `json:"singbox,omitempty"`
+	Selector           string         `json:"selector,omitempty"`
+	ProfileSelector    string         `json:"profile_selector,omitempty"`
+	Transport          string         `json:"transport,omitempty"`
+	PreferredTransport string         `json:"preferred_transport,omitempty"`
+	Routing            *RoutingConfig `json:"routing,omitempty"`
+	Engine             *EngineConfig  `json:"engine,omitempty"`
+	Singbox            *SingboxConfig `json:"singbox,omitempty"`
 }
 
 type SourceConfig struct {
@@ -106,6 +110,7 @@ type SourceConfig struct {
 
 type DefaultConfig struct {
 	ProfileSelector string `json:"profile_selector,omitempty"`
+	Transport       string `json:"transport,omitempty"`
 }
 
 type NetworkConfig struct {
@@ -442,6 +447,9 @@ func (c ProjectConfig) Validate() error {
 	if err := c.validateExplicitServerEngines(); err != nil {
 		return err
 	}
+	if err := c.validateConfiguredTransports(); err != nil {
+		return err
+	}
 	effective, _, err := c.Effective(SelectionOptions{AllowMissingProfile: true})
 	if err != nil {
 		return err
@@ -465,6 +473,29 @@ func (c ProjectConfig) validateExplicitServerEngines() error {
 		}
 	}
 	return nil
+}
+
+func (c ProjectConfig) validateConfiguredTransports() error {
+	if err := validateTransportValue("default.transport", c.legacyDefaultProfileTransport()); err != nil {
+		return err
+	}
+	for serverName, server := range c.Servers {
+		for profileName, profile := range server.Profiles {
+			if err := validateTransportValue("servers."+serverName+".profiles."+profileName+".transport", profile.profileTransport()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateTransportValue(path, value string) error {
+	switch normalizeTransport(value) {
+	case "", "tcp", "grpc":
+		return nil
+	default:
+		return fmt.Errorf("%s must be one of: tcp, grpc", path)
+	}
 }
 
 func (c ProjectConfig) validateFlat() error {
@@ -533,9 +564,12 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 	if len(c.Servers) == 0 {
 		effective := c
 		selector := firstNonEmpty(options.Selector, options.Profile, c.legacyDefaultProfileSelector())
+		transport := firstNonEmpty(options.Transport, c.legacyDefaultProfileTransport())
 		effective.setDefaultProfileSelector(selector)
+		effective.setDefaultProfileTransport(transport)
 		return effective, EffectiveSelection{
-			Selector: selector,
+			Selector:  selector,
+			Transport: transport,
 		}, nil
 	}
 
@@ -561,18 +595,22 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 	effective.Singbox = mergeSingboxConfig(c.Singbox, serverCfg.Singbox)
 
 	selector := firstNonEmpty(options.Selector, c.legacyDefaultProfileSelector())
+	transport := firstNonEmpty(options.Transport, c.legacyDefaultProfileTransport())
 	if hasProfile {
 		effective.Routing = mergeRoutingConfig(effective.Routing, profileCfg.Routing)
 		effective.Engine = mergeEngineConfig(effective.Engine, profileCfg.Engine)
 		effective.Singbox = mergeSingboxConfig(effective.Singbox, profileCfg.Singbox)
 		selector = firstNonEmpty(options.Selector, profileCfg.Selector, profileCfg.ProfileSelector, c.legacyDefaultProfileSelector())
+		transport = firstNonEmpty(options.Transport, profileCfg.profileTransport(), c.legacyDefaultProfileTransport())
 	}
 	effective.setDefaultProfileSelector(selector)
+	effective.setDefaultProfileTransport(transport)
 
 	return effective, EffectiveSelection{
 		Server:          serverName,
 		Profile:         profileName,
 		Selector:        selector,
+		Transport:       transport,
 		UsesServerModel: true,
 	}, nil
 }
@@ -841,6 +879,13 @@ func (c ProjectConfig) legacyDefaultProfileSelector() string {
 	return strings.TrimSpace(c.SelectedProfile)
 }
 
+func (c ProjectConfig) legacyDefaultProfileTransport() string {
+	if c.Default != nil {
+		return normalizeTransport(c.Default.Transport)
+	}
+	return ""
+}
+
 func (c *ProjectConfig) setDefaultProfileSelector(selector string) {
 	selector = strings.TrimSpace(selector)
 	c.SelectedProfile = ""
@@ -854,6 +899,28 @@ func (c *ProjectConfig) setDefaultProfileSelector(selector string) {
 		c.Default = &DefaultConfig{}
 	}
 	c.Default.ProfileSelector = selector
+}
+
+func (c *ProjectConfig) setDefaultProfileTransport(transport string) {
+	transport = normalizeTransport(transport)
+	if transport == "" {
+		if c.Default != nil {
+			c.Default.Transport = ""
+		}
+		return
+	}
+	if c.Default == nil {
+		c.Default = &DefaultConfig{}
+	}
+	c.Default.Transport = transport
+}
+
+func (p ProfileConfig) profileTransport() string {
+	return firstNonEmpty(normalizeTransport(p.Transport), normalizeTransport(p.PreferredTransport))
+}
+
+func normalizeTransport(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
@@ -910,6 +977,13 @@ func (c ProjectConfig) DefaultProfileSelector() string {
 		return effective.DefaultProfileSelector()
 	}
 	return c.legacyDefaultProfileSelector()
+}
+
+func (c ProjectConfig) DefaultProfileTransport() string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.DefaultProfileTransport()
+	}
+	return c.legacyDefaultProfileTransport()
 }
 
 func (c ProjectConfig) NetworkMode() string {

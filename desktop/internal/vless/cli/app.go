@@ -107,7 +107,7 @@ func (a *App) runSetup(args []string) int {
 	configPath := fs.String("config", "", "Path to config file")
 	sourceURL := fs.String("source-url", os.Getenv("DANCEVPN_SUBSCRIPTION_URL"), "VLESS source URL or literal vless:// URI")
 	sourceMode := fs.String("source-mode", "", "Optional source mode override: proxy or direct")
-	profileSelector := fs.String("profile", "", "Optional default profile selector by id, name, or substring")
+	profileSelector := fs.String("profile", "", "Optional default profile selector by id, name, endpoint, transport, or substring")
 	serverName := fs.String("server", "default", "Configured VLESS server name to create")
 	configProfile := fs.String("config-profile", "default", "Configured VLESS profile alias to create")
 	force := fs.Bool("force", false, "Overwrite config if it already exists")
@@ -273,7 +273,8 @@ func (a *App) runRender(args []string) int {
 	configPath := fs.String("config", "", "Path to config file")
 	serverName := fs.String("server", "", "Configured VLESS server name")
 	profileName := fs.String("profile", "", "Configured VLESS profile alias; in legacy flat configs this remains a profile selector")
-	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, transport, or substring")
+	transport := fs.String("transport", "", "Subscription profile transport: tcp or grpc")
 	outputPath := fs.String("output", "", "Override render.output_path")
 	refresh := fs.Bool("refresh", false, "Fetch subscription before rendering")
 
@@ -285,6 +286,7 @@ func (a *App) runRender(args []string) int {
 		fmt.Fprintf(a.stderr, "render failed: %v\n", err)
 		return 2
 	}
+	selectionOptions.Transport = strings.TrimSpace(*transport)
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
 	if err != nil {
@@ -300,6 +302,7 @@ func (a *App) runRender(args []string) int {
 		serverName:      selectionOptions.Server,
 		configProfile:   selectionOptions.Profile,
 		profileSelector: selectionOptions.Selector,
+		transport:       selectionOptions.Transport,
 		outputPath:      *outputPath,
 		refresh:         *refresh,
 		refreshSet:      true,
@@ -467,13 +470,13 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path] [--server name | server]")
 	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--server name | server] [--refresh]")
 	fmt.Fprintln(a.stdout, "  vless-tun set-current [--config path] [--server name | server [profile]] [--profile name]")
-	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh] [--timeout duration] [--force]")
+	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--refresh]")
 	fmt.Fprintln(a.stdout, "  vless-tun diagnose [tunnel] [--config path]")
-	fmt.Fprintln(a.stdout, "  vless-tun diagnose config [--config path] [--server name | server [profile]] [--profile name] [--selector selector]")
+	fmt.Fprintln(a.stdout, "  vless-tun diagnose config [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc]")
 	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [server] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
 	fmt.Fprintln(a.stdout, "  run -> start")

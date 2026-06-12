@@ -36,9 +36,9 @@ Build local CLIs and agent guidance that can:
 
 ### Profile Model
 
-- Extract profile name, host, port, UUID, network type, TLS/Reality settings, transport details, and diagnostic VLESS query fields such as `encryption` and `spx`.
-- Select an active configured server/profile through `current.server` and `current.profile`, with CLI overrides for `--server`, `--profile`, and direct subscription `--selector`.
-- When a configured profile has no selector and the subscription exposes multiple transports, prefer a stable `tcp`/no-transport profile before falling back to provider order; explicit selectors must still be able to choose `grpc` or any other supported profile.
+- Extract profile name, host, port, UUID, VLESS transport type, TLS/Reality settings, transport details, and diagnostic VLESS query fields such as `encryption` and `spx`.
+- Select an active configured server/profile through `current.server` and `current.profile`, with CLI overrides for `--server`, `--profile`, direct subscription `--selector`, and explicit `--transport tcp|grpc`.
+- When a configured profile has no selector and the subscription exposes multiple remote profiles, require an explicit `transport` or `selector` instead of falling back to provider order.
 - Keep remote VLESS profiles in the refresh cache; config profile entries are local aliases/selectors plus routing policy, not copied subscription payloads.
 
 ### Engine Selection
@@ -70,7 +70,7 @@ Build local CLIs and agent guidance that can:
   - split DNS/direct routing when suffix bypasses are configured
     - `.ru` and `.xn--p1ai` use direct DNS and direct outbound
     - everything else uses proxy DNS and proxy outbound
-- Support `tun` as the only transport style.
+- Support `tun` as the only tunnel interface mode.
 - For `tun` mode on macOS, support privileged launch strategies:
   - `sudo` / direct process execution
   - shared `vpn-core` daemon management for persistent real-TUN sessions

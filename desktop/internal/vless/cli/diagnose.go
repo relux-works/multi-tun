@@ -3,6 +3,7 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"strings"
 
 	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
@@ -80,7 +81,8 @@ func (a *App) runDiagnoseConfig(args []string) int {
 	configPath := fs.String("config", "", "Path to config file")
 	serverName := fs.String("server", "", "Configured VLESS server name")
 	profileName := fs.String("profile", "", "Configured VLESS profile alias")
-	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, or substring")
+	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, transport, or substring")
+	transport := fs.String("transport", "", "Subscription profile transport: tcp or grpc")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -89,6 +91,7 @@ func (a *App) runDiagnoseConfig(args []string) int {
 		fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
 		return 2
 	}
+	selectionOptions.Transport = strings.TrimSpace(*transport)
 	selectionOptions.AllowMissingProfile = true
 
 	cfg, selection, err := loadEffectiveConfig(*configPath, selectionOptions)
@@ -107,6 +110,9 @@ func (a *App) runDiagnoseConfig(args []string) int {
 	}
 	if selection.Selector != "" {
 		fmt.Fprintf(a.stdout, "profile_selector: %s\n", selection.Selector)
+	}
+	if selection.Transport != "" {
+		fmt.Fprintf(a.stdout, "profile_transport: %s\n", selection.Transport)
 	}
 	fmt.Fprintf(a.stdout, "source_mode: %s\n", cfg.SourceMode())
 	fmt.Fprintf(a.stdout, "cache_dir: %s\n", cfg.CacheDir)
