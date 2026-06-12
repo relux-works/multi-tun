@@ -133,11 +133,12 @@ func SelectProfile(profiles []model.Profile, selector string) (model.Profile, er
 	if len(profiles) == 0 {
 		return model.Profile{}, errors.New("no profiles available")
 	}
+	selector = strings.TrimSpace(selector)
 	if selector == "" {
-		return profiles[0], nil
+		return defaultProfile(profiles), nil
 	}
 
-	needle := strings.ToLower(strings.TrimSpace(selector))
+	needle := strings.ToLower(selector)
 	exactMatches := make([]model.Profile, 0, 1)
 	for _, profile := range profiles {
 		if lowerExactProfileKey(profile) == needle ||
@@ -169,6 +170,16 @@ func SelectProfile(profiles []model.Profile, selector string) (model.Profile, er
 	}
 
 	return model.Profile{}, fmt.Errorf("profile selector %q did not match any profile", selector)
+}
+
+func defaultProfile(profiles []model.Profile) model.Profile {
+	for _, profile := range profiles {
+		switch strings.ToLower(strings.TrimSpace(profile.Network)) {
+		case "", "tcp":
+			return profile
+		}
+	}
+	return profiles[0]
 }
 
 func lowerExactProfileKey(profile model.Profile) string {

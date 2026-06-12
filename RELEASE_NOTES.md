@@ -1,5 +1,42 @@
 # Release Notes
 
+## v1.3.4 - Selectorless Dance TCP profile fallback
+
+Tag: `v1.3.4`
+Base tag: `v1.3.3`
+
+This release fixes a selectorless VLESS profile-selection failure mode observed on the Dance provider. The subscription currently lists a gRPC transport before a TCP/no-transport entry; selectorless startup used to pick the first provider entry, which selected the gRPC profile and correlated with a severe long-running `sing-box` CPU/RSS storm.
+
+### Highlights
+
+- Empty or whitespace profile selectors now prefer a stable `tcp`/no-transport profile before falling back to provider order.
+- Explicit selectors still work for `grpc` and other supported profiles.
+- Dance selectorless `default` now renders `152.53.107.138:8444 | tcp` instead of `152.53.107.138:8443 | grpc`.
+- README and SPEC now document selectorless automatic profile selection semantics.
+
+### Operational notes
+
+- Existing configs do not need migration.
+- If a provider has only gRPC profiles, selectorless selection still falls back to provider order.
+- Operators can still pin a specific profile through `servers.<name>.profiles.<profile>.selector`.
+
+### Validation performed for this release
+
+```bash
+go test ./desktop/internal/vless/subscription
+go test ./desktop/internal/vless/subscription ./desktop/internal/vless/config ./desktop/internal/vless/cli ./desktop/internal/vless/singbox
+go test ./...
+git diff --check
+sing-box check -c .temp/BUG-260612-pjbw1n/rendered-dance-postfix.json
+vless-tun reconnect dance
+vless-tun status dance
+```
+
+Live post-reconnect evidence:
+
+- previous `sing-box` PID `54614`: `476.6%` CPU, `6880224 KB` RSS, selected `8443 | grpc`
+- new `sing-box` PID `76128`: near-idle CPU, about `47088 KB` RSS, selected `8444 | tcp`
+
 ## v1.3.3 - Bounded VLESS runtime logging
 
 Tag: `v1.3.3`
