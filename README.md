@@ -799,3 +799,20 @@ go build -o cisco-dump ./desktop/cmd/cisco-dump
 - Generated config now includes `route.default_domain_resolver`, which `sing-box 1.13.x` expects as part of the DNS resolver migration path.
 - Every `start` gets its own timestamped log file so later debugging has a stable artifact even if the next session behaves differently.
 - The bypass rule is intentionally domain-suffix based because the original user requirement was `*.ru`. If later you want IP or community rulesets, extend the renderer rather than hardcoding provider-specific blobs.
+
+<!-- relux-ecosystem:start -->
+
+## About Relux Works
+
+This project is part of the open-source ecosystem of
+[Relux Works](https://relux.works), an AI-native software development studio.
+We build fixed-price MVPs, rescue vibe-coded apps, run local AI inference, and
+train teams to work with coding agents — and we open-source much of the
+infrastructure behind it.
+
+- Full catalog: [relux.works/en/open-source](https://relux.works/en/open-source/)
+- Agentic enablement: [agent harnesses & team training](https://relux.works/en/agentic-enablement/)
+- Hire us the agent-native way — point your assistant at `https://api.relux.works/mcp`
+- Contact: ivan@relux.works
+
+<!-- relux-ecosystem:end -->
