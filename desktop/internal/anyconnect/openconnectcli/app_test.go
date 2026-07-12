@@ -55,6 +55,47 @@ func TestResolveCredentials_UsesKeychainBackedUsernamePasswordAndTOTP(t *testing
 	}
 }
 
+func TestHelperStatusPrintsVPNCoreRequestSnapshot(t *testing.T) {
+	previous := inspectPrivilegedHelperOpenConnectCLI
+	inspectPrivilegedHelperOpenConnectCLI = func(openconnect.PrivilegedHelperConfig) (openconnect.PrivilegedHelperStatus, error) {
+		return openconnect.PrivilegedHelperStatus{
+			Label:      "works.relux.vpn-core",
+			PlistPath:  "/Library/LaunchDaemons/works.relux.vpn-core.plist",
+			SocketPath: "/var/run/works.relux.vpn-core.sock",
+			Reachable:  true,
+			DaemonPID:  42,
+			HelperSnapshot: &openconnect.HelperSnapshot{
+				ActiveRequests: []openconnect.RequestSnapshot{{Action: "run", AgeMillis: 5100}},
+				QueuedRequests: []openconnect.RequestSnapshot{},
+				LastCompletedRequest: &openconnect.CompletedRequestSnapshot{
+					Action:         "signal",
+					Outcome:        "ok",
+					DurationMillis: 1,
+					AgeMillis:      9,
+				},
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		inspectPrivilegedHelperOpenConnectCLI = previous
+	})
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"helper", "status"})
+	if exitCode != 0 {
+		t.Fatalf("helper status exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	for _, want := range []string{
+		"active_requests: run(age=5100ms)",
+		"queued_requests: none",
+		"last_completed_request: signal(outcome=ok,duration=1ms,age=9ms)",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("helper status output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
 func TestRunSetupWritesConfigAndSeedsKeychainPlaceholders(t *testing.T) {
 	originalSet := keychainSetWithOptions
 	originalExists := keychainExists

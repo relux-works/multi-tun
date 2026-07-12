@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,38 @@ import (
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 )
+
+func TestStartWithVPNCorePropagatesTimeoutSnapshotWithoutPayload(t *testing.T) {
+	previous := vpnCoreSpawnDetachedSession
+	timeoutErr := errors.New("vpn core rpc spawn timed out after 5s; helper snapshot: state=reachable daemon_pid=42 active_requests=spawn(age=5000ms) queued_requests=none last_completed_request=signal(outcome=ok,duration=1ms,age=12ms)")
+	var capturedCommand []string
+	vpnCoreSpawnDetachedSession = func(command []string, _ string, _ int, _ bool) (int, error) {
+		capturedCommand = append([]string(nil), command...)
+		return 0, timeoutErr
+	}
+	t.Cleanup(func() {
+		vpnCoreSpawnDetachedSession = previous
+	})
+
+	secretConfigPath := "/tmp/credential-secret-vless.json"
+	_, err := startWithVPNCore(CurrentSession{
+		ConfigPath:  secretConfigPath,
+		LogPath:     "/tmp/credential-secret-vless.log",
+		LogMaxLines: 100,
+	}, "/usr/local/bin/sing-box-secret")
+	if !errors.Is(err, timeoutErr) {
+		t.Fatalf("startWithVPNCore() error = %v, want wrapped timeout", err)
+	}
+	if !strings.Contains(err.Error(), "vpn core spawn: vpn core rpc spawn timed out") || !strings.Contains(err.Error(), "helper snapshot: state=reachable") {
+		t.Fatalf("startWithVPNCore() error missing helper snapshot: %v", err)
+	}
+	if strings.Contains(err.Error(), secretConfigPath) || strings.Contains(err.Error(), "credential-secret") {
+		t.Fatalf("startWithVPNCore() error leaked payload: %v", err)
+	}
+	if !strings.Contains(strings.Join(capturedCommand, " "), secretConfigPath) {
+		t.Fatalf("test did not exercise secret-bearing RPC payload: command=%q", capturedCommand)
+	}
+}
 
 func TestSaveAndLoadCurrent(t *testing.T) {
 	t.Parallel()
