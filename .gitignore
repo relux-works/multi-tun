@@ -22,6 +22,8 @@
 .cache/
 configs/local.json
 configs/generated/
+scripts/mac-deploy/config/
+scripts/mac-deploy/configs/
 
 # Generated local agent runtime
 .agents/

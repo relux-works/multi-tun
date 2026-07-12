@@ -70,6 +70,7 @@ The live egress loop is verified on a real Xiaomi device with a separate observe
 ./scripts/setup.sh
 ./scripts/setup.sh --mac-arch amd64
 ./scripts/deinit.sh --dry-run
+./scripts/mac-deploy/deploy-multi-tun.sh --config-bundle /path/to/config
 
 # edit ~/.config/vless-tun/config.json and set servers.<name>.source.url
 
@@ -120,6 +121,7 @@ Generated artifacts:
 | Tool | Used for | How to run | Outputs |
 | --- | --- | --- | --- |
 | `task-board` | File-based task tracking for repo work | `task-board q --format compact 'summary()'`, `task-board m 'set_notes(TASK-ID, text="...")'` | `.task-board/` |
+| `scripts/mac-deploy/deploy-multi-tun.sh` | Fresh install or git-based update of the macOS toolchain on another Mac, with optional local-only config bundle installation | `scripts/mac-deploy/deploy-multi-tun.sh --config-bundle /path/to/config` | target checkout under `~/src/multi-tun` by default; copied configs under `~/.config/`; backups beside replaced config files |
 | `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered runtime JSON |
 | `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
 | `vpn-core` | Privileged helper backend for tunnel startup and packet capture support; also includes a user-space VLESS subscription metadata probe | `vpn-core install`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | LaunchDaemon state, redacted request-health snapshot, helper logs under runtime cache paths |
