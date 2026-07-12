@@ -15,6 +15,8 @@ type App struct {
 	stderr io.Writer
 }
 
+var inspectServiceVPNCoreCLI = vpncore.InspectService
+
 func New(stdout, stderr io.Writer) *App {
 	return &App{stdout: stdout, stderr: stderr}
 }
@@ -64,7 +66,7 @@ func (a *App) runInstall(args []string) int {
 		return 1
 	}
 
-	status, err := vpncore.InspectService(cfg)
+	status, err := inspectServiceVPNCoreCLI(cfg)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
 		return 1
@@ -105,7 +107,7 @@ func (a *App) runStatus(args []string) int {
 		return 2
 	}
 
-	status, err := vpncore.InspectService(vpncore.DefaultServiceConfig())
+	status, err := inspectServiceVPNCoreCLI(vpncore.DefaultServiceConfig())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
 		return 1
@@ -120,6 +122,13 @@ func (a *App) runStatus(args []string) int {
 	if status.Reachable {
 		fmt.Fprintln(a.stdout, "state: reachable")
 		fmt.Fprintf(a.stdout, "daemon_pid: %d\n", status.DaemonPID)
+		if status.HelperSnapshot != nil {
+			fmt.Fprintf(a.stdout, "active_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.ActiveRequests))
+			fmt.Fprintf(a.stdout, "queued_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.QueuedRequests))
+			fmt.Fprintf(a.stdout, "last_completed_request: %s\n", vpncore.FormatCompletedRequestSnapshot(status.HelperSnapshot.LastCompletedRequest))
+		} else {
+			fmt.Fprintln(a.stdout, "request_diagnostics: unavailable")
+		}
 	} else {
 		fmt.Fprintln(a.stdout, "state: missing")
 	}

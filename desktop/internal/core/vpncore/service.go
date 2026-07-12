@@ -54,12 +54,16 @@ func InspectService(cfg ServiceConfig) (ServiceStatus, error) {
 }
 
 func inspectExactService(cfg ServiceConfig) (ServiceStatus, error) {
+	return inspectExactServiceWithTimeout(cfg, rpcResponseTimeoutVPNCore)
+}
+
+func inspectExactServiceWithTimeout(cfg ServiceConfig, timeout time.Duration) (ServiceStatus, error) {
 	status := ServiceStatus{
 		Label:      cfg.Label,
 		PlistPath:  cfg.PlistPath,
 		SocketPath: cfg.SocketPath,
 	}
-	resp, err := call(cfg, Request{Action: "ping"})
+	resp, err := callWithTimeout(cfg, Request{Action: "ping"}, timeout)
 	if err != nil {
 		if isUnavailable(err) {
 			return status, nil
@@ -68,6 +72,7 @@ func inspectExactService(cfg ServiceConfig) (ServiceStatus, error) {
 	}
 	status.Reachable = resp.OK
 	status.DaemonPID = resp.DaemonPID
+	status.HelperSnapshot = resp.HelperSnapshot
 	return status, nil
 }
 
@@ -140,6 +145,7 @@ func RunDaemon(cfg ServiceConfig, clientUID, clientGID int) error {
 		cfg:       cfg,
 		clientUID: clientUID,
 		clientGID: clientGID,
+		requests:  newRequestTracker(),
 	}
 	return daemon.serve()
 }
@@ -148,6 +154,7 @@ type serviceDaemon struct {
 	cfg       ServiceConfig
 	clientUID int
 	clientGID int
+	requests  *requestTracker
 }
 
 func (d serviceDaemon) serve() error {
@@ -186,7 +193,8 @@ func (d serviceDaemon) serve() error {
 				errCh <- err
 				return
 			}
-			go d.handleConn(conn)
+			requestID := d.requests.enqueue()
+			go d.handleConn(conn, requestID)
 		}
 	}()
 
@@ -201,18 +209,21 @@ func (d serviceDaemon) serve() error {
 	}
 }
 
-func (d serviceDaemon) handleConn(conn net.Conn) {
+func (d serviceDaemon) handleConn(conn net.Conn, requestID uint64) {
 	defer conn.Close()
 
 	var request Request
 	if err := json.NewDecoder(conn).Decode(&request); err != nil {
+		d.requests.abandon(requestID)
 		_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
 		return
 	}
+	d.requests.begin(requestID, request.Action)
 
 	response := Response{OK: true, DaemonPID: os.Getpid()}
 	switch request.Action {
 	case "ping":
+		response.HelperSnapshot = d.requests.snapshot()
 	case "run":
 		if err := handleRun(request); err != nil {
 			response.OK = false
@@ -235,6 +246,7 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 		response.OK = false
 		response.Error = fmt.Sprintf("unsupported vpn core action %q", request.Action)
 	}
+	d.requests.complete(requestID, response.OK)
 
 	_ = json.NewEncoder(conn).Encode(response)
 }

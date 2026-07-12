@@ -78,15 +78,35 @@ func Signal(cfg ServiceConfig, pid int, signal string, group bool) error {
 func callActive(cfg ServiceConfig, request Request) (Response, error) {
 	response, err := call(cfg, request)
 	if err == nil || !isUnavailable(err) {
-		return response, err
+		return response, withRPCTimeoutSnapshot(cfg, request.Action, err)
 	}
 
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
 		response, compatErr := call(compat.ServiceConfig, request)
 		if compatErr == nil || !isUnavailable(compatErr) {
-			return response, compatErr
+			return response, withRPCTimeoutSnapshot(compat.ServiceConfig, request.Action, compatErr)
 		}
 	}
 
 	return Response{}, err
+}
+
+func withRPCTimeoutSnapshot(cfg ServiceConfig, action string, err error) error {
+	if !isRPCTimeout(err) {
+		return err
+	}
+	status, statusErr := inspectExactServiceWithTimeout(cfg, rpcTimeoutSnapshotTimeoutVPNCore)
+	if statusErr != nil {
+		return &RPCTimeoutError{
+			Action:          action,
+			ResponseTimeout: rpcResponseTimeoutVPNCore,
+			cause:           err,
+		}
+	}
+	return &RPCTimeoutError{
+		Action:          action,
+		ResponseTimeout: rpcResponseTimeoutVPNCore,
+		Status:          &status,
+		cause:           err,
+	}
 }
