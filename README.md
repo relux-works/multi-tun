@@ -189,6 +189,8 @@ Operational notes:
 
 - `openconnect-tun` keeps its own runtime state under `~/.cache/openconnect-tun`, with session logs in `~/.cache/openconnect-tun/sessions` and the current session pointer in `~/.cache/openconnect-tun/runtime/current-session.json`. This is intentionally separate from `~/.cache/vless-tun`.
 - `vpn-core install` performs the one-time privileged setup for autonomous runs. It installs a shared root LaunchDaemon that exposes a user-owned unix socket, so later `openconnect-tun` and `vless-tun` commands can reuse the same trusted backend without repeated `sudo`.
+- `vpn-core status` and its `openconnect-tun helper status` compatibility wrapper extend the existing `ping` status response with `active_requests`, `queued_requests`, and `last_completed_request`. Entries contain only an allow-listed action plus age/duration and `ok`/`error` outcome metadata. Commands, stdin/cookies, log paths, tunnel endpoints, credentials, target PIDs, and signal values are never copied into the snapshot.
+- If a `run`, `spawn`, or `signal` RPC misses the existing five-second response deadline, `openconnect-tun` and `vless-tun` preserve the timeout and append a snapshot obtained through a short read-only `ping` on the same resolved helper socket. The probe does not start, stop, reconnect, or restart a tunnel or service. An older daemon remains compatible and reports request diagnostics as unavailable because the extension only adds optional fields to the existing `ping` response.
 - on macOS `vless-tun start` in `network.mode=tun` now refuses to start if the upstream VLESS server itself already routes through another VPN interface such as `utun*`, `tun*`, `ppp*`, or `ipsec*`. That avoids accidental nested-tunnel startup where `vless-tun` silently builds on top of `v2RayTun`, AnyConnect, or another active VPN and drags the whole network into an undefined state.
 - Existing installs of the legacy `works.relux.openconnect-tun-helper` daemon are auto-detected for compatibility. A fresh `vpn-core install` replaces that legacy helper with the shared core service.
 - `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
@@ -482,7 +484,7 @@ This is a heuristic runtime status, not a control plane.
 
 ### `vless-tun diagnose`
 
-`vless-tun diagnose` is a tunnel/runtime diagnostic. It scans configured session cache directories and reports recorded session state plus launch backend readiness. When the effective launch backend resolves to `helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket and daemon PID.
+`vless-tun diagnose` is a tunnel/runtime diagnostic. It scans configured session cache directories and reports recorded session state plus launch backend readiness. When the effective launch backend resolves to `helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket, daemon PID, redacted active/queued request metadata, and the last-completed request summary.
 
 `vless-tun diagnose config [server [profile]]` is a config diagnostic. It validates selection, resolved cache/render paths, source mode, bypasses, and launch settings without starting or stopping a tunnel.
 

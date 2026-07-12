@@ -74,6 +74,10 @@ Build local CLIs and agent guidance that can:
 - For `tun` mode on macOS, support privileged launch strategies:
   - `sudo` / direct process execution
   - shared `vpn-core` daemon management for persistent real-TUN sessions
+- Extend the existing `vpn-core` `ping` response, rather than adding a parallel diagnostic action or command, with a backward-compatible helper snapshot containing active and queued request metadata plus the last-completed request.
+- Keep helper request snapshots action-only: allow-listed action, age/duration, and `ok`/`error` outcome metadata are permitted; command arguments, stdin/cookies, log paths, tunnel endpoints, credentials, target PIDs, and signal values are forbidden.
+- Preserve concurrent helper lifecycle behavior while collecting diagnostics; status sampling must not serialize existing RPC execution.
+- When a helper `run`, `spawn`, or `signal` response exceeds the existing client deadline, preserve the timeout cause and attach a short read-only `ping` snapshot from the same resolved service when reachable. The diagnostic probe must not perform tunnel or service lifecycle operations.
 
 ### CLI
 
@@ -86,7 +90,7 @@ Build local CLIs and agent guidance that can:
 - before starting configured engine sidecars, `run`/`start` must clean stale sidecar processes only when they match the configured sidecar executable/name and generated sidecar config path; cleanup must not use broad process-name kills
 - `reconnect`: stop recorded `vless-tun` sessions across configured server cache directories, refresh local state, and start the selected profile in one command
 - `status`: show local runtime state, selected engine, sidecars, launch backend, cached selection, and configured bypasses
-- `diagnose`: inspect tunnel/runtime state without requiring provider/profile selection; `diagnose config` validates config selection separately
+- `diagnose`: inspect tunnel/runtime state without requiring provider/profile selection; `diagnose config` validates config selection separately; helper-backed diagnostics include the redacted `vpn-core` request snapshot
 - `stop`: stop the recorded `vless-tun` session without requiring provider/profile selection
 - `render`: emit selected runtime config, including both Xray sidecar and `sing-box` frontend configs for `engine.type=xray`
 - in `network.mode=tun` on macOS, startup must reject nested-tunnel bring-up when the upstream VLESS server route already points at another VPN interface (`utun*`, `tun*`, `ppp*`, `ipsec*`)
@@ -100,9 +104,9 @@ Build local CLIs and agent guidance that can:
 - `openconnect-tun` config may define `servers.<url>.auth.fallback_servers` for endpoint-specific aggregate-auth fallback targets when a balancer backend returns an auth-request without `sso-v2-login`
 - `openconnect-tun` config may define `servers.<url>.client_mimicry` for endpoint-specific AnyConnect identity: user-agent, version, OS/device-id, local hostname, aggregate-auth capabilities, and aggregate-auth HTTP headers
 - `openconnect-tun reconnect`: replace the active OpenConnect session in one command
-- `vpn-core install|status|uninstall`: manage the shared privileged daemon used for passwordless post-SSO connect/stop flows and privileged `sing-box` TUN lifecycle
+- `vpn-core install|status|uninstall`: manage the shared privileged daemon used for passwordless post-SSO connect/stop flows and privileged `sing-box` TUN lifecycle; `status` reports helper health and the redacted active/queued/last-completed request snapshot through the existing `ping` contract
 - `vpn-core inspect-vless-url`: run a user-space VLESS URL metadata probe through a fixed analyzer chain
-- `openconnect-tun helper install|status|uninstall`: compatibility wrapper around `vpn-core`
+- `openconnect-tun helper install|status|uninstall`: compatibility wrapper around `vpn-core`; helper status exposes the same redacted request snapshot
 - `openconnect-tun routes`: inspect routes currently attached to the live OpenConnect utun interface
 - `openconnect-tun stop`: stop the active OpenConnect process cleanly
 - `dump start|status|stop|inspect`: canonical packet-dump workflow for tunnel-aware VPN diagnostics; `cisco-dump` remains as a compatibility alias
