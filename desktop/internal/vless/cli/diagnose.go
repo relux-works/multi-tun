@@ -10,6 +10,8 @@ import (
 	"multi-tun/desktop/internal/vless/session"
 )
 
+var inspectVPNCoreServiceCLI = vpncore.InspectService
+
 func (a *App) runDiagnose(args []string) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -172,7 +174,7 @@ func (a *App) printVPNCoreDiagnostics(launchCfg config.PrivilegedLaunchConfig) i
 		return 0
 	}
 
-	status, err := vpncore.InspectService(vpncore.DefaultServiceConfig())
+	status, err := inspectVPNCoreServiceCLI(vpncore.DefaultServiceConfig())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "diagnose failed: %v\n", err)
 		return 1
@@ -185,6 +187,13 @@ func (a *App) printVPNCoreDiagnostics(launchCfg config.PrivilegedLaunchConfig) i
 	fmt.Fprintf(a.stdout, "vpn_core_label: %s\n", status.Label)
 	fmt.Fprintf(a.stdout, "vpn_core_socket: %s\n", status.SocketPath)
 	fmt.Fprintf(a.stdout, "vpn_core_pid: %d\n", status.DaemonPID)
+	if status.HelperSnapshot != nil {
+		fmt.Fprintf(a.stdout, "vpn_core_active_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.ActiveRequests))
+		fmt.Fprintf(a.stdout, "vpn_core_queued_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.QueuedRequests))
+		fmt.Fprintf(a.stdout, "vpn_core_last_completed_request: %s\n", vpncore.FormatCompletedRequestSnapshot(status.HelperSnapshot.LastCompletedRequest))
+	} else {
+		fmt.Fprintln(a.stdout, "vpn_core_request_diagnostics: unavailable")
+	}
 	if status.Compatibility != "" {
 		fmt.Fprintf(a.stdout, "vpn_core_compatibility: %s\n", status.Compatibility)
 	}

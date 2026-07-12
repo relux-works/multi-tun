@@ -11,6 +11,11 @@ import (
 
 type PrivilegedHelperConfig = vpncore.ServiceConfig
 type PrivilegedHelperStatus = vpncore.ServiceStatus
+type HelperSnapshot = vpncore.HelperSnapshot
+type RequestSnapshot = vpncore.RequestSnapshot
+type CompletedRequestSnapshot = vpncore.CompletedRequestSnapshot
+
+var vpnCoreRunOpenConnect = vpncore.Run
 
 func DefaultPrivilegedHelperConfig() PrivilegedHelperConfig {
 	return vpncore.DefaultServiceConfig()
@@ -70,11 +75,11 @@ func RunPrivilegedHelperDaemon(socketPath string, clientUID, clientGID int) erro
 }
 
 func helperConnect(cfg PrivilegedHelperConfig, command []string, cookie, logPath string) error {
-	return vpncore.Run(cfg, command, cookie+"\n", logPath)
+	return vpnCoreRunOpenConnect(cfg, command, cookie+"\n", logPath)
 }
 
 func helperRun(cfg PrivilegedHelperConfig, command []string, stdinData, logPath string) error {
-	return vpncore.Run(cfg, command, stdinData, logPath)
+	return vpnCoreRunOpenConnect(cfg, command, stdinData, logPath)
 }
 
 func helperSignal(cfg PrivilegedHelperConfig, pid int, signal string) error {

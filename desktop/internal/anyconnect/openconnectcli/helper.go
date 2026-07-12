@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 
 	"multi-tun/desktop/internal/anyconnect/openconnect"
+	"multi-tun/desktop/internal/core/vpncore"
 )
+
+var inspectPrivilegedHelperOpenConnectCLI = openconnect.InspectPrivilegedHelper
 
 func (a *App) runHelper(args []string) int {
 	if len(args) == 0 {
@@ -46,7 +49,7 @@ func (a *App) runHelperInstall(args []string) int {
 		return 1
 	}
 
-	status, err := openconnect.InspectPrivilegedHelper(openconnect.DefaultPrivilegedHelperConfig())
+	status, err := inspectPrivilegedHelperOpenConnectCLI(openconnect.DefaultPrivilegedHelperConfig())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "helper install failed: %v\n", err)
 		return 1
@@ -88,7 +91,7 @@ func (a *App) runHelperStatus(args []string) int {
 		return 2
 	}
 
-	status, err := openconnect.InspectPrivilegedHelper(openconnect.DefaultPrivilegedHelperConfig())
+	status, err := inspectPrivilegedHelperOpenConnectCLI(openconnect.DefaultPrivilegedHelperConfig())
 	if err != nil {
 		fmt.Fprintf(a.stderr, "helper status failed: %v\n", err)
 		return 1
@@ -103,6 +106,13 @@ func (a *App) runHelperStatus(args []string) int {
 	if status.Reachable {
 		fmt.Fprintln(a.stdout, "state: reachable")
 		fmt.Fprintf(a.stdout, "daemon_pid: %d\n", status.DaemonPID)
+		if status.HelperSnapshot != nil {
+			fmt.Fprintf(a.stdout, "active_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.ActiveRequests))
+			fmt.Fprintf(a.stdout, "queued_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.QueuedRequests))
+			fmt.Fprintf(a.stdout, "last_completed_request: %s\n", vpncore.FormatCompletedRequestSnapshot(status.HelperSnapshot.LastCompletedRequest))
+		} else {
+			fmt.Fprintln(a.stdout, "request_diagnostics: unavailable")
+		}
 	} else {
 		fmt.Fprintln(a.stdout, "state: missing")
 	}

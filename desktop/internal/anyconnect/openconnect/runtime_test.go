@@ -31,6 +31,47 @@ func TestFindOpenConnectPIDFromOutput(t *testing.T) {
 	}
 }
 
+func TestConnectWithCookiePropagatesVPNCoreTimeoutSnapshotWithoutPayload(t *testing.T) {
+	previous := vpnCoreRunOpenConnect
+	timeoutErr := errors.New("vpn core rpc run timed out after 5s; helper snapshot: state=reachable daemon_pid=42 active_requests=run(age=5000ms) queued_requests=none last_completed_request=spawn(outcome=ok,duration=8ms,age=20ms)")
+	var capturedCommand []string
+	var capturedStdin string
+	vpnCoreRunOpenConnect = func(_ PrivilegedHelperConfig, command []string, stdinData, _ string) error {
+		capturedCommand = append([]string(nil), command...)
+		capturedStdin = stdinData
+		return timeoutErr
+	}
+	t.Cleanup(func() {
+		vpnCoreRunOpenConnect = previous
+	})
+
+	secretEndpoint := "https://vpn-secret.example.invalid/private"
+	secretCookie := "COOKIE_OPENCONNECT_SECRET"
+	_, _, err := connectWithCookie(
+		&authResult{ConnectURL: secretEndpoint, Cookie: secretCookie},
+		"/usr/local/bin/openconnect",
+		"",
+		&bytes.Buffer{},
+		PrivilegedModeHelper,
+		DefaultPrivilegedHelperConfig(),
+		ClientMimicry{},
+	)
+	if !errors.Is(err, timeoutErr) {
+		t.Fatalf("connectWithCookie() error = %v, want wrapped timeout", err)
+	}
+	if !strings.Contains(err.Error(), "openconnect failed: vpn core rpc run timed out") || !strings.Contains(err.Error(), "helper snapshot: state=reachable") {
+		t.Fatalf("connectWithCookie() error missing helper snapshot: %v", err)
+	}
+	for _, secret := range []string{secretEndpoint, secretCookie} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("connectWithCookie() error leaked %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(strings.Join(capturedCommand, " "), secretEndpoint) || !strings.Contains(capturedStdin, secretCookie) {
+		t.Fatalf("test did not exercise secret-bearing RPC payload: command=%q stdin=%q", capturedCommand, capturedStdin)
+	}
+}
+
 func TestResolveCacheDirDefault(t *testing.T) {
 	cacheDir := ResolveCacheDir("")
 	if cacheDir == "" {
