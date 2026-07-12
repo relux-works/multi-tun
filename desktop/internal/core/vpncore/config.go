@@ -19,12 +19,38 @@ type ServiceConfig struct {
 }
 
 type ServiceStatus struct {
-	Label         string
-	PlistPath     string
-	SocketPath    string
-	Reachable     bool
-	DaemonPID     int
-	Compatibility string
+	Label          string
+	PlistPath      string
+	SocketPath     string
+	Reachable      bool
+	DaemonPID      int
+	Compatibility  string
+	HelperSnapshot *HelperSnapshot
+}
+
+// RequestSnapshot is deliberately limited to non-sensitive request metadata.
+// It never carries command arguments, stdin, log paths, endpoints, credentials,
+// target PIDs, or signal values.
+type RequestSnapshot struct {
+	Action    string `json:"action"`
+	AgeMillis int64  `json:"age_ms"`
+}
+
+// CompletedRequestSnapshot adds only outcome and timing metadata to the same
+// redacted action used by active and queued request snapshots.
+type CompletedRequestSnapshot struct {
+	Action         string `json:"action"`
+	Outcome        string `json:"outcome"`
+	DurationMillis int64  `json:"duration_ms"`
+	AgeMillis      int64  `json:"age_ms"`
+}
+
+// HelperSnapshot is the optional, backward-compatible request-health payload
+// returned by the existing ping response.
+type HelperSnapshot struct {
+	ActiveRequests       []RequestSnapshot         `json:"active_requests"`
+	QueuedRequests       []RequestSnapshot         `json:"queued_requests"`
+	LastCompletedRequest *CompletedRequestSnapshot `json:"last_completed_request,omitempty"`
 }
 
 func DefaultServiceConfig() ServiceConfig {
