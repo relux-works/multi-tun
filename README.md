@@ -3,6 +3,7 @@
 `multi-tun` currently hosts local CLIs for:
 
 - `vless-tun` for DenseVPN / DanceVPN over `sing-box`, with optional Xray-core sidecar support for VLESS profiles that need Xray-only fields
+- `ssh-proxy` for a local SSH dynamic SOCKS5 proxy with explicit lifecycle state
 - `openconnect-tun` for Cisco AnyConnect / ASA profile inspection and future OpenConnect runtime work
 - `dump` for manual VPN capture sessions and local dump artifacts
 
@@ -73,6 +74,7 @@ The live egress loop is verified on a real Xiaomi device with a separate observe
 ./scripts/mac-deploy/deploy-multi-tun.sh --config-bundle /path/to/config
 
 # edit ~/.config/vless-tun/config.json and set servers.<name>.source.url
+# edit ~/.config/ssh-proxy/config.json or run ssh-proxy setup --host <ssh-alias> --force
 
 vless-tun refresh dance
 vless-tun list dance
@@ -85,6 +87,10 @@ vless-tun status dance
 vless-tun diagnose
 vless-tun stop
 vless-tun render dance
+ssh-proxy setup --host dedicated.example --server dedicated --force
+ssh-proxy start
+ssh-proxy status
+ssh-proxy stop
 vpn-core inspect-vless-url --insecure "https://example.com/subscription"
 openconnect-tun status
 openconnect-tun setup --vpn-name "Corp VPN"
@@ -108,6 +114,12 @@ That installed toolchain now also includes `android-release`, the local Go helpe
 
 On macOS the default `./scripts/setup.sh` path is host-native: on Apple Silicon it builds/install `arm64` binaries, and on Intel Macs it builds/install `amd64` binaries with the normal toolchain prerequisites for that machine. If you explicitly pass `--mac-arch arm64|amd64` for the non-host architecture, setup switches into artifact-only cross-build mode and writes desktop binaries into `artifacts/releases/` without touching `~/.local/bin`, configs, or skill wiring.
 
+After its Homebrew dependency steps, host-native setup verifies that the active `openconnect` is the Homebrew-owned executable and can run `--version`. This catches a bottle left linked to a removed `nettle`/`libhogweed` ABI; only that failed launch triggers `brew reinstall openconnect`, followed by another launch check. Non-Homebrew `openconnect` installations and cross-build mode are untouched. To run just this safe linkage check and repair seam:
+
+```bash
+./scripts/setup.sh --check-homebrew-openconnect
+```
+
 `./scripts/deinit.sh` removes the managed `multi-tun` global/local skill links and `~/.local/bin` symlinks. Config, cache, keychain secrets, and repo build artifacts stay intact unless you pass the explicit `--purge-*` flags.
 
 Generated artifacts:
@@ -121,8 +133,11 @@ Generated artifacts:
 | Tool | Used for | How to run | Outputs |
 | --- | --- | --- | --- |
 | `task-board` | File-based task tracking for repo work | `task-board q --format compact 'summary()'`, `task-board m 'set_notes(TASK-ID, text="...")'` | `.task-board/` |
+| `scripts/tests/setup-openconnect-linkage-test.sh` | Fake-PATH regression coverage for healthy/stale Homebrew OpenConnect linkage and cross-build isolation | `bash scripts/tests/setup-openconnect-linkage-test.sh` | Ephemeral fixtures under `${TMPDIR:-/tmp}` |
+| `PlantUML` / Graphviz | Validate and render architecture diagrams as code | `plantuml --check-syntax diagrams/plantuml/sequence/*.puml`, `plantuml --format svg --output-dir "$PWD/diagrams/artefacts/plantuml" diagrams/plantuml/sequence/*.puml` | `diagrams/artefacts/plantuml/` |
 | `scripts/mac-deploy/deploy-multi-tun.sh` | Fresh install or git-based update of the macOS toolchain on another Mac, with optional local-only config bundle installation | `scripts/mac-deploy/deploy-multi-tun.sh --config-bundle /path/to/config` | target checkout under `~/src/multi-tun` by default; copied configs under `~/.config/`; backups beside replaced config files |
 | `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered runtime JSON |
+| `ssh-proxy` | Local SSH dynamic SOCKS5 proxy lifecycle management | `ssh-proxy setup --host ssh-alias --force`, `ssh-proxy start`, `ssh-proxy status`, `ssh-proxy stop` | `~/.config/ssh-proxy/`, `~/.cache/ssh-proxy/`, per-session SSH logs |
 | `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
 | `vpn-core` | Privileged helper backend for tunnel startup and packet capture support; also includes a user-space VLESS subscription metadata probe | `vpn-core install`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | LaunchDaemon state, redacted request-health snapshot, helper logs under runtime cache paths |
 | `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
@@ -147,7 +162,47 @@ vless-tun reconnect dance
 vless-tun status dance
 vless-tun stop
 vless-tun render dance
+
+ssh-proxy setup --host dedicated.example --server dedicated --force
+ssh-proxy start
+ssh-proxy status
+ssh-proxy stop
 ```
+
+### `ssh-proxy`
+
+`ssh-proxy` manages local SSH dynamic forwarding as an independent runtime. It uses
+the system SSH client with `BatchMode=yes`, `ExitOnForwardFailure=yes`, keepalives,
+and a readiness probe before it records the session. It never stores keys,
+passwords, or SSH-agent material; authentication remains in the normal OpenSSH
+configuration and Keychain flow.
+
+Bootstrap a concrete profile in one command:
+
+```bash
+ssh-proxy setup \
+  --server dedicated \
+  --host relux-works-dedicated-macmini \
+  --listen-address 127.0.0.1 \
+  --socks-port 1080 \
+  --force
+ssh-proxy start
+ssh-proxy status
+ssh-proxy stop
+```
+
+The resulting `~/.config/ssh-proxy/config.json` keeps the selected profile under
+`current` and its `host`, optional `account`, local bind IP, SOCKS port, and
+runtime cache path under `servers.<name>`. Leave `account` empty to use the
+`User` configured for an OpenSSH host alias. Session metadata and logs live under
+`~/.cache/ssh-proxy/<profile>/`; `status` reads this state without touching VLESS
+or OpenConnect sessions.
+
+For a SOCKS tunnel whose SSH transport must avoid an active full VLESS TUN,
+add the remote SSH endpoint IP to `routing.routes` and its hostname to
+`routing.bypass_suffixes` in `vless-tun` before starting `ssh-proxy`. This keeps
+the SSH transport direct while traffic sent through the local SOCKS listener
+egresses from the remote SSH host.
 
 ### `openconnect-tun`
 
@@ -193,6 +248,9 @@ Operational notes:
 - `vpn-core install` performs the one-time privileged setup for autonomous runs. It installs a shared root LaunchDaemon that exposes a user-owned unix socket, so later `openconnect-tun` and `vless-tun` commands can reuse the same trusted backend without repeated `sudo`.
 - `vpn-core status` and its `openconnect-tun helper status` compatibility wrapper extend the existing `ping` status response with `active_requests`, `queued_requests`, and `last_completed_request`. Entries contain only an allow-listed action plus age/duration and `ok`/`error` outcome metadata. Commands, stdin/cookies, log paths, tunnel endpoints, credentials, target PIDs, and signal values are never copied into the snapshot.
 - If a `run`, `spawn`, or `signal` RPC misses the existing five-second response deadline, `openconnect-tun` and `vless-tun` preserve the timeout and append a snapshot obtained through a short read-only `ping` on the same resolved helper socket. The probe does not start, stop, reconnect, or restart a tunnel or service. An older daemon remains compatible and reports request diagnostics as unavailable because the extension only adds optional fields to the existing `ping` response.
+- Every OpenConnect launch now uses a collision-resistant attempt ID and matching `--pid-file` under `~/.cache/openconnect-tun/runtime`. If helper startup times out after OpenConnect has backgrounded, the client recovers that exact PID, performs bounded PID-scoped `INT`/`TERM`/`KILL` cleanup, and removes only that attempt's PID file after exit. It never uses `pkill` or process-name-wide cleanup. If exit cannot be confirmed, the exact PID and PID-file path remain in current-session metadata so the session is still recoverable instead of becoming untracked.
+- Non-dry-run starts hold a cross-process, cache-scoped startup lock from session preflight through the final current-session handoff. A concurrent start for the same cache is refused with `another openconnect startup is already in progress`; starts using independent cache directories remain independent.
+- `openconnect-tun start` performs a read-only process scan before authentication and repeats it immediately before launch. A running OpenConnect command whose final server host matches the selected server but has no live current-session record causes start to fail with the exact PID; unrelated OpenConnect processes are not signalled or blocked. Inspect the reported process with `ps -p <pid> -o pid=,ppid=,user=,etime=,command=` and stop only that PID before retrying; do not use `pkill openconnect`.
 - on macOS `vless-tun start` in `network.mode=tun` now refuses to start if the upstream VLESS server itself already routes through another VPN interface such as `utun*`, `tun*`, `ppp*`, or `ipsec*`. That avoids accidental nested-tunnel startup where `vless-tun` silently builds on top of `v2RayTun`, AnyConnect, or another active VPN and drags the whole network into an undefined state.
 - Existing installs of the legacy `works.relux.openconnect-tun-helper` daemon are auto-detected for compatibility. A fresh `vpn-core install` replaces that legacy helper with the shared core service.
 - `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
@@ -315,9 +373,10 @@ Example config:
 Field reference:
 
 - `cache_dir`: local runtime/state directory for `openconnect-tun`. This is where the CLI keeps its own ephemeral artifacts, not user-authored config.
-- `cache_dir` session logs: `~/.cache/openconnect-tun/sessions/openconnect-session-<UTC timestamp>.log`
+- `cache_dir` session logs: `~/.cache/openconnect-tun/sessions/openconnect-session-<UTC timestamp>-<128-bit attempt suffix>.log`
 - `cache_dir` runtime metadata: `~/.cache/openconnect-tun/runtime/current-session.json`
-- `cache_dir` helper/runtime logs: files under `~/.cache/openconnect-tun/runtime/`, such as orphan-cleanup logs
+- `cache_dir` launch PID files: `~/.cache/openconnect-tun/runtime/openconnect-<UTC timestamp>-<128-bit attempt suffix>.pid`; the active path is recorded as `pid_file_path` in session metadata and failed attempts remove it after confirmed PID-scoped cleanup
+- `cache_dir` helper/runtime files: files under `~/.cache/openconnect-tun/runtime/`, including the persistent `startup.lock` inode and orphan-cleanup logs
 - `cache_dir` separation: intentionally separate from `~/.cache/vless-tun`, so the two tunnel stacks do not overwrite each other's runtime state
 - `default.server_url`: the default OpenConnect target when `start|reconnect` runs without an explicit `--server`
 - `default.profile`: the default configured profile key when `start|reconnect` runs without an explicit `--profile`; it may be a friendly alias such as `ural-outside`
@@ -376,7 +435,7 @@ vless-tun diagnose
 vless-tun diagnose config [server [profile]]
 ```
 
-`stop` and `diagnose` do not require a provider/profile; they scan all configured session cache directories for recorded tunnel state. `reconnect` uses the same stop-all scan before starting the selected provider/profile, so switching `current.server` from one provider to another does not leave the old tunnel blocking the new one. Use `diagnose config` when you want to validate provider/profile selection.
+`stop` and `diagnose` do not require a provider/profile; they scan all configured session cache directories for recorded tunnel state. `reconnect` is the one-command, synchronous stop-to-start path: it uses the same stop-all scan, waits for it to finish, then starts the selected provider/profile. Switching `current.server` therefore does not leave the old tunnel blocking the new one. Use `diagnose config` when you want to validate provider/profile selection.
 
 Use `--config` when you intentionally want a non-default config file. `setup` and `init` still accept one positional config path for bootstrapping.
 
@@ -454,7 +513,7 @@ In `network.mode=tun`, `start` resolves the launch backend automatically. If the
 
 ### `vless-tun reconnect`
 
-Reloads the local config, stops any currently recorded session across all configured VLESS server cache directories, refreshes the subscription cache by default, rerenders the selected profile, and starts a fresh `vless-tun` session with the selected engine.
+Reloads the local config, synchronously stops any currently recorded session across all configured VLESS server cache directories, refreshes the subscription cache by default, rerenders the selected profile, and starts a fresh `vless-tun` session with the selected engine. It is the canonical single-command stop-to-start workflow; do not script separate `stop` and `start` calls for normal reconfiguration.
 
 This is the command to use after changing:
 
@@ -684,10 +743,11 @@ Field reference:
 - `network.mode`: currently `tun`
 - `network.tun.interface_name`: TUN interface name for `tun` mode
 - `network.tun.addresses`: TUN addresses for `tun` mode
-- `routing` may exist globally, per server, or per profile; more specific values override broader values
-- `routing.bypass_suffixes`: domains that should go `direct`; set `[]` for full-tunnel bring-up
+- `routing` may exist globally, per server, or per profile; ordinary settings such as `routes` use the more-specific override rule
+- `routing.bypass_suffixes`: domains that should go `direct`. Non-empty values are additive across global, server, and profile scopes, so a machine-wide bypass cannot be suppressed by a selected server/profile. Set an explicit `[]` at a more-specific scope for a deliberate full-tunnel reset.
 - `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists
 - `routing.routes`: CIDRs/IPs that should route `direct`
+- `routing.route_descriptions`: optional `{ "CIDR-or-IP": "human-readable purpose" }` annotations for direct routes; these labels do not alter routing behavior
 - `singbox` may exist globally, per server, or per profile; more specific values override broader values
 - `singbox.sniff.enabled`: controls the generated sing-box route sniff action. Default is `true`, preserving the previous renderer behavior
 - `singbox.sniff.sniffers`: optional sing-box sniffers list such as `["tls", "http"]`
