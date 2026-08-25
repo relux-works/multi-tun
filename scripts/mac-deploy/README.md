@@ -32,6 +32,12 @@ Run from a checkout:
 scripts/mac-deploy/deploy-multi-tun.sh --config-bundle /path/to/config
 ```
 
+The deploy path runs the checkout's `scripts/setup.sh`. On host-native macOS
+installs, that setup step performs the Homebrew OpenConnect launch check after
+all formula installs and repairs a stale Homebrew linkage with a targeted
+`brew reinstall openconnect` only when `openconnect --version` cannot launch.
+It does not alter non-Homebrew OpenConnect installations or cross-build mode.
+
 The script accepts `__HOME__`, `__XDG_CONFIG_HOME__`, and
 `__XDG_CACHE_HOME__` placeholders in config files and expands them on the target
 Mac before installation. Existing target config files are backed up with a UTC
