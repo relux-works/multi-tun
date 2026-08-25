@@ -14,6 +14,8 @@
 *.so
 *.dylib
 *.test
+__pycache__/
+*.py[cod]
 
 # Go coverage and profiles
 *.out
@@ -32,7 +34,11 @@ scripts/mac-deploy/configs/
 .codex/
 .local/
 .temp/
-agents/
+agents/*
+!agents/skills/
+agents/skills/*
+!agents/skills/vpn-config/
+!agents/skills/vpn-config/**
 AGENTS.md
 LOGBOOK.md
 

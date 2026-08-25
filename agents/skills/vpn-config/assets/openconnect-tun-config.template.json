@@ -1,0 +1,27 @@
+{
+  "cache_dir": ".cache/openconnect-tun",
+  "default": {
+    "server_url": "example-corp",
+    "profile": "engineering"
+  },
+  "servers": {
+    "example-corp": {
+      "server_url": "vpn.example.com/engineering",
+      "auth": {
+        "username_keychain_account": "example-vpn/username",
+        "password_keychain_account": "example-vpn/password",
+        "totp_secret_keychain_account": "example-vpn/totp-secret",
+        "second_factor": {
+          "mode": "totp_auto",
+          "totp_secret_keychain_account": "example-vpn/totp-secret"
+        }
+      },
+      "profiles": {
+        "engineering": {
+          "name": "Example Engineering VPN",
+          "mode": "full"
+        }
+      }
+    }
+  }
+}

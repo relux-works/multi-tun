@@ -1,0 +1,81 @@
+{
+  "current": {
+    "server": "example-subscription",
+    "profile": "default"
+  },
+  "servers": {
+    "example-subscription": {
+      "source": {
+        "mode": "proxy",
+        "url": "https://vpn-provider.example/connect?key=REPLACE_WITH_SUBSCRIPTION_KEY"
+      },
+      "cache_dir": ".cache/example-subscription",
+      "artifacts": {
+        "singbox_config_path": "generated/example-subscription.json"
+      },
+      "engine": {
+        "type": "sing-box"
+      },
+      "routing": {
+        "bypass_suffixes": [
+          ".example.org"
+        ],
+        "bypass_exclude_suffixes": [
+          ".proxy-required.example.org"
+        ],
+        "routes": [
+          "203.0.113.10/32"
+        ]
+      },
+      "profiles": {
+        "default": {
+          "selector": ""
+        }
+      }
+    },
+    "example-direct": {
+      "source": {
+        "mode": "direct",
+        "url": "vless://REPLACE_WITH_UUID@vpn.example.net:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=REPLACE_WITH_SNI&fp=chrome&pbk=REPLACE_WITH_REALITY_PUBLIC_KEY&sid=REPLACE_WITH_SHORT_ID&type=tcp#example-direct"
+      },
+      "cache_dir": ".cache/example-direct",
+      "artifacts": {
+        "singbox_config_path": "generated/example-direct.json"
+      },
+      "engine": {
+        "type": "sing-box"
+      },
+      "routing": {
+        "bypass_suffixes": [],
+        "bypass_exclude_suffixes": [],
+        "routes": []
+      },
+      "profiles": {
+        "default": {
+          "selector": ""
+        }
+      }
+    }
+  },
+  "network": {
+    "mode": "tun",
+    "tun": {
+      "interface_name": "utun233",
+      "addresses": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ]
+    }
+  },
+  "dns": {
+    "proxy_resolver": {
+      "address": "1.1.1.1",
+      "port": 853,
+      "tls_server_name": "cloudflare-dns.com"
+    }
+  },
+  "logging": {
+    "level": "warn",
+    "max_lines": 1000
+  }
+}

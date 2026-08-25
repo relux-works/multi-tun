@@ -2,7 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SETUP_SCRIPT="$(cd "$SCRIPT_DIR/.." && pwd)/setup.sh"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SETUP_SCRIPT="$PROJECT_ROOT/scripts/setup.sh"
+SKILL_INSTALLER="$PROJECT_ROOT/scripts/install-vpn-config-skill.sh"
+SKILL_SOURCE="$PROJECT_ROOT/agents/skills/vpn-config"
 SYSTEM_PATH="/usr/bin:/bin"
 FIXTURE_DIRS=()
 
@@ -172,11 +175,13 @@ test_full_setup_repairs_after_all_brew_dependencies() {
   local fixture_dir
   make_fixture multi-tun-full-setup-openconnect
   fixture_dir="$CURRENT_FIXTURE_DIR"
-  mkdir -p "$fixture_dir/project/scripts" "$fixture_dir/project/configs" "$fixture_dir/bin" "$fixture_dir/prefix/bin"
+  mkdir -p "$fixture_dir/project/scripts" "$fixture_dir/project/configs" "$fixture_dir/project/agents/skills" "$fixture_dir/bin" "$fixture_dir/prefix/bin"
   cp "$SETUP_SCRIPT" "$fixture_dir/project/scripts/setup.sh"
+  cp "$SKILL_INSTALLER" "$fixture_dir/project/scripts/install-vpn-config-skill.sh"
+  cp -R "$SKILL_SOURCE" "$fixture_dir/project/agents/skills/vpn-config"
   : > "$fixture_dir/project/configs/local.example.json"
   : > "$fixture_dir/project/configs/ssh-proxy.example.json"
-  chmod +x "$fixture_dir/project/scripts/setup.sh"
+  chmod +x "$fixture_dir/project/scripts/setup.sh" "$fixture_dir/project/scripts/install-vpn-config-skill.sh"
 
   cat > "$fixture_dir/bin/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -248,8 +253,12 @@ EOF
     "$fixture_dir/project/scripts/setup.sh"
 
   assert_contains "$fixture_dir/brew.log" 'install totp-cli'
+  assert_contains "$fixture_dir/brew.log" 'install zbar'
   assert_appears_before "$fixture_dir/brew.log" 'install totp-cli' 'reinstall openconnect'
   [[ -e "$fixture_dir/reinstalled" ]] || fail 'full setup did not repair stale Homebrew openconnect'
+  [[ -f "$fixture_dir/home/.agents/skills/vpn-config/SKILL.md" ]] || fail 'full setup did not install vpn-config skill'
+  [[ -L "$fixture_dir/home/.claude/skills/vpn-config" ]] || fail 'full setup did not link Claude vpn-config skill'
+  [[ -L "$fixture_dir/home/.codex/skills/vpn-config" ]] || fail 'full setup did not link Codex vpn-config skill'
 }
 
 test_cross_build_skips_brew_repair() {

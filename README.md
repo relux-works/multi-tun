@@ -70,6 +70,7 @@ The live egress loop is verified on a real Xiaomi device with a separate observe
 ```bash
 ./scripts/setup.sh
 ./scripts/setup.sh --mac-arch amd64
+./scripts/setup.sh --install-vpn-config-skill
 ./scripts/deinit.sh --dry-run
 ./scripts/mac-deploy/deploy-multi-tun.sh --config-bundle /path/to/config
 
@@ -102,7 +103,7 @@ openconnect-tun start ural ural-outside --mode split-include --dry-run
 dump status
 ```
 
-`./scripts/setup.sh` installs the shipped desktop toolchain end-to-end: it ensures the default runtime prerequisites such as `sing-box`, builds the bundled `desktop/cmd/vpn-auth` Swift helper, and links the resulting binaries into `~/.local/bin`. `xray` is an optional runtime prerequisite only for configs that set `engine.type=xray`.
+`./scripts/setup.sh` installs the shipped desktop toolchain end-to-end: it ensures the default runtime prerequisites such as `sing-box` and the `zbarimg` QR reader, builds the bundled `desktop/cmd/vpn-auth` Swift helper, installs the source-controlled `vpn-config` skill, and links the resulting binaries into `~/.local/bin`. `xray` is an optional runtime prerequisite only for configs that set `engine.type=xray`.
 
 That installed toolchain now also includes `android-release`, the local Go helper for:
 
@@ -120,7 +121,7 @@ After its Homebrew dependency steps, host-native setup verifies that the active 
 ./scripts/setup.sh --check-homebrew-openconnect
 ```
 
-`./scripts/deinit.sh` removes the managed `multi-tun` global/local skill links and `~/.local/bin` symlinks. Config, cache, keychain secrets, and repo build artifacts stay intact unless you pass the explicit `--purge-*` flags.
+`./scripts/deinit.sh` removes managed `~/.local/bin` symlinks. Config, cache, Keychain secrets, the installed `vpn-config` skill, and repo build artifacts stay intact unless an explicit purge flow covers them.
 
 Generated artifacts:
 
@@ -133,7 +134,11 @@ Generated artifacts:
 | Tool | Used for | How to run | Outputs |
 | --- | --- | --- | --- |
 | `task-board` | File-based task tracking for repo work | `task-board q --format compact 'summary()'`, `task-board m 'set_notes(TASK-ID, text="...")'` | `.task-board/` |
-| `scripts/tests/setup-openconnect-linkage-test.sh` | Fake-PATH regression coverage for healthy/stale Homebrew OpenConnect linkage and cross-build isolation | `bash scripts/tests/setup-openconnect-linkage-test.sh` | Ephemeral fixtures under `${TMPDIR:-/tmp}` |
+| `scripts/install-vpn-config-skill.sh` | Install the tracked `vpn-config` skill source for Claude and Codex | `./scripts/setup.sh --install-vpn-config-skill` | `~/.agents/skills/vpn-config` plus links under `~/.claude/skills/` and `~/.codex/skills/` |
+| `agents/skills/vpn-config/scripts/import-google-auth-qr-to-keychain.sh` | Decode a local Google Authenticator export QR without disclosing its payload or TOTP secret and store the secret through Security.framework | `agents/skills/vpn-config/scripts/import-google-auth-qr-to-keychain.sh --image /absolute/path/export.png --keychain-account example-vpn/totp-secret` | macOS Keychain service `multi-tun`; no secret-bearing file output |
+| `zbarimg` | Read a Google Authenticator export QR locally for the safe Keychain importer | installed by `./scripts/setup.sh`, or `brew install zbar` | QR payload stays in importer process memory |
+| `scripts/tests/setup-openconnect-linkage-test.sh` | Fake-PATH regression coverage for Homebrew OpenConnect linkage, full skill installation, and cross-build isolation | `bash scripts/tests/setup-openconnect-linkage-test.sh` | Ephemeral fixtures under `${TMPDIR:-/tmp}` |
+| `scripts/tests/vpn-config-skill-test.sh` | Validate generic config assets and the non-disclosing Google Authenticator QR-to-Keychain pipeline | `bash scripts/tests/vpn-config-skill-test.sh` | Ephemeral synthetic fixtures under `${TMPDIR:-/tmp}` |
 | `PlantUML` / Graphviz | Validate and render architecture diagrams as code | `plantuml --check-syntax diagrams/plantuml/sequence/*.puml`, `plantuml --format svg --output-dir "$PWD/diagrams/artefacts/plantuml" diagrams/plantuml/sequence/*.puml` | `diagrams/artefacts/plantuml/` |
 | `scripts/mac-deploy/deploy-multi-tun.sh` | Fresh install or git-based update of the macOS toolchain on another Mac, with optional local-only config bundle installation | `scripts/mac-deploy/deploy-multi-tun.sh --config-bundle /path/to/config` | target checkout under `~/src/multi-tun` by default; copied configs under `~/.config/`; backups beside replaced config files |
 | `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered runtime JSON |
@@ -281,12 +286,15 @@ Scaffolds a default `openconnect-tun` config and the matching keychain account n
 
 Pass `--vpn-name` with the user-facing AnyConnect profile name. `setup` resolves the matching `server_url` from local AnyConnect XML, writes a default full-mode config with no bypasses, seeds placeholder keychain entries for username/password/TOTP, and prints the resulting config path so the caller can review it.
 
-If TOTP starts from a Google Authenticator export QR, use `./scripts/google-auth-export-secret.sh`. The export URL contains a URL-encoded base64 protobuf payload, but the final Keychain value for `totp_secret` must be the derived base32 secret:
+If TOTP starts from a Google Authenticator export QR, save the QR as a local image and pass its path to the safe skill importer. It reads the payload and derived base32 secret only through process memory and stdin, then stores the secret directly in the Keychain account referenced by the config:
 
 ```bash
-./scripts/google-auth-export-secret.sh 'otpauth-migration://offline?...'
-./scripts/google-auth-export-secret.sh --list 'otpauth-migration://offline?...'
+agents/skills/vpn-config/scripts/import-google-auth-qr-to-keychain.sh \
+  --image '/absolute/path/to/export.png' \
+  --keychain-account 'example-vpn/totp-secret'
 ```
+
+Do not paste the QR payload or decoded secret into chat, command arguments, logs, or temporary files. See `agents/skills/vpn-config/references/safe-totp-import.md` for the agent procedure and multi-account selectors.
 
 #### `openconnect-tun` configuration
 

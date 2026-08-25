@@ -27,10 +27,12 @@ EXAMPLE_CONFIG_PATH="$PROJECT_ROOT/configs/local.example.json"
 SSH_PROXY_EXAMPLE_CONFIG_PATH="$PROJECT_ROOT/configs/ssh-proxy.example.json"
 RELEASES_DIR="$PROJECT_ROOT/artifacts/releases"
 CHECK_HOMEBREW_OPENCONNECT_ONLY=0
+INSTALL_VPN_CONFIG_SKILL_ONLY=0
 
 usage() {
   cat <<'EOF'
 Usage: ./scripts/setup.sh [--mac-arch host|arm64|amd64]
+       ./scripts/setup.sh --install-vpn-config-skill
 
 Defaults to a full host-native setup on macOS.
 
@@ -41,6 +43,8 @@ Options:
   --check-homebrew-openconnect
                       Verify the Homebrew-owned openconnect launch linkage and
                       reinstall it only when the launch check fails
+  --install-vpn-config-skill
+                      Install only the bundled vpn-config skill and agent links
 
 When a non-host macOS architecture is requested, setup switches to artifact-only
 cross-build mode:
@@ -121,6 +125,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --check-homebrew-openconnect)
       CHECK_HOMEBREW_OPENCONNECT_ONLY=1
+      shift
+      ;;
+    --install-vpn-config-skill)
+      INSTALL_VPN_CONFIG_SKILL_ONLY=1
       shift
       ;;
     -h|--help)
@@ -261,6 +269,10 @@ if [[ "$CHECK_HOMEBREW_OPENCONNECT_ONLY" == "1" ]]; then
   exit 0
 fi
 
+if [[ "$INSTALL_VPN_CONFIG_SKILL_ONLY" == "1" ]]; then
+  exec "$PROJECT_ROOT/scripts/install-vpn-config-skill.sh"
+fi
+
 if [[ "$CROSS_BUILD_ONLY" != "1" ]]; then
   ensure_brew_formula ripgrep rg
   ensure_brew_formula pipx pipx
@@ -268,6 +280,7 @@ if [[ "$CROSS_BUILD_ONLY" != "1" ]]; then
   ensure_brew_formula openconnect openconnect
   ensure_brew_formula oath-toolkit oathtool
   ensure_brew_formula totp-cli totp-cli
+  ensure_brew_formula zbar zbarimg
 
   require_swift
 
@@ -378,6 +391,8 @@ if [[ ! -f "$SSH_PROXY_CONFIG_PATH" ]]; then
 else
   echo "  SSH proxy config -> $SSH_PROXY_CONFIG_PATH"
 fi
+
+"$PROJECT_ROOT/scripts/install-vpn-config-skill.sh"
 
 echo
 echo "Done. Installed $(git -C "$PROJECT_ROOT" describe --tags --always 2>/dev/null || echo 'unknown')"
