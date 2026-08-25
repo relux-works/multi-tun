@@ -8,6 +8,7 @@ HOST_ARCH_RAW="$(uname -m)"
 
 PROJECT_NAME="multi-tun"
 VLESS_CLI_NAME="vless-tun"
+SSH_PROXY_CLI_NAME="ssh-proxy"
 OPENCONNECT_CLI_NAME="openconnect-tun"
 DUMP_CLI_NAME="dump"
 CISCO_DUMP_COMPAT_NAME="cisco-dump"
@@ -19,9 +20,13 @@ VPN_AUTH_PACKAGE_DIR="$PROJECT_ROOT/desktop/cmd/vpn-auth"
 BIN_DIR="$HOME/.local/bin"
 GLOBAL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vless-tun"
 GLOBAL_CONFIG_PATH="$GLOBAL_CONFIG_DIR/config.json"
+SSH_PROXY_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ssh-proxy"
+SSH_PROXY_CONFIG_PATH="$SSH_PROXY_CONFIG_DIR/config.json"
 LEGACY_CONFIG_PATH="$PROJECT_ROOT/configs/local.json"
 EXAMPLE_CONFIG_PATH="$PROJECT_ROOT/configs/local.example.json"
+SSH_PROXY_EXAMPLE_CONFIG_PATH="$PROJECT_ROOT/configs/ssh-proxy.example.json"
 RELEASES_DIR="$PROJECT_ROOT/artifacts/releases"
+CHECK_HOMEBREW_OPENCONNECT_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -33,6 +38,9 @@ Options:
   --mac-arch host     Build for the current macOS host architecture (default)
   --mac-arch arm64    Build macOS Apple Silicon artifacts
   --mac-arch amd64    Build macOS Intel artifacts
+  --check-homebrew-openconnect
+                      Verify the Homebrew-owned openconnect launch linkage and
+                      reinstall it only when the launch check fails
 
 When a non-host macOS architecture is requested, setup switches to artifact-only
 cross-build mode:
@@ -111,6 +119,10 @@ while [[ $# -gt 0 ]]; do
       REQUESTED_MAC_ARCH="$2"
       shift 2
       ;;
+    --check-homebrew-openconnect)
+      CHECK_HOMEBREW_OPENCONNECT_ONLY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -168,6 +180,38 @@ ensure_brew_formula() {
   fi
 }
 
+repair_stale_homebrew_openconnect() {
+  if ! command -v brew >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local active_openconnect
+  active_openconnect="$(command -v openconnect 2>/dev/null || true)"
+  [[ -n "$active_openconnect" ]] || return 0
+
+  local brew_openconnect_prefix
+  brew_openconnect_prefix="$(brew --prefix openconnect 2>/dev/null || true)"
+  [[ -n "$brew_openconnect_prefix" ]] || return 0
+
+  local brew_openconnect
+  brew_openconnect="$brew_openconnect_prefix/bin/openconnect"
+  [[ -x "$brew_openconnect" ]] || return 0
+  [[ "$active_openconnect" -ef "$brew_openconnect" ]] || return 0
+
+  if "$brew_openconnect" --version >/dev/null 2>&1; then
+    echo "Homebrew openconnect launch check passed."
+    return 0
+  fi
+
+  echo "Homebrew openconnect did not launch; reinstalling it to repair linked libraries..."
+  brew reinstall openconnect
+  if ! "$brew_openconnect" --version; then
+    echo "  ERROR: Homebrew openconnect is still not launchable after reinstall"
+    exit 1
+  fi
+  echo "Homebrew openconnect launch check passed after reinstall."
+}
+
 ensure_pipx_package() {
   local package="$1"
   local binary="${2:-$1}"
@@ -208,6 +252,15 @@ resolve_swift_release_binary() {
   return 1
 }
 
+if [[ "$CHECK_HOMEBREW_OPENCONNECT_ONLY" == "1" ]]; then
+  if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
+    echo "Skipping Homebrew openconnect launch check in cross-build mode."
+  else
+    repair_stale_homebrew_openconnect
+  fi
+  exit 0
+fi
+
 if [[ "$CROSS_BUILD_ONLY" != "1" ]]; then
   ensure_brew_formula ripgrep rg
   ensure_brew_formula pipx pipx
@@ -227,11 +280,14 @@ if [[ "$CROSS_BUILD_ONLY" != "1" ]]; then
   if ! command -v security >/dev/null 2>&1; then
     echo "  WARNING: macOS security CLI is not available; keychain-backed openconnect setup will not work"
   fi
+
+  repair_stale_homebrew_openconnect
 fi
 
 echo "Building $VLESS_CLI_NAME binary..."
 cd "$PROJECT_ROOT"
 VLESS_OUTPUT_PATH="$(build_output_path "$VLESS_CLI_NAME")"
+SSH_PROXY_OUTPUT_PATH="$(build_output_path "$SSH_PROXY_CLI_NAME")"
 OPENCONNECT_OUTPUT_PATH="$(build_output_path "$OPENCONNECT_CLI_NAME")"
 DUMP_OUTPUT_PATH="$(build_output_path "$DUMP_CLI_NAME")"
 VPN_CORE_OUTPUT_PATH="$(build_output_path "$VPN_CORE_CLI_NAME")"
@@ -242,6 +298,8 @@ if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
 fi
 
 go_build_desktop_binary "$VLESS_OUTPUT_PATH" ./desktop/cmd/vless-tun/
+echo "Building $SSH_PROXY_CLI_NAME binary..."
+go_build_desktop_binary "$SSH_PROXY_OUTPUT_PATH" ./desktop/cmd/ssh-proxy/
 echo "Building $OPENCONNECT_CLI_NAME binary..."
 go_build_desktop_binary "$OPENCONNECT_OUTPUT_PATH" ./desktop/cmd/openconnect-tun/
 echo "Building $DUMP_CLI_NAME binary..."
@@ -255,6 +313,7 @@ if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
   cp "$DUMP_OUTPUT_PATH" "$(build_output_path "$CISCO_DUMP_COMPAT_NAME")"
   echo "Cross-build artifacts:"
   echo "  $VLESS_OUTPUT_PATH"
+  echo "  $SSH_PROXY_OUTPUT_PATH"
   echo "  $OPENCONNECT_OUTPUT_PATH"
   echo "  $DUMP_OUTPUT_PATH"
   echo "  $(build_output_path "$CISCO_DUMP_COMPAT_NAME")"
@@ -281,6 +340,7 @@ chmod +x "$VPN_AUTH_OUTPUT_PATH"
 
 mkdir -p "$BIN_DIR"
 ln -sf "$VLESS_OUTPUT_PATH" "$BIN_DIR/$VLESS_CLI_NAME"
+ln -sf "$SSH_PROXY_OUTPUT_PATH" "$BIN_DIR/$SSH_PROXY_CLI_NAME"
 ln -sf "$OPENCONNECT_OUTPUT_PATH" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
 ln -sf "$DUMP_OUTPUT_PATH" "$BIN_DIR/$DUMP_CLI_NAME"
 ln -sf "$DUMP_OUTPUT_PATH" "$BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
@@ -288,6 +348,7 @@ ln -sf "$VPN_CORE_OUTPUT_PATH" "$BIN_DIR/$VPN_CORE_CLI_NAME"
 ln -sf "$ANDROID_RELEASE_OUTPUT_PATH" "$BIN_DIR/$ANDROID_RELEASE_CLI_NAME"
 ln -sf "$VPN_AUTH_OUTPUT_PATH" "$BIN_DIR/$VPN_AUTH_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$VLESS_CLI_NAME"
+echo "  Binary -> $BIN_DIR/$SSH_PROXY_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$OPENCONNECT_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$DUMP_CLI_NAME"
 echo "  Alias  -> $BIN_DIR/$CISCO_DUMP_COMPAT_NAME"
@@ -310,6 +371,14 @@ else
   echo "  Config -> $GLOBAL_CONFIG_PATH"
 fi
 
+mkdir -p "$SSH_PROXY_CONFIG_DIR"
+if [[ ! -f "$SSH_PROXY_CONFIG_PATH" ]]; then
+  cp "$SSH_PROXY_EXAMPLE_CONFIG_PATH" "$SSH_PROXY_CONFIG_PATH"
+  echo "  Created SSH proxy example config -> $SSH_PROXY_CONFIG_PATH"
+else
+  echo "  SSH proxy config -> $SSH_PROXY_CONFIG_PATH"
+fi
+
 echo
 echo "Done. Installed $(git -C "$PROJECT_ROOT" describe --tags --always 2>/dev/null || echo 'unknown')"
 echo
@@ -318,6 +387,7 @@ echo "  edit $GLOBAL_CONFIG_PATH"
 echo "  $VLESS_CLI_NAME setup --source-url 'vless://...'"
 echo "  $VLESS_CLI_NAME refresh"
 echo "  $VLESS_CLI_NAME render"
+echo "  $SSH_PROXY_CLI_NAME setup --host 'ssh-alias' --server dedicated --force"
 echo "  $VPN_CORE_CLI_NAME install"
 echo "  $ANDROID_RELEASE_CLI_NAME setup"
 echo "  $OPENCONNECT_CLI_NAME setup --vpn-name 'Corp VPN'"
