@@ -124,9 +124,10 @@ type TUNConfig struct {
 }
 
 type RoutingConfig struct {
-	BypassSuffixes []string `json:"bypass_suffixes,omitempty"`
-	BypassExcludes []string `json:"bypass_exclude_suffixes,omitempty"`
-	Routes         []string `json:"routes,omitempty"`
+	BypassSuffixes    []string          `json:"bypass_suffixes,omitempty"`
+	BypassExcludes    []string          `json:"bypass_exclude_suffixes,omitempty"`
+	Routes            []string          `json:"routes,omitempty"`
+	RouteDescriptions map[string]string `json:"route_descriptions,omitempty"`
 }
 
 type EngineConfig struct {
@@ -754,7 +755,7 @@ func mergeRoutingConfig(base RoutingConfig, override *RoutingConfig) RoutingConf
 	}
 	result := base
 	if override.BypassSuffixes != nil {
-		result.BypassSuffixes = cloneStrings(override.BypassSuffixes)
+		result.BypassSuffixes = mergeBypassSuffixes(base.BypassSuffixes, override.BypassSuffixes)
 	}
 	if override.BypassExcludes != nil {
 		result.BypassExcludes = cloneStrings(override.BypassExcludes)
@@ -762,7 +763,21 @@ func mergeRoutingConfig(base RoutingConfig, override *RoutingConfig) RoutingConf
 	if override.Routes != nil {
 		result.Routes = cloneStrings(override.Routes)
 	}
+	if override.RouteDescriptions != nil {
+		result.RouteDescriptions = cloneStringMap(override.RouteDescriptions)
+	}
 	return result
+}
+
+func mergeBypassSuffixes(base []string, override []string) []string {
+	if override == nil {
+		return cloneStrings(base)
+	}
+	if len(override) == 0 {
+		// An explicit empty list preserves the documented full-tunnel reset.
+		return []string{}
+	}
+	return normalizeSuffixes(append(cloneStrings(base), override...))
 }
 
 func mergeEngineConfig(base *EngineConfig, override *EngineConfig) *EngineConfig {
@@ -1446,6 +1461,17 @@ func cloneStrings(values []string) []string {
 		return nil
 	}
 	return append([]string(nil), values...)
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func cloneEngineConfig(value *EngineConfig) *EngineConfig {

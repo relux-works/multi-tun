@@ -484,6 +484,56 @@ func TestRenderAddsDirectRouteCIDRs(t *testing.T) {
 	}
 }
 
+func TestRenderOrdersProxyExclusionsThenBypassesThenDirectCIDRs(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "fixtures", "dancevpn.subscription.plain.txt"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	profiles, err := subscription.ParseProfiles(string(raw))
+	if err != nil {
+		t.Fatalf("ParseProfiles returned error: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Routing.BypassSuffixes = []string{"direct.example"}
+	cfg.Routing.BypassExcludes = []string{"proxy.example"}
+	cfg.Routing.Routes = []string{"198.51.100.7/32"}
+
+	data, err := Render(cfg, profiles[0])
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	indexes := map[string]int{}
+	for index, rawRule := range root["route"].(map[string]any)["rules"].([]any) {
+		rule := rawRule.(map[string]any)
+		rawTags, ok := rule["rule_set"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawTag := range rawTags {
+			if tag, ok := rawTag.(string); ok {
+				indexes[tag] = index
+			}
+		}
+	}
+	proxyException, hasProxyException := indexes["proxy-exceptions"]
+	bypass, hasBypass := indexes["ru-direct"]
+	directCIDR, hasDirectCIDR := indexes["direct-routes"]
+	if !hasProxyException || !hasBypass || !hasDirectCIDR {
+		t.Fatalf("route rule indexes = %v, want proxy exceptions, bypasses, and direct CIDRs", indexes)
+	}
+	if !(proxyException < bypass && bypass < directCIDR) {
+		t.Fatalf("route precedence = proxy-exceptions:%d ru-direct:%d direct-routes:%d, want proxy exceptions before bypasses before direct CIDRs", proxyException, bypass, directCIDR)
+	}
+}
+
 func TestRenderAppliesConfiguredSniffAndTLSClientOptions(t *testing.T) {
 	t.Parallel()
 

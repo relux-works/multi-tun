@@ -184,7 +184,11 @@ func TestLoadPreferredSchemaUsesPreferredFields(t *testing.T) {
     }
   },
   "routing": {
-    "bypass_suffixes": [".ru"]
+    "bypass_suffixes": [".ru"],
+    "routes": ["198.51.100.7/32"],
+    "route_descriptions": {
+      "198.51.100.7/32": "Dedicated SSH egress"
+    }
   },
   "dns": {
     "proxy_resolver": {
@@ -222,6 +226,9 @@ func TestLoadPreferredSchemaUsesPreferredFields(t *testing.T) {
 	}
 	if got, want := cfg.LogMaxLines(), 500; got != want {
 		t.Fatalf("LogMaxLines() = %d, want %d", got, want)
+	}
+	if got, want := cfg.Routing.RouteDescriptions["198.51.100.7/32"], "Dedicated SSH egress"; got != want {
+		t.Fatalf("Routing.RouteDescriptions = %q, want %q", got, want)
 	}
 }
 
@@ -273,7 +280,7 @@ func TestSetupWritesPreferredFields(t *testing.T) {
 	}
 }
 
-func TestEffectiveServerProfileMergesRoutingOverrides(t *testing.T) {
+func TestEffectiveServerProfileMergesRoutingBypasses(t *testing.T) {
 	t.Parallel()
 
 	cfg := Default()
@@ -292,13 +299,14 @@ func TestEffectiveServerProfileMergesRoutingOverrides(t *testing.T) {
 				SingboxConfigPath: "/tmp/fortinetz.json",
 			},
 			Routing: &RoutingConfig{
-				BypassSuffixes: []string{".ru"},
+				BypassSuffixes: []string{".ru", ".server.example"},
 				Routes:         []string{"10.0.0.0/8"},
 			},
 			Profiles: map[string]ProfileConfig{
 				"de": {
 					Selector: "Germany",
 					Routing: &RoutingConfig{
+						BypassSuffixes: []string{"profile.example", ".SERVER.EXAMPLE"},
 						BypassExcludes: []string{"t.me"},
 						Routes:         []string{"172.16.0.0/12"},
 					},
@@ -332,7 +340,7 @@ func TestEffectiveServerProfileMergesRoutingOverrides(t *testing.T) {
 	if got, want := effective.DefaultProfileSelector(), "Germany"; got != want {
 		t.Fatalf("DefaultProfileSelector() = %q, want %q", got, want)
 	}
-	if got, want := effective.NormalizedBypassSuffixes(), []string{".ru"}; !equalStrings(got, want) {
+	if got, want := effective.NormalizedBypassSuffixes(), []string{".ru", ".xn--p1ai", ".server.example", "profile.example"}; !equalStrings(got, want) {
 		t.Fatalf("NormalizedBypassSuffixes() = %v, want %v", got, want)
 	}
 	if got, want := effective.NormalizedBypassExcludes(), []string{"t.me"}; !equalStrings(got, want) {
@@ -340,6 +348,32 @@ func TestEffectiveServerProfileMergesRoutingOverrides(t *testing.T) {
 	}
 	if got, want := effective.NormalizedRoutes(), []string{"172.16.0.0/12"}; !equalStrings(got, want) {
 		t.Fatalf("NormalizedRoutes() = %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveServerProfileAllowsExplicitEmptyBypassesForFullTunnel(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Current = &CurrentConfig{Server: "dance", Profile: "default"}
+	cfg.Servers = map[string]ServerConfig{
+		"dance": {
+			Source:  SourceConfig{Mode: SourceModeProxy, URL: "https://example.com/dance"},
+			Routing: &RoutingConfig{BypassSuffixes: []string{"server.example"}},
+			Profiles: map[string]ProfileConfig{
+				"default": {
+					Routing: &RoutingConfig{BypassSuffixes: []string{}},
+				},
+			},
+		},
+	}
+
+	effective, _, err := cfg.Effective(SelectionOptions{})
+	if err != nil {
+		t.Fatalf("Effective() error = %v", err)
+	}
+	if got := effective.NormalizedBypassSuffixes(); len(got) != 0 {
+		t.Fatalf("NormalizedBypassSuffixes() = %v, want explicit full-tunnel reset", got)
 	}
 }
 
