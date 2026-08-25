@@ -2,6 +2,8 @@ package openconnect
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ const (
 	metadataFilePrefix     = "session-"
 	runtimeFileName        = "current-session.json"
 	orphanCleanupLogName   = "orphan-cleanup.log"
+	startupLockFileName    = "startup.lock"
 )
 
 var cleanupOrphanedResolverStateOpenConnect = cleanupOrphanedResolverState
@@ -33,6 +36,7 @@ type CurrentSession struct {
 	StartedAt        time.Time `json:"started_at"`
 	LogPath          string    `json:"log_path"`
 	MetadataPath     string    `json:"metadata_path"`
+	PIDFilePath      string    `json:"pid_file_path,omitempty"`
 	Server           string    `json:"server"`
 	ResolvedFrom     string    `json:"resolved_from,omitempty"`
 	Mode             string    `json:"mode"`
@@ -46,6 +50,10 @@ type CurrentSession struct {
 	BypassSuffixes   []string  `json:"bypass_suffixes,omitempty"`
 	VPNNameservers   []string  `json:"vpn_nameservers,omitempty"`
 	HelperSocketPath string    `json:"helper_socket_path,omitempty"`
+}
+
+type openConnectStartupLock struct {
+	file *os.File
 }
 
 type OverlayDNS struct {
@@ -111,6 +119,48 @@ func CurrentPath(cacheDir string) string {
 	return filepath.Join(RuntimeDir(cacheDir), runtimeFileName)
 }
 
+func newOpenConnectAttemptID(now time.Time) (string, error) {
+	var suffix [16]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", fmt.Errorf("generate openconnect attempt id: %w", err)
+	}
+	return now.UTC().Format(sessionTimestampFormat) + "-" + hex.EncodeToString(suffix[:]), nil
+}
+
+func acquireOpenConnectStartupLock(cacheDir string) (*openConnectStartupLock, error) {
+	runtimeDir := RuntimeDir(cacheDir)
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create openconnect runtime directory: %w", err)
+	}
+	lockPath := filepath.Join(runtimeDir, startupLockFileName)
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open openconnect startup lock: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("another openconnect startup is already in progress for this cache; retry after it exits")
+		}
+		return nil, fmt.Errorf("lock openconnect startup: %w", err)
+	}
+	return &openConnectStartupLock{file: file}, nil
+}
+
+func (lock *openConnectStartupLock) Close() error {
+	if lock == nil || lock.file == nil {
+		return nil
+	}
+	file := lock.file
+	lock.file = nil
+	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	closeErr := file.Close()
+	return errors.Join(
+		wrapSessionError("unlock openconnect startup", unlockErr),
+		wrapSessionError("close openconnect startup lock", closeErr),
+	)
+}
+
 func LoadCurrent(cacheDir string) (CurrentSession, error) {
 	raw, err := os.ReadFile(CurrentPath(cacheDir))
 	if err != nil {
@@ -171,6 +221,27 @@ func ClearCurrent(cacheDir string) error {
 		return nil
 	}
 	return err
+}
+
+func clearCurrentOpenConnectAttempt(cacheDir, attemptID string) error {
+	current, err := LoadCurrent(cacheDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.ID != attemptID {
+		return nil
+	}
+	return ClearCurrent(cacheDir)
+}
+
+func wrapSessionError(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", action, err)
 }
 
 func SaveMetadata(current CurrentSession) error {

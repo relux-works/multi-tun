@@ -1,6 +1,7 @@
 package openconnect
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -80,6 +81,11 @@ func helperConnect(cfg PrivilegedHelperConfig, command []string, cookie, logPath
 
 func helperRun(cfg PrivilegedHelperConfig, command []string, stdinData, logPath string) error {
 	return vpnCoreRunOpenConnect(cfg, command, stdinData, logPath)
+}
+
+func isHelperRPCTimeout(err error) bool {
+	var timeoutErr *vpncore.RPCTimeoutError
+	return errors.As(err, &timeoutErr)
 }
 
 func helperSignal(cfg PrivilegedHelperConfig, pid int, signal string) error {

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"multi-tun/desktop/internal/core/vpncore"
 )
 
 func TestFindOpenConnectPIDFromOutput(t *testing.T) {
@@ -51,6 +53,7 @@ func TestConnectWithCookiePropagatesVPNCoreTimeoutSnapshotWithoutPayload(t *test
 		&authResult{ConnectURL: secretEndpoint, Cookie: secretCookie},
 		"/usr/local/bin/openconnect",
 		"",
+		filepath.Join(t.TempDir(), "openconnect.pid"),
 		&bytes.Buffer{},
 		PrivilegedModeHelper,
 		DefaultPrivilegedHelperConfig(),
@@ -69,6 +72,663 @@ func TestConnectWithCookiePropagatesVPNCoreTimeoutSnapshotWithoutPayload(t *test
 	}
 	if !strings.Contains(strings.Join(capturedCommand, " "), secretEndpoint) || !strings.Contains(capturedStdin, secretCookie) {
 		t.Fatalf("test did not exercise secret-bearing RPC payload: command=%q stdin=%q", capturedCommand, capturedStdin)
+	}
+}
+
+func TestConnectWithCookieCleansUpRecoveredHelperPIDAfterTimeout(t *testing.T) {
+	previousRun := vpnCoreRunOpenConnect
+	previousSignal := failedStartSignalOpenConnect
+	previousAlive := failedStartProcessAliveOpenConnect
+	previousCommand := execCommandOpenConnect
+	t.Cleanup(func() {
+		vpnCoreRunOpenConnect = previousRun
+		failedStartSignalOpenConnect = previousSignal
+		failedStartProcessAliveOpenConnect = previousAlive
+		execCommandOpenConnect = previousCommand
+	})
+
+	const attemptPID = 4242
+	pidPath := filepath.Join(t.TempDir(), "openconnect.pid")
+	timeoutErr := &vpncore.RPCTimeoutError{
+		Action:          "run",
+		ResponseTimeout: 5 * time.Second,
+	}
+	pidWriteErr := make(chan error, 1)
+	vpnCoreRunOpenConnect = func(_ PrivilegedHelperConfig, command []string, _ string, _ string) error {
+		wantPIDArg := "--pid-file=" + pidPath
+		if !containsString(command, wantPIDArg) {
+			t.Fatalf("helper command = %q, want %q", command, wantPIDArg)
+		}
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			pidWriteErr <- os.WriteFile(pidPath, []byte("4242\n"), 0o644)
+		}()
+		return timeoutErr
+	}
+
+	alive := true
+	var signals []string
+	var signaledPIDs []int
+	failedStartProcessAliveOpenConnect = func(pid int) (bool, error) {
+		if pid != attemptPID {
+			t.Fatalf("ProcessAlive pid = %d, want %d", pid, attemptPID)
+		}
+		return alive, nil
+	}
+	failedStartSignalOpenConnect = func(pid int, signal, mode, _ string) error {
+		signaledPIDs = append(signaledPIDs, pid)
+		signals = append(signals, signal)
+		if mode != PrivilegedModeHelper {
+			t.Fatalf("signal mode = %q, want helper", mode)
+		}
+		alive = false
+		return nil
+	}
+	execCommandOpenConnect = func(name string, args ...string) *exec.Cmd {
+		if name == "pgrep" {
+			t.Fatalf("unexpected process-name lookup %s %q", name, args)
+		}
+		return previousCommand(name, args...)
+	}
+
+	pid, _, err := connectWithCookie(
+		&authResult{ConnectURL: "https://vpn.example.test/outside", Cookie: "COOKIE_SECRET"},
+		"/usr/local/bin/openconnect",
+		"",
+		pidPath,
+		&bytes.Buffer{},
+		PrivilegedModeHelper,
+		DefaultPrivilegedHelperConfig(),
+		ClientMimicry{},
+	)
+	if !errors.Is(err, timeoutErr) {
+		t.Fatalf("connectWithCookie() error = %v, want wrapped timeout", err)
+	}
+	if writeErr := <-pidWriteErr; writeErr != nil {
+		t.Fatalf("WriteFile(pid) error = %v", writeErr)
+	}
+	if pid != attemptPID {
+		t.Fatalf("pid = %d, want recovered pid %d", pid, attemptPID)
+	}
+	if got, want := signaledPIDs, []int{attemptPID}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("signaled pids = %v, want %v", got, want)
+	}
+	if got, want := signals, []string{"-INT"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+	if _, statErr := os.Stat(pidPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("pid file still present after failed-start cleanup: %v", statErr)
+	}
+}
+
+func TestConnectWithCookieReturnsPIDFilePIDOnHelperSuccess(t *testing.T) {
+	previousRun := vpnCoreRunOpenConnect
+	previousCommand := execCommandOpenConnect
+	t.Cleanup(func() {
+		vpnCoreRunOpenConnect = previousRun
+		execCommandOpenConnect = previousCommand
+	})
+
+	const attemptPID = 4343
+	pidPath := filepath.Join(t.TempDir(), "openconnect.pid")
+	vpnCoreRunOpenConnect = func(_ PrivilegedHelperConfig, command []string, _ string, _ string) error {
+		if !containsString(command, "--pid-file="+pidPath) {
+			t.Fatalf("helper command = %q, want per-attempt pid file", command)
+		}
+		return os.WriteFile(pidPath, []byte("4343\n"), 0o644)
+	}
+	execCommandOpenConnect = func(name string, args ...string) *exec.Cmd {
+		if name == "pgrep" {
+			t.Fatalf("unexpected process-name lookup %s %q", name, args)
+		}
+		if name == "ifconfig" {
+			return exec.Command("false")
+		}
+		return previousCommand(name, args...)
+	}
+
+	pid, _, err := connectWithCookie(
+		&authResult{ConnectURL: "https://vpn.example.test/outside", Cookie: "COOKIE_SECRET"},
+		"/usr/local/bin/openconnect",
+		"",
+		pidPath,
+		&bytes.Buffer{},
+		PrivilegedModeHelper,
+		DefaultPrivilegedHelperConfig(),
+		ClientMimicry{},
+	)
+	if err != nil {
+		t.Fatalf("connectWithCookie() error = %v", err)
+	}
+	if pid != attemptPID {
+		t.Fatalf("pid = %d, want %d", pid, attemptPID)
+	}
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("active pid file missing: %v", err)
+	}
+}
+
+func TestWaitForOpenConnectPIDFileRetriesPartialWrite(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "openconnect.pid")
+	if err := os.WriteFile(pidPath, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(empty pid) error = %v", err)
+	}
+	writeErr := make(chan error, 1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		writeErr <- os.WriteFile(pidPath, []byte("4444\n"), 0o644)
+	}()
+
+	pid, err := waitForOpenConnectPIDFile(pidPath, 250*time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForOpenConnectPIDFile() error = %v", err)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatalf("WriteFile(pid) error = %v", err)
+	}
+	if pid != 4444 {
+		t.Fatalf("pid = %d, want 4444", pid)
+	}
+}
+
+func TestCleanupFailedOpenConnectStartEscalatesOnlyAttemptPID(t *testing.T) {
+	previousSignal := failedStartSignalOpenConnect
+	previousAlive := failedStartProcessAliveOpenConnect
+	previousTimeout := failedStartCleanupTimeoutOpenConnect
+	previousPoll := failedStartCleanupPollOpenConnect
+	t.Cleanup(func() {
+		failedStartSignalOpenConnect = previousSignal
+		failedStartProcessAliveOpenConnect = previousAlive
+		failedStartCleanupTimeoutOpenConnect = previousTimeout
+		failedStartCleanupPollOpenConnect = previousPoll
+	})
+
+	const attemptPID = 5151
+	alive := true
+	var signals []string
+	failedStartProcessAliveOpenConnect = func(pid int) (bool, error) {
+		if pid != attemptPID {
+			t.Fatalf("ProcessAlive pid = %d, want %d", pid, attemptPID)
+		}
+		return alive, nil
+	}
+	failedStartSignalOpenConnect = func(pid int, signal, _, _ string) error {
+		if pid != attemptPID {
+			t.Fatalf("signal pid = %d, want %d", pid, attemptPID)
+		}
+		signals = append(signals, signal)
+		if signal == "-KILL" {
+			alive = false
+		}
+		return nil
+	}
+	failedStartCleanupTimeoutOpenConnect = 15 * time.Millisecond
+	failedStartCleanupPollOpenConnect = time.Millisecond
+
+	if err := cleanupFailedOpenConnectStart(attemptPID, PrivilegedModeHelper, "/tmp/test-vpn-core.sock"); err != nil {
+		t.Fatalf("cleanupFailedOpenConnectStart() error = %v", err)
+	}
+	if got, want := signals, []string{"-INT", "-TERM", "-KILL"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestCleanupFailedOpenConnectAttemptClearsCurrentAfterExit(t *testing.T) {
+	previousAlive := failedStartProcessAliveOpenConnect
+	t.Cleanup(func() {
+		failedStartProcessAliveOpenConnect = previousAlive
+	})
+
+	cacheDir := t.TempDir()
+	pidPath := filepath.Join(RuntimeDir(cacheDir), "attempt.pid")
+	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime) error = %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte("6161\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid) error = %v", err)
+	}
+	current := CurrentSession{
+		ID:           "test-failed-start",
+		PID:          6161,
+		MetadataPath: filepath.Join(t.TempDir(), "session.json"),
+		PIDFilePath:  pidPath,
+	}
+	if err := SaveCurrent(cacheDir, current); err != nil {
+		t.Fatalf("SaveCurrent() error = %v", err)
+	}
+	failedStartProcessAliveOpenConnect = func(pid int) (bool, error) {
+		if pid != current.PID {
+			t.Fatalf("ProcessAlive pid = %d, want %d", pid, current.PID)
+		}
+		return false, nil
+	}
+
+	if err := cleanupFailedOpenConnectAttempt(cacheDir, current); err != nil {
+		t.Fatalf("cleanupFailedOpenConnectAttempt() error = %v", err)
+	}
+	if _, err := LoadCurrent(cacheDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadCurrent() error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(pidPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pid file stat error = %v, want not exist", err)
+	}
+}
+
+func TestCleanupFailedOpenConnectAttemptPreservesCurrentWhenPIDSurvives(t *testing.T) {
+	previousSignal := failedStartSignalOpenConnect
+	previousAlive := failedStartProcessAliveOpenConnect
+	previousTimeout := failedStartCleanupTimeoutOpenConnect
+	previousPoll := failedStartCleanupPollOpenConnect
+	t.Cleanup(func() {
+		failedStartSignalOpenConnect = previousSignal
+		failedStartProcessAliveOpenConnect = previousAlive
+		failedStartCleanupTimeoutOpenConnect = previousTimeout
+		failedStartCleanupPollOpenConnect = previousPoll
+	})
+
+	cacheDir := t.TempDir()
+	pidPath := filepath.Join(RuntimeDir(cacheDir), "attempt.pid")
+	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime) error = %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte("6262\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid) error = %v", err)
+	}
+	current := CurrentSession{
+		ID:             "test-failed-start-survives",
+		PID:            6262,
+		MetadataPath:   filepath.Join(t.TempDir(), "session.json"),
+		PIDFilePath:    pidPath,
+		PrivilegedMode: PrivilegedModeHelper,
+	}
+	failedStartProcessAliveOpenConnect = func(pid int) (bool, error) {
+		if pid != current.PID {
+			t.Fatalf("ProcessAlive pid = %d, want %d", pid, current.PID)
+		}
+		return true, nil
+	}
+	failedStartSignalOpenConnect = func(pid int, _, _, _ string) error {
+		if pid != current.PID {
+			t.Fatalf("signal pid = %d, want %d", pid, current.PID)
+		}
+		return nil
+	}
+	failedStartCleanupTimeoutOpenConnect = 6 * time.Millisecond
+	failedStartCleanupPollOpenConnect = time.Millisecond
+
+	err := cleanupFailedOpenConnectAttempt(cacheDir, current)
+	if err == nil {
+		t.Fatal("cleanupFailedOpenConnectAttempt() error = nil")
+	}
+	preserved, loadErr := LoadCurrent(cacheDir)
+	if loadErr != nil {
+		t.Fatalf("LoadCurrent() error = %v", loadErr)
+	}
+	if preserved.PID != current.PID || preserved.PIDFilePath != pidPath {
+		t.Fatalf("preserved current = %#v, want pid=%d pid_file=%q", preserved, current.PID, pidPath)
+	}
+	if _, statErr := os.Stat(pidPath); statErr != nil {
+		t.Fatalf("pid file was not preserved: %v", statErr)
+	}
+}
+
+func TestFindMatchingOpenConnectPIDsMatchesSelectedServerOnly(t *testing.T) {
+	processes := parseOpenConnectProcessList(strings.Join([]string{
+		"101 /opt/homebrew/bin/openconnect --background https://vpn.example.test/outside",
+		"202 /opt/homebrew/bin/openconnect --background https://other.example.test/outside",
+		"303 /usr/bin/sleep 30",
+	}, "\n"))
+
+	got := findMatchingOpenConnectPIDs(processes, "vpn.example.test/inside")
+	if want := []int{101}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("matching pids = %v, want %v", got, want)
+	}
+}
+
+func TestBuildOpenConnectCommandPreviewKeepsSudoAndDirectModes(t *testing.T) {
+	const pidPath = "/tmp/openconnect-attempt.pid"
+	sudoCommand := buildOpenConnectCommandPreview(
+		"/opt/homebrew/bin/openconnect",
+		"vpn.example.test/outside",
+		"/tmp/vpnc-script",
+		pidPath,
+		PrivilegedModeSudo,
+		ClientMimicry{},
+	)
+	if len(sudoCommand) < 3 || sudoCommand[0] != "sudo" || sudoCommand[1] != "-n" {
+		t.Fatalf("sudo command = %q, want sudo -n prefix", sudoCommand)
+	}
+	if !containsString(sudoCommand, "--pid-file="+pidPath) {
+		t.Fatalf("sudo command = %q, want per-attempt pid file", sudoCommand)
+	}
+
+	directCommand := buildOpenConnectCommandPreview(
+		"/opt/homebrew/bin/openconnect",
+		"vpn.example.test/outside",
+		"/tmp/vpnc-script",
+		pidPath,
+		PrivilegedModeDirect,
+		ClientMimicry{},
+	)
+	if len(directCommand) == 0 || directCommand[0] != "/opt/homebrew/bin/openconnect" {
+		t.Fatalf("direct command = %q, want openconnect executable first", directCommand)
+	}
+	if containsString(directCommand, "sudo") || !containsString(directCommand, "--pid-file="+pidPath) {
+		t.Fatalf("direct command = %q, want no sudo and per-attempt pid file", directCommand)
+	}
+}
+
+func TestRejectMatchingUntrackedOpenConnectSessionReportsExactPID(t *testing.T) {
+	previous := listOpenConnectProcessesOpenConnect
+	t.Cleanup(func() {
+		listOpenConnectProcessesOpenConnect = previous
+	})
+
+	listOpenConnectProcessesOpenConnect = func() ([]openConnectProcess, error) {
+		return []openConnectProcess{
+			{PID: 7171, Args: []string{"/opt/homebrew/bin/openconnect", "--background", "https://vpn.example.test/outside"}},
+			{PID: 8181, Args: []string{"/opt/homebrew/bin/openconnect", "--background", "https://unrelated.example.test/outside"}},
+		}, nil
+	}
+
+	err := rejectMatchingUntrackedOpenConnectSession("vpn.example.test/outside")
+	if err == nil {
+		t.Fatal("rejectMatchingUntrackedOpenConnectSession() error = nil")
+	}
+	if !strings.Contains(err.Error(), "untracked openconnect session") || !strings.Contains(err.Error(), "pid=7171") {
+		t.Fatalf("error = %v, want untracked session and exact pid", err)
+	}
+	if strings.Contains(err.Error(), "8181") {
+		t.Fatalf("error mentioned unrelated pid: %v", err)
+	}
+}
+
+func TestConnectRejectsMatchingUntrackedOpenConnectSessionBeforeDryRun(t *testing.T) {
+	previousLookPath := execLookPathOpenConnect
+	previousProcesses := listOpenConnectProcessesOpenConnect
+	t.Cleanup(func() {
+		execLookPathOpenConnect = previousLookPath
+		listOpenConnectProcessesOpenConnect = previousProcesses
+	})
+
+	execLookPathOpenConnect = func(name string) (string, error) {
+		if name == "openconnect" {
+			return "/opt/homebrew/bin/openconnect", nil
+		}
+		return previousLookPath(name)
+	}
+	listOpenConnectProcessesOpenConnect = func() ([]openConnectProcess, error) {
+		return []openConnectProcess{{
+			PID:  9191,
+			Args: []string{"/opt/homebrew/bin/openconnect", "--background", "https://vpn.example.test/outside"},
+		}}, nil
+	}
+
+	_, err := Connect(ConnectOptions{
+		Server:         "vpn.example.test/outside",
+		CacheDir:       t.TempDir(),
+		DryRun:         true,
+		PrivilegedMode: PrivilegedModeDirect,
+	})
+	if err == nil {
+		t.Fatal("Connect() error = nil")
+	}
+	if !strings.Contains(err.Error(), "untracked openconnect session") || !strings.Contains(err.Error(), "pid=9191") {
+		t.Fatalf("Connect() error = %v, want untracked session and exact pid", err)
+	}
+}
+
+func TestConcurrentSameSecondOpenConnectAttemptsKeepPIDOwnershipIsolated(t *testing.T) {
+	previousSignal := failedStartSignalOpenConnect
+	previousAlive := failedStartProcessAliveOpenConnect
+	t.Cleanup(func() {
+		failedStartSignalOpenConnect = previousSignal
+		failedStartProcessAliveOpenConnect = previousAlive
+	})
+
+	now := time.Date(2026, time.July, 30, 14, 0, 0, 0, time.UTC)
+	type attemptIDResult struct {
+		id  string
+		err error
+	}
+	results := make(chan attemptIDResult, 2)
+	for range 2 {
+		go func() {
+			id, err := newOpenConnectAttemptID(now)
+			results <- attemptIDResult{id: id, err: err}
+		}()
+	}
+	firstResult := <-results
+	secondResult := <-results
+	if firstResult.err != nil {
+		t.Fatalf("newOpenConnectAttemptID(first) error = %v", firstResult.err)
+	}
+	if secondResult.err != nil {
+		t.Fatalf("newOpenConnectAttemptID(second) error = %v", secondResult.err)
+	}
+	attemptA := firstResult.id
+	attemptB := secondResult.id
+	if attemptA == attemptB {
+		t.Fatalf("same-second attempt IDs collided: %q", attemptA)
+	}
+	prefix := now.Format(sessionTimestampFormat) + "-"
+	for _, attemptID := range []string{attemptA, attemptB} {
+		if !strings.HasPrefix(attemptID, prefix) {
+			t.Fatalf("attempt id = %q, want prefix %q", attemptID, prefix)
+		}
+		suffix := strings.TrimPrefix(attemptID, prefix)
+		decoded, err := hex.DecodeString(suffix)
+		if err != nil || len(decoded) != 16 {
+			t.Fatalf("attempt id suffix = %q, want 128-bit hex: decoded=%d error=%v", suffix, len(decoded), err)
+		}
+	}
+
+	cacheDir := t.TempDir()
+	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime) error = %v", err)
+	}
+	pidPathA := filepath.Join(RuntimeDir(cacheDir), "openconnect-"+attemptA+".pid")
+	pidPathB := filepath.Join(RuntimeDir(cacheDir), "openconnect-"+attemptB+".pid")
+	if pidPathA == pidPathB {
+		t.Fatalf("same-second PID paths collided: %q", pidPathA)
+	}
+	if err := os.WriteFile(pidPathA, []byte("1111\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(attempt A pid) error = %v", err)
+	}
+	if err := os.WriteFile(pidPathB, []byte("2222\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(attempt B pid) error = %v", err)
+	}
+
+	currentB := CurrentSession{
+		ID:           attemptB,
+		PID:          2222,
+		MetadataPath: filepath.Join(t.TempDir(), "session-b.json"),
+		PIDFilePath:  pidPathB,
+	}
+	if err := SaveCurrent(cacheDir, currentB); err != nil {
+		t.Fatalf("SaveCurrent(attempt B) error = %v", err)
+	}
+
+	alive := map[int]bool{1111: true, 2222: true}
+	var signaled []int
+	failedStartProcessAliveOpenConnect = func(pid int) (bool, error) {
+		return alive[pid], nil
+	}
+	failedStartSignalOpenConnect = func(pid int, signal, _, _ string) error {
+		signaled = append(signaled, pid)
+		if pid == 1111 && signal == "-INT" {
+			alive[pid] = false
+		}
+		return nil
+	}
+
+	pid, _, launchErr := failedOpenConnectLaunchResult(
+		pidPathA,
+		PrivilegedModeDirect,
+		"",
+		errors.New("attempt A failed"),
+	)
+	if launchErr == nil {
+		t.Fatal("failedOpenConnectLaunchResult() error = nil")
+	}
+	if pid != 1111 {
+		t.Fatalf("recovered pid = %d, want attempt A pid 1111", pid)
+	}
+	if got, want := fmt.Sprint(signaled), fmt.Sprint([]int{1111}); got != want {
+		t.Fatalf("signaled pids = %s, want %s", got, want)
+	}
+	if !alive[2222] {
+		t.Fatal("attempt B was terminated by attempt A cleanup")
+	}
+	if _, err := os.Stat(pidPathA); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attempt A pid file stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(pidPathB); err != nil {
+		t.Fatalf("attempt B pid file was not preserved: %v", err)
+	}
+
+	if err := cleanupFailedOpenConnectAttempt(cacheDir, CurrentSession{
+		ID:          attemptA,
+		PID:         1111,
+		PIDFilePath: pidPathA,
+	}); err != nil {
+		t.Fatalf("cleanupFailedOpenConnectAttempt(attempt A) error = %v", err)
+	}
+	preserved, err := LoadCurrent(cacheDir)
+	if err != nil {
+		t.Fatalf("LoadCurrent() error = %v", err)
+	}
+	if preserved.ID != attemptB || preserved.PID != 2222 || preserved.PIDFilePath != pidPathB {
+		t.Fatalf("current session = %#v, want attempt B preserved", preserved)
+	}
+}
+
+func TestOpenConnectStartupLockSerializesCacheScope(t *testing.T) {
+	cacheDir := t.TempDir()
+	first, err := acquireOpenConnectStartupLock(cacheDir)
+	if err != nil {
+		t.Fatalf("acquireOpenConnectStartupLock(first) error = %v", err)
+	}
+
+	secondErr := make(chan error, 1)
+	go func() {
+		second, err := acquireOpenConnectStartupLock(cacheDir)
+		if err == nil {
+			err = second.Close()
+		}
+		secondErr <- err
+	}()
+	err = <-secondErr
+	if err == nil || !strings.Contains(err.Error(), "startup is already in progress") {
+		t.Fatalf("second lock error = %v, want startup-in-progress refusal", err)
+	}
+
+	otherCacheLock, err := acquireOpenConnectStartupLock(t.TempDir())
+	if err != nil {
+		t.Fatalf("acquireOpenConnectStartupLock(other cache) error = %v", err)
+	}
+	if err := otherCacheLock.Close(); err != nil {
+		t.Fatalf("Close(other cache lock) error = %v", err)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first lock) error = %v", err)
+	}
+	third, err := acquireOpenConnectStartupLock(cacheDir)
+	if err != nil {
+		t.Fatalf("acquireOpenConnectStartupLock(after release) error = %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatalf("Close(third lock) error = %v", err)
+	}
+}
+
+func TestConnectRefusesConcurrentStartupForSameCache(t *testing.T) {
+	previousLookPath := execLookPathOpenConnect
+	previousProcesses := listOpenConnectProcessesOpenConnect
+	t.Cleanup(func() {
+		execLookPathOpenConnect = previousLookPath
+		listOpenConnectProcessesOpenConnect = previousProcesses
+	})
+
+	cacheDir := t.TempDir()
+	lock, err := acquireOpenConnectStartupLock(cacheDir)
+	if err != nil {
+		t.Fatalf("acquireOpenConnectStartupLock() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lock.Close(); err != nil {
+			t.Errorf("Close(startup lock) error = %v", err)
+		}
+	})
+	execLookPathOpenConnect = func(name string) (string, error) {
+		if name == "openconnect" {
+			return "/opt/homebrew/bin/openconnect", nil
+		}
+		return previousLookPath(name)
+	}
+	listOpenConnectProcessesOpenConnect = func() ([]openConnectProcess, error) {
+		t.Fatal("process scan ran after concurrent startup lock refusal")
+		return nil, nil
+	}
+
+	_, err = Connect(ConnectOptions{
+		Server:         "vpn.example.test/outside",
+		CacheDir:       cacheDir,
+		PrivilegedMode: PrivilegedModeDirect,
+	})
+	if err == nil || !strings.Contains(err.Error(), "startup is already in progress") {
+		t.Fatalf("Connect() error = %v, want startup-in-progress refusal", err)
+	}
+}
+
+func TestConnectRepeatsUntrackedSessionScanImmediatelyBeforeDispatch(t *testing.T) {
+	previousLookPath := execLookPathOpenConnect
+	previousProcesses := listOpenConnectProcessesOpenConnect
+	previousAuthenticate := authenticateOpenConnect
+	t.Cleanup(func() {
+		execLookPathOpenConnect = previousLookPath
+		listOpenConnectProcessesOpenConnect = previousProcesses
+		authenticateOpenConnect = previousAuthenticate
+	})
+
+	execLookPathOpenConnect = func(name string) (string, error) {
+		if name == "openconnect" {
+			return "/opt/homebrew/bin/openconnect", nil
+		}
+		return previousLookPath(name)
+	}
+	scanCount := 0
+	listOpenConnectProcessesOpenConnect = func() ([]openConnectProcess, error) {
+		scanCount++
+		if scanCount == 1 {
+			return nil, nil
+		}
+		return []openConnectProcess{{
+			PID:  3333,
+			Args: []string{"/opt/homebrew/bin/openconnect", "--background", "https://vpn.example.test/outside"},
+		}}, nil
+	}
+	authenticateOpenConnect = func(string, ConnectOptions, string, io.Writer, io.Writer) (*authResult, error) {
+		return &authResult{
+			ConnectURL: "https://vpn.example.test/outside",
+			Cookie:     "COOKIE_SECRET",
+		}, nil
+	}
+
+	_, err := Connect(ConnectOptions{
+		Server:         "vpn.example.test/outside",
+		CacheDir:       t.TempDir(),
+		PrivilegedMode: PrivilegedModeDirect,
+	})
+	if err == nil {
+		t.Fatal("Connect() error = nil")
+	}
+	if scanCount != 2 {
+		t.Fatalf("process scan count = %d, want 2", scanCount)
+	}
+	if !strings.Contains(err.Error(), "untracked openconnect session") || !strings.Contains(err.Error(), "pid=3333") {
+		t.Fatalf("Connect() error = %v, want second-scan exact-pid refusal", err)
 	}
 }
 

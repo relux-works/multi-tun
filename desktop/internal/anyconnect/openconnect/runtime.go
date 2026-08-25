@@ -49,15 +49,21 @@ const (
 )
 
 var (
-	execLookPathOpenConnect          = exec.LookPath
-	execCommandOpenConnect           = exec.Command
-	lookupHostOpenConnect            = net.LookupHost
-	systemLookupHostOpenConnect      = lookupHostViaSystemSourcesOpenConnect
-	userHomeDirOpenConnect           = os.UserHomeDir
-	lookupHostTimeoutOpenConnect     = 2 * time.Second
-	resolveCommandTimeoutOpenConnect = 2 * time.Second
-	lookupHostViaDigOpenConnect      = lookupHostViaDigCommandOpenConnect
-	stdinSupportsPromptOpenConnect   = func() bool {
+	execLookPathOpenConnect              = exec.LookPath
+	execCommandOpenConnect               = exec.Command
+	listOpenConnectProcessesOpenConnect  = listOpenConnectProcesses
+	failedStartSignalOpenConnect         = signalOpenConnectPID
+	failedStartProcessAliveOpenConnect   = ProcessAlive
+	failedStartCleanupTimeoutOpenConnect = 5 * time.Second
+	failedStartCleanupPollOpenConnect    = 50 * time.Millisecond
+	authenticateOpenConnect              = authenticate
+	lookupHostOpenConnect                = net.LookupHost
+	systemLookupHostOpenConnect          = lookupHostViaSystemSourcesOpenConnect
+	userHomeDirOpenConnect               = os.UserHomeDir
+	lookupHostTimeoutOpenConnect         = 2 * time.Second
+	resolveCommandTimeoutOpenConnect     = 2 * time.Second
+	lookupHostViaDigOpenConnect          = lookupHostViaDigCommandOpenConnect
+	stdinSupportsPromptOpenConnect       = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd()))
 	}
 	serverCertSHA1OpenConnect = fetchServerCertSHA1
@@ -235,6 +241,13 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	}
 
 	cacheDir := ResolveCacheDir(options.CacheDir)
+	if !options.DryRun {
+		startupLock, err := acquireOpenConnectStartupLock(cacheDir)
+		if err != nil {
+			return ConnectResult{}, err
+		}
+		defer startupLock.Close()
+	}
 	if current, err := LoadCurrent(cacheDir); err == nil {
 		alive, _, aliveErr := SessionAlive(current)
 		if aliveErr != nil {
@@ -252,6 +265,9 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 
 	server, resolvedFrom, err := resolveConnectServer(options)
 	if err != nil {
+		return ConnectResult{}, err
+	}
+	if err := rejectMatchingUntrackedOpenConnectSession(server); err != nil {
 		return ConnectResult{}, err
 	}
 
@@ -275,7 +291,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		if err != nil {
 			return ConnectResult{}, err
 		}
-		command := buildOpenConnectCommandPreview(ocPath, server, script, privilegedMode, options.ClientMimicry)
+		command := buildOpenConnectCommandPreview(ocPath, server, script, "", privilegedMode, options.ClientMimicry)
 		return ConnectResult{
 			Server:         server,
 			Mode:           mode,
@@ -304,9 +320,13 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	}
 
 	now := time.Now().UTC()
-	sessionID := now.Format(sessionTimestampFormat)
+	sessionID, err := newOpenConnectAttemptID(now)
+	if err != nil {
+		return ConnectResult{}, err
+	}
 	logPath := filepath.Join(SessionsDir(cacheDir), logFilePrefix+sessionID+".log")
 	metadataPath := filepath.Join(SessionsDir(cacheDir), metadataFilePrefix+sessionID+".json")
+	pidFilePath := filepath.Join(RuntimeDir(cacheDir), "openconnect-"+sessionID+".pid")
 	scriptExec := script
 	scriptWrapperErr := error(nil)
 	if wrappedScript, err := prepareScriptDiagnosticsWrapper(cacheDir, sessionID, logPath, script, supplementalResolverSpecForConnect(mode, server, options)); err != nil {
@@ -314,13 +334,14 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	} else if strings.TrimSpace(wrappedScript) != "" {
 		scriptExec = wrappedScript
 	}
-	command := buildOpenConnectCommandPreview(ocPath, server, scriptExec, privilegedMode, options.ClientMimicry)
+	command := buildOpenConnectCommandPreview(ocPath, server, scriptExec, pidFilePath, privilegedMode, options.ClientMimicry)
 
 	current := CurrentSession{
 		ID:             sessionID,
 		StartedAt:      now,
 		LogPath:        logPath,
 		MetadataPath:   metadataPath,
+		PIDFilePath:    pidFilePath,
 		Server:         server,
 		ResolvedFrom:   resolvedFrom,
 		Mode:           mode,
@@ -360,17 +381,22 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		return ConnectResult{}, err
 	}
 
-	auth, err := authenticate(server, options, ocPath, logFile, options.ProgressWriter)
+	auth, err := authenticateOpenConnect(server, options, ocPath, logFile, options.ProgressWriter)
 	if err != nil {
 		_ = ClearCurrent(cacheDir)
 		return ConnectResult{}, formatConnectError(err, logPath)
 	}
+	if err := rejectMatchingUntrackedOpenConnectSession(server); err != nil {
+		return ConnectResult{}, formatConnectError(err, logPath)
+	}
 
 	writeProgressf(options.ProgressWriter, "phase: connecting to %s", server)
-	pid, iface, err := connectWithCookie(auth, ocPath, scriptExec, logFile, privilegedMode, helperCfg, options.ClientMimicry)
+	pid, iface, err := connectWithCookie(auth, ocPath, scriptExec, pidFilePath, logFile, privilegedMode, helperCfg, options.ClientMimicry)
 	if err != nil {
-		_ = ClearCurrent(cacheDir)
-		return ConnectResult{}, formatConnectError(err, logPath)
+		current.PID = pid
+		current.Interface = iface
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		return ConnectResult{}, formatConnectError(withFailedStartCleanupError(err, cleanupErr), logPath)
 	}
 
 	current.PID = pid
@@ -378,9 +404,8 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 
 	pid, err = waitForStableStart(current, 1500*time.Millisecond)
 	if err != nil {
-		_ = interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
-		_ = ClearCurrent(cacheDir)
-		return ConnectResult{}, formatConnectError(err, logPath)
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		return ConnectResult{}, formatConnectError(withFailedStartCleanupError(err, cleanupErr), logPath)
 	}
 	if pid > 0 {
 		current.PID = pid
@@ -394,9 +419,8 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	if connectConvergenceExpectationsForSession(current).required() {
 		writeProgressf(options.ProgressWriter, "phase: applying split-include routes and dns")
 		if err := waitForPostConnectConvergence(current, postConnectTimeout); err != nil {
-			_ = interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
-			_ = ClearCurrent(cacheDir)
-			return ConnectResult{}, formatConnectError(err, logPath)
+			cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+			return ConnectResult{}, formatConnectError(withFailedStartCleanupError(err, cleanupErr), logPath)
 		}
 	}
 	if probeHosts := probeHostsForSession(current); len(probeHosts) > 0 {
@@ -407,13 +431,12 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	}
 
 	if err := SaveMetadata(current); err != nil {
-		_ = interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
-		_ = ClearCurrent(cacheDir)
-		return ConnectResult{}, err
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		return ConnectResult{}, withFailedStartCleanupError(err, cleanupErr)
 	}
 	if err := SaveCurrent(cacheDir, current); err != nil {
-		_ = interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
-		return ConnectResult{}, err
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		return ConnectResult{}, withFailedStartCleanupError(err, cleanupErr)
 	}
 	writeProgressf(options.ProgressWriter, "phase: connected pid=%d interface=%s", current.PID, firstNonEmpty(current.Interface, "unknown"))
 
@@ -3522,10 +3545,17 @@ func parseShellVariables(output string) map[string]string {
 	return result
 }
 
-func connectWithCookie(auth *authResult, ocPath, script string, logWriter io.Writer, privilegedMode string, helperCfg PrivilegedHelperConfig, clientMimicry ClientMimicry) (int, string, error) {
+func connectWithCookie(auth *authResult, ocPath, script, pidFilePath string, logWriter io.Writer, privilegedMode string, helperCfg PrivilegedHelperConfig, clientMimicry ClientMimicry) (int, string, error) {
 	connectURL := auth.ConnectURL
 	if connectURL == "" {
 		connectURL = fmt.Sprintf("https://%s", auth.Host)
+	}
+	pidFilePath = strings.TrimSpace(pidFilePath)
+	if pidFilePath == "" {
+		return 0, "", fmt.Errorf("openconnect pid file path is required")
+	}
+	if err := os.Remove(pidFilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, "", fmt.Errorf("remove stale openconnect pid file: %w", err)
 	}
 
 	clientMimicry = cloneClientMimicry(clientMimicry)
@@ -3536,6 +3566,7 @@ func connectWithCookie(auth *authResult, ocPath, script string, logWriter io.Wri
 		"--cookie-on-stdin",
 		"--protocol=anyconnect",
 		"--background",
+		"--pid-file=" + pidFilePath,
 	}, clientProfile, localHostname, clientMimicry)
 	if script != "" {
 		cmdArgs = append(cmdArgs, "--script", script)
@@ -3552,7 +3583,7 @@ func connectWithCookie(auth *authResult, ocPath, script string, logWriter io.Wri
 	case PrivilegedModeHelper:
 		writeLogf(logWriter, "connect_command: helper %s", strings.Join(cmdArgs, " "))
 		if err := helperConnect(helperCfg, cmdArgs, auth.Cookie, currentLogPath(logWriter)); err != nil {
-			return 0, "", fmt.Errorf("openconnect failed: %w", err)
+			return failedOpenConnectLaunchResult(pidFilePath, privilegedMode, helperCfg.SocketPath, err)
 		}
 	default:
 		execName, execArgs := elevatedCommand(privilegedMode, cmdArgs...)
@@ -3571,18 +3602,75 @@ func connectWithCookie(auth *authResult, ocPath, script string, logWriter io.Wri
 			err = fmt.Errorf("timed out after %s", openconnectTimeout)
 		}
 		if err != nil {
-			return 0, "", fmt.Errorf("openconnect failed: %w", err)
+			return failedOpenConnectLaunchResult(pidFilePath, privilegedMode, helperCfg.SocketPath, err)
 		}
 	}
 
-	pid, err := findOpenConnectPID()
+	pid, err := waitForOpenConnectPIDFile(pidFilePath, time.Second)
 	if err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("openconnect did not publish its pid: %w", err)
 	}
 	return pid, findOpenConnectInterface(pid), nil
 }
 
-func buildOpenConnectCommandPreview(ocPath, server, script string, privilegedMode string, clientMimicry ClientMimicry) []string {
+func failedOpenConnectLaunchResult(pidFilePath, privilegedMode, helperSocketPath string, launchErr error) (int, string, error) {
+	recoveryTimeout := 250 * time.Millisecond
+	if privilegedMode == PrivilegedModeHelper {
+		recoveryTimeout = time.Second
+	}
+	if isHelperRPCTimeout(launchErr) {
+		recoveryTimeout = openconnectTimeout
+	}
+	pid, pidErr := waitForOpenConnectPIDFile(pidFilePath, recoveryTimeout)
+	if pidErr != nil && !errors.Is(pidErr, os.ErrNotExist) {
+		launchErr = fmt.Errorf("%w; pid recovery failed: %v", launchErr, pidErr)
+	}
+	cleanupSucceeded := true
+	if pid > 0 {
+		if cleanupErr := cleanupFailedOpenConnectStart(pid, privilegedMode, helperSocketPath); cleanupErr != nil {
+			cleanupSucceeded = false
+			launchErr = fmt.Errorf("%w; failed-start cleanup: %v", launchErr, cleanupErr)
+		}
+	}
+	if cleanupSucceeded {
+		if err := os.Remove(pidFilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			launchErr = fmt.Errorf("%w; remove pid file: %v", launchErr, err)
+		}
+	}
+	return pid, "", fmt.Errorf("openconnect failed: %w", launchErr)
+}
+
+func waitForOpenConnectPIDFile(pidFilePath string, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		raw, err := os.ReadFile(pidFilePath)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if parseErr == nil && pid > 0 {
+				return pid, nil
+			}
+			if parseErr != nil {
+				lastErr = fmt.Errorf("invalid openconnect pid file: %w", parseErr)
+			} else {
+				lastErr = fmt.Errorf("invalid openconnect pid file: pid must be positive")
+			}
+			if timeout <= 0 || time.Now().After(deadline) {
+				return 0, lastErr
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return 0, err
+		} else {
+			lastErr = err
+		}
+		if timeout <= 0 || time.Now().After(deadline) {
+			return 0, lastErr
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func buildOpenConnectCommandPreview(ocPath, server, script, pidFilePath string, privilegedMode string, clientMimicry ClientMimicry) []string {
 	clientMimicry = cloneClientMimicry(clientMimicry)
 	clientProfile := aggregateAuthClientProfileForMimicry(detectAggregateAuthClientProfile(), clientMimicry)
 	localHostname := openConnectLocalHostname(clientProfile, clientMimicry)
@@ -3592,6 +3680,9 @@ func buildOpenConnectCommandPreview(ocPath, server, script string, privilegedMod
 		"--protocol=anyconnect",
 		"--background",
 	}, clientProfile, localHostname, clientMimicry)
+	if strings.TrimSpace(pidFilePath) != "" {
+		command = append(command, "--pid-file="+pidFilePath)
+	}
 	if script != "" {
 		command = append(command, "--script", script)
 	}
@@ -3620,6 +3711,87 @@ func findOpenConnectPIDFromOutput(output string) (int, error) {
 		return 0, fmt.Errorf("invalid openconnect pid: %w", err)
 	}
 	return pid, nil
+}
+
+type openConnectProcess struct {
+	PID  int
+	Args []string
+}
+
+func listOpenConnectProcesses() ([]openConnectProcess, error) {
+	out, err := execCommandOpenConnect("ps", "-ww", "-axo", "pid=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("inspect openconnect processes: %w", err)
+	}
+	return parseOpenConnectProcessList(string(out)), nil
+}
+
+func parseOpenConnectProcessList(output string) []openConnectProcess {
+	processes := make([]openConnectProcess, 0)
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || filepath.Base(fields[1]) != "openconnect" {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		processes = append(processes, openConnectProcess{
+			PID:  pid,
+			Args: append([]string(nil), fields[1:]...),
+		})
+	}
+	return processes
+}
+
+func findMatchingOpenConnectPIDs(processes []openConnectProcess, server string) []int {
+	targetHost := openConnectServerHost(server)
+	if targetHost == "" {
+		return nil
+	}
+	var pids []int
+	for _, process := range processes {
+		if process.PID <= 0 || len(process.Args) < 2 {
+			continue
+		}
+		connectTarget := process.Args[len(process.Args)-1]
+		if openConnectServerHost(connectTarget) == targetHost {
+			pids = append(pids, process.PID)
+		}
+	}
+	sort.Ints(pids)
+	return pids
+}
+
+func openConnectServerHost(server string) string {
+	server = strings.Trim(strings.TrimSpace(server), `"'`)
+	if server == "" {
+		return ""
+	}
+	if !strings.Contains(server, "://") {
+		server = "https://" + server
+	}
+	parsed, err := url.Parse(server)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+}
+
+func rejectMatchingUntrackedOpenConnectSession(server string) error {
+	processes, err := listOpenConnectProcessesOpenConnect()
+	if err != nil {
+		return err
+	}
+	pids := findMatchingOpenConnectPIDs(processes, server)
+	if len(pids) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"untracked openconnect session for the selected server is already active (pid=%d); stop that exact session before retrying",
+		pids[0],
+	)
 }
 
 func findOpenConnectCSDPostScript(ocPath string) string {
@@ -3874,6 +4046,92 @@ func elevatedCommand(mode string, args ...string) (string, []string) {
 		return args[0], args[1:]
 	}
 	return "sudo", append([]string{"-n"}, args...)
+}
+
+func cleanupFailedOpenConnectAttempt(cacheDir string, current CurrentSession) error {
+	cleanupErr := cleanupFailedOpenConnectStart(current.PID, current.PrivilegedMode, current.HelperSocketPath)
+	if cleanupErr != nil {
+		metadataErr := SaveMetadata(current)
+		currentErr := SaveCurrent(cacheDir, current)
+		return errors.Join(
+			cleanupErr,
+			wrapOptionalError("preserve failed session metadata", metadataErr),
+			wrapOptionalError("preserve current session", currentErr),
+		)
+	}
+
+	var removeErr error
+	if strings.TrimSpace(current.PIDFilePath) != "" {
+		removeErr = os.Remove(current.PIDFilePath)
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+	}
+	clearErr := clearCurrentOpenConnectAttempt(cacheDir, current.ID)
+	return errors.Join(
+		wrapOptionalError("remove failed-start pid file", removeErr),
+		wrapOptionalError("clear failed current session", clearErr),
+	)
+}
+
+func cleanupFailedOpenConnectStart(pid int, privilegedMode, helperSocketPath string) error {
+	if pid <= 0 {
+		return nil
+	}
+	alive, err := failedStartProcessAliveOpenConnect(pid)
+	if err != nil {
+		return fmt.Errorf("inspect openconnect pid %d before failed-start cleanup: %w", pid, err)
+	}
+	if !alive {
+		return nil
+	}
+
+	signals := []string{"-INT", "-TERM", "-KILL"}
+	phaseTimeout := failedStartCleanupTimeoutOpenConnect / time.Duration(len(signals))
+	if phaseTimeout <= 0 {
+		phaseTimeout = failedStartCleanupTimeoutOpenConnect
+	}
+	var signalErrors []string
+	for _, signal := range signals {
+		if err := failedStartSignalOpenConnect(pid, signal, privilegedMode, helperSocketPath); err != nil {
+			signalErrors = append(signalErrors, fmt.Sprintf("%s: %v", signal, err))
+		}
+
+		deadline := time.Now().Add(phaseTimeout)
+		for {
+			alive, err := failedStartProcessAliveOpenConnect(pid)
+			if err != nil {
+				return fmt.Errorf("inspect openconnect pid %d during failed-start cleanup: %w", pid, err)
+			}
+			if !alive {
+				return nil
+			}
+			if phaseTimeout <= 0 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(failedStartCleanupPollOpenConnect)
+		}
+	}
+
+	detail := ""
+	if len(signalErrors) > 0 {
+		detail = "; signal errors: " + strings.Join(signalErrors, "; ")
+	}
+	return fmt.Errorf("openconnect pid %d remains alive after PID-scoped INT/TERM/KILL cleanup%s", pid, detail)
+}
+
+func wrapOptionalError(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", action, err)
+}
+
+func withFailedStartCleanupError(startErr, cleanupErr error) error {
+	if cleanupErr == nil {
+		return startErr
+	}
+	return fmt.Errorf("%w; failed-start lifecycle cleanup: %v", startErr, cleanupErr)
 }
 
 func interruptOpenConnectPID(pid int, mode string, helperSocketPath string) error {
