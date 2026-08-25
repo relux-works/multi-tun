@@ -69,3 +69,7 @@ task-board.config.json
 
 # Release artifacts
 /artifacts/releases/
+
+# Generated documentation renders
+/artefacts/
+/diagrams/artefacts/
