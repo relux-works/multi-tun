@@ -1,0 +1,57 @@
+@startuml
+!theme plain
+
+title ssh-proxy Managed Runtime Lifecycle
+
+actor User
+participant "ssh-proxy CLI" as CLI
+control "Managed daemon" as Daemon
+participant "/usr/bin/ssh" as SSH
+boundary "SOCKS5\n127.0.0.1:1080" as SOCKS
+boundary "HTTP forward proxy\n127.0.0.1:8080" as HTTP
+
+autonumber
+
+== Start ==
+
+User -> CLI: ssh-proxy start
+CLI -> Daemon: spawn selected profile
+Daemon -> Daemon: acquire profile lock\nrecord starting state
+Daemon -> SSH: start -D 127.0.0.1:1080
+SSH -> SOCKS: bind dynamic forward
+Daemon -> SOCKS: SOCKS5 greeting probe
+
+alt SOCKS5 ready
+  SOCKS --> Daemon: version 5 / no-auth accepted
+  Daemon -> HTTP: bind only after SOCKS readiness
+  alt HTTP listener ready
+    HTTP --> Daemon: ready
+    Daemon -> Daemon: atomically record daemon PID,\nSSH PID, endpoints, up state
+    Daemon --> CLI: ready
+    CLI --> User: SOCKS and HTTP endpoints
+  else HTTP bridge startup fails
+    Daemon -> HTTP: close if partially opened
+    Daemon -> SSH: SIGTERM and wait
+    Daemon -> Daemon: remove state and lock
+    Daemon --> CLI: start failed
+  end
+else SSH exits or SOCKS probe fails
+  Daemon -> SSH: SIGTERM and wait if alive
+  Daemon -> Daemon: remove state and lock
+  Daemon --> CLI: start failed
+end
+
+== Stop ==
+
+User -> CLI: ssh-proxy stop
+CLI -> Daemon: request shutdown
+Daemon -> Daemon: record stopping state
+Daemon -> HTTP: close listener and active relays
+HTTP --> Daemon: closed
+Daemon -> SSH: SIGTERM and wait
+SSH --> Daemon: exited
+Daemon -> Daemon: remove current state and lock
+Daemon --> CLI: stopped
+CLI --> User: connection down
+
+@enduml
