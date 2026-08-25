@@ -1,0 +1,10 @@
+{
+  "current": "dedicated",
+  "servers": {
+    "dedicated": {
+      "host": "ssh.example.invalid",
+      "listen_address": "127.0.0.1",
+      "socks_port": 1080
+    }
+  }
+}

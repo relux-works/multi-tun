@@ -9,6 +9,7 @@ SERVICE_NAME="multi-tun"
 GLOBAL_BIN_DIR="$HOME/.local/bin"
 BIN_NAMES=(
   "vless-tun"
+  "ssh-proxy"
   "openconnect-tun"
   "dump"
   "cisco-dump"
@@ -18,17 +19,20 @@ BIN_NAMES=(
 
 CONFIG_DIRS=(
   "${XDG_CONFIG_HOME:-$HOME/.config}/vless-tun"
+  "${XDG_CONFIG_HOME:-$HOME/.config}/ssh-proxy"
   "${XDG_CONFIG_HOME:-$HOME/.config}/openconnect-tun"
 )
 
 CACHE_DIRS=(
   "${XDG_CACHE_HOME:-$HOME/.cache}/vless-tun"
+  "${XDG_CACHE_HOME:-$HOME/.cache}/ssh-proxy"
   "${XDG_CACHE_HOME:-$HOME/.cache}/openconnect-tun"
   "${XDG_CACHE_HOME:-$HOME/.cache}/cisco-dump"
 )
 
 BUILD_ARTIFACTS=(
   "$PROJECT_ROOT/vless-tun"
+  "$PROJECT_ROOT/ssh-proxy"
   "$PROJECT_ROOT/openconnect-tun"
   "$PROJECT_ROOT/dump"
   "$PROJECT_ROOT/cisco-dump"
@@ -50,10 +54,10 @@ Removes the managed installed binary symlinks.
 Config, cache, keychain secrets, and repo build artifacts are preserved by default.
 
 Options:
-  --purge-config    Remove ~/.config/vless-tun and ~/.config/openconnect-tun
-  --purge-cache     Remove ~/.cache/vless-tun, ~/.cache/openconnect-tun, ~/.cache/cisco-dump
+  --purge-config    Remove ~/.config/vless-tun, ~/.config/ssh-proxy, and ~/.config/openconnect-tun
+  --purge-cache     Remove ~/.cache/vless-tun, ~/.cache/ssh-proxy, ~/.cache/openconnect-tun, ~/.cache/cisco-dump
   --purge-keychain  Delete openconnect auth accounts referenced by the current config
-  --purge-builds    Remove repo-local built binaries (./vless-tun, ./openconnect-tun, ./dump, ./cisco-dump, ./vpn-core, ./vpn-auth)
+  --purge-builds    Remove repo-local built binaries (./vless-tun, ./ssh-proxy, ./openconnect-tun, ./dump, ./cisco-dump, ./vpn-core, ./vpn-auth)
   --dry-run         Print actions without deleting anything
   -h, --help        Show this help
 EOF
