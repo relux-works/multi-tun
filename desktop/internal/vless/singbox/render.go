@@ -170,23 +170,6 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 		}, dnsRules...)
 	}
 
-	if useBypassRules {
-		routeRuleSet = append(routeRuleSet, map[string]any{
-			"type": "inline",
-			"tag":  "ru-direct",
-			"rules": []any{
-				map[string]any{
-					"domain_suffix": bypassSuffixes,
-				},
-			},
-		})
-		routeRules = append(routeRules, map[string]any{
-			"rule_set": []string{"ru-direct"},
-			"action":   "route",
-			"outbound": "direct",
-		})
-	}
-
 	if useBypassExcludes {
 		routeRuleSet = append([]any{
 			map[string]any{
@@ -203,6 +186,23 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 			"rule_set": []string{"proxy-exceptions"},
 			"action":   "route",
 			"outbound": "proxy",
+		})
+	}
+
+	if useBypassRules {
+		routeRuleSet = append(routeRuleSet, map[string]any{
+			"type": "inline",
+			"tag":  "ru-direct",
+			"rules": []any{
+				map[string]any{
+					"domain_suffix": bypassSuffixes,
+				},
+			},
+		})
+		routeRules = append(routeRules, map[string]any{
+			"rule_set": []string{"ru-direct"},
+			"action":   "route",
+			"outbound": "direct",
 		})
 	}
 
