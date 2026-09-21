@@ -451,8 +451,8 @@ func buildVLESSOutbound(cfg config.ProjectConfig, profile model.Profile) (map[st
 		"server_port": profile.Port,
 		"uuid":        profile.UUID,
 	}
-	if profile.Flow != "" {
-		proxyOutbound["flow"] = profile.Flow
+	if flow := singboxFlow(profile.Flow); flow != "" {
+		proxyOutbound["flow"] = flow
 	}
 	if tlsConfig := buildTLS(cfg, profile); tlsConfig != nil {
 		proxyOutbound["tls"] = tlsConfig
@@ -464,6 +464,15 @@ func buildVLESSOutbound(cfg config.ProjectConfig, profile model.Profile) (map[st
 		proxyOutbound["domain_resolver"] = "dns-direct"
 	}
 	return proxyOutbound, nil
+}
+
+func singboxFlow(flow string) string {
+	// Xray treats the -udp443 suffix as a client-side option. sing-box exposes
+	// the equivalent mode as plain Vision and rejects the suffixed spelling.
+	if flow == "xtls-rprx-vision-udp443" {
+		return "xtls-rprx-vision"
+	}
+	return flow
 }
 
 func processNameDirectRules(processNames []string) []any {

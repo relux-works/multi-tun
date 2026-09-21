@@ -31,6 +31,11 @@ vless-tun diagnose config --config ~/.config/vless-tun/config.json
 vless-tun render --config ~/.config/vless-tun/config.json
 ```
 
+When a provider publishes `flow=xtls-rprx-vision-udp443`, `vless-tun` maps it
+to sing-box's equivalent `xtls-rprx-vision` spelling for sing-box output while
+preserving the original flow for Xray output. Validate the selected renderer;
+do not hand-edit cached subscription payloads or generated runtime JSON.
+
 Use either a proxy subscription URL or a direct `vless://` URI. Remove the unused example server after replacing placeholders. Prefer `vless-tun set-current server [profile]` over maintaining duplicate config files.
 
 ### OpenConnect

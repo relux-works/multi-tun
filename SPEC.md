@@ -56,6 +56,9 @@ Build local CLIs and agent guidance that can:
 - Produce JSON config compatible with the current sing-box docs.
 - Generate a TUN inbound.
 - Generate a proxy outbound from the parsed VLESS profile.
+- Normalize Xray's client-only `xtls-rprx-vision-udp443` flow spelling to
+  sing-box's equivalent `xtls-rprx-vision` spelling only when rendering a
+  sing-box VLESS outbound; preserve the original value for Xray rendering.
 - Generate `direct` and `block` outbounds.
 - Enable DNS hijack.
 - Enable sniffing by default and allow `singbox.sniff` overrides globally, per configured server, or per configured profile.

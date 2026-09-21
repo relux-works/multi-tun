@@ -7,8 +7,52 @@ import (
 	"testing"
 
 	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/subscription"
 )
+
+// This proves the Xray client-only UDP/443 spelling becomes the equivalent
+// flow accepted by sing-box without mutating the parsed profile.
+func TestBuildVLESSOutboundNormalizesXrayUDP443FlowForSingbox(t *testing.T) {
+	t.Parallel()
+
+	profile := model.Profile{
+		UUID: "00000000-0000-0000-0000-000000000000",
+		Host: "example.com",
+		Port: 443,
+		Flow: "xtls-rprx-vision-udp443",
+	}
+	outbound, err := buildVLESSOutbound(config.Default(), profile)
+	if err != nil {
+		t.Fatalf("buildVLESSOutbound() error = %v", err)
+	}
+	if got, want := outbound["flow"], "xtls-rprx-vision"; got != want {
+		t.Fatalf("outbound flow = %#v, want %#v", got, want)
+	}
+	if got, want := profile.Flow, "xtls-rprx-vision-udp443"; got != want {
+		t.Fatalf("profile flow = %#v, want unchanged %#v", got, want)
+	}
+}
+
+// This negative control proves the compatibility mapping does not silently
+// rewrite unrelated flow values that sing-box should validate itself.
+func TestBuildVLESSOutboundPreservesUnknownFlow(t *testing.T) {
+	t.Parallel()
+
+	profile := model.Profile{
+		UUID: "00000000-0000-0000-0000-000000000000",
+		Host: "example.com",
+		Port: 443,
+		Flow: "unknown-flow",
+	}
+	outbound, err := buildVLESSOutbound(config.Default(), profile)
+	if err != nil {
+		t.Fatalf("buildVLESSOutbound() error = %v", err)
+	}
+	if got, want := outbound["flow"], "unknown-flow"; got != want {
+		t.Fatalf("outbound flow = %#v, want %#v", got, want)
+	}
+}
 
 func TestRender(t *testing.T) {
 	t.Parallel()

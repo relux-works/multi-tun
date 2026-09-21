@@ -31,7 +31,7 @@ func TestRenderPreservesVLESSPQEncryptionAndRealityOptions(t *testing.T) {
 		ShortID:     "abcd",
 		Encryption:  "mlkem768x25519plus.native.0rtt.example",
 		SpiderX:     "/TK5",
-		Flow:        "xtls-rprx-vision",
+		Flow:        "xtls-rprx-vision-udp443",
 	}
 
 	data, err := Render(cfg, profile)
@@ -62,7 +62,9 @@ func TestRenderPreservesVLESSPQEncryptionAndRealityOptions(t *testing.T) {
 	if got, want := user["encryption"], "mlkem768x25519plus.native.0rtt.example"; got != want {
 		t.Fatalf("user.encryption = %#v, want %#v", got, want)
 	}
-	if got, want := user["flow"], "xtls-rprx-vision"; got != want {
+	// This proves sing-box compatibility normalization does not alter the
+	// Xray-specific client flow emitted by the Xray renderer.
+	if got, want := user["flow"], "xtls-rprx-vision-udp443"; got != want {
 		t.Fatalf("user.flow = %#v, want %#v", got, want)
 	}
 

@@ -576,6 +576,10 @@ If `routing.bypass_suffixes` is empty, the renderer produces a simple full-tunne
 
 With the default `engine.type=sing-box`, the generated sing-box config contains the VLESS outbound directly. With `engine.type=xray`, `render` writes an Xray VLESS sidecar config and a sing-box TUN frontend config whose proxy outbound points at the local Xray SOCKS inbound. The frontend adds a direct `process_name` rule for Xray so the sidecar's upstream connection is not captured by the TUN.
 
+For subscription compatibility, the sing-box renderer maps Xray's client-only
+`flow=xtls-rprx-vision-udp443` spelling to sing-box's equivalent
+`flow=xtls-rprx-vision`. Xray rendering preserves the original flow value.
+
 ### `vpn-core inspect-vless-url`
 
 Inspects a VLESS subscription URL or literal `vless://` URI and prints safe profile metadata: payload format, profile count, display name, endpoint, protocol, security, network, SNI, fingerprint, and whether sensitive fields are present. It intentionally does not print the raw URI, UUID, public key, or short ID.
