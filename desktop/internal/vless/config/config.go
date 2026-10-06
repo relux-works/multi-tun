@@ -104,8 +104,10 @@ type ProfileConfig struct {
 }
 
 type SourceConfig struct {
-	Mode string `json:"mode,omitempty"`
-	URL  string `json:"url,omitempty"`
+	Mode      string            `json:"mode,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	UserAgent string            `json:"user_agent,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 type DefaultConfig struct {
@@ -732,6 +734,19 @@ func mergeSourceConfig(base SourceConfig, override SourceConfig) SourceConfig {
 	if url := strings.TrimSpace(override.URL); url != "" {
 		result.URL = url
 	}
+	if userAgent := strings.TrimSpace(override.UserAgent); userAgent != "" {
+		result.UserAgent = userAgent
+	}
+	if len(override.Headers) > 0 {
+		merged := make(map[string]string, len(base.Headers)+len(override.Headers))
+		for name, value := range base.Headers {
+			merged[name] = value
+		}
+		for name, value := range override.Headers {
+			merged[name] = value
+		}
+		result.Headers = merged
+	}
 	return result
 }
 
@@ -974,6 +989,22 @@ func (c ProjectConfig) SourceURL() string {
 		return effective.SourceURL()
 	}
 	return firstNonEmpty(strings.TrimSpace(c.Source.URL), strings.TrimSpace(c.SubscriptionURL))
+}
+
+// SourceUserAgent returns the optional User-Agent used for subscription fetches.
+func (c ProjectConfig) SourceUserAgent() string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.SourceUserAgent()
+	}
+	return strings.TrimSpace(c.Source.UserAgent)
+}
+
+// SourceHeaders returns extra HTTP headers sent with subscription fetches.
+func (c ProjectConfig) SourceHeaders() map[string]string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.SourceHeaders()
+	}
+	return c.Source.Headers
 }
 
 func (c ProjectConfig) SourceMode() string {

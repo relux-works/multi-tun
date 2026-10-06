@@ -2,6 +2,8 @@ package subscription
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -29,5 +31,35 @@ func TestRefreshSupportsDirectSourceMode(t *testing.T) {
 	}
 	if got, want := snapshot.Profiles[0].Host, "example.com"; got != want {
 		t.Fatalf("snapshot.Profiles[0].Host = %q, want %q", got, want)
+	}
+}
+
+// Proves: configured User-Agent and extra headers reach the subscription server,
+// and without options the legacy "vless-tun/0.1" User-Agent is still sent
+// (httptest server only; does not cover real provider behavior).
+func TestFetchWithOptionsSendsConfiguredHeaders(t *testing.T) {
+	var gotUA, gotHWID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotHWID = r.Header.Get("X-Hwid")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	if _, err := FetchWithOptions(context.Background(), server.URL, FetchOptions{
+		UserAgent: "v2RayTun/5.0",
+		Headers:   map[string]string{"x-hwid": "abc123"},
+	}); err != nil {
+		t.Fatalf("FetchWithOptions() error = %v", err)
+	}
+	if gotUA != "v2RayTun/5.0" || gotHWID != "abc123" {
+		t.Fatalf("headers = UA %q HWID %q, want v2RayTun/5.0 and abc123", gotUA, gotHWID)
+	}
+
+	if _, err := Fetch(context.Background(), server.URL); err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if gotUA != "vless-tun/0.1" || gotHWID != "" {
+		t.Fatalf("default fetch leaked options: UA %q HWID %q", gotUA, gotHWID)
 	}
 }

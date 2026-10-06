@@ -741,6 +741,9 @@ Field reference:
 - `current.profile`: selected local profile alias under the selected server
 - `servers.<name>.source.mode`: `proxy` or `direct`
 - `servers.<name>.source.url`: the actual source address; in `proxy` mode this is an HTTP endpoint that resolves to one or more `vless://` entries, and in `direct` mode this is a literal `vless://...` URI
+- `servers.<name>.source.user_agent`: optional User-Agent for `proxy` subscription fetches (default `vless-tun/0.1`); some providers return a stub profile unless the request looks like a known client
+- `servers.<name>.source.headers`: optional map of extra HTTP headers for `proxy` subscription fetches (for example device/HWID headers a provider requires); values may identify the device, so keep them in the local config only
+- non-`vless://` entries in a mixed subscription (for example `hysteria2://`) are skipped; a malformed `vless://` entry still fails the refresh
 - `servers.<name>.cache_dir`: local runtime/cache directory for that server's refresh snapshots, session logs, and runtime metadata
 - `servers.<name>.artifacts.singbox_config_path`: generated sing-box config path for that server
 - `servers.<name>.artifacts.xray_config_path`: generated Xray sidecar config path for `engine.type=xray`; if omitted, the path is derived from the sing-box config name

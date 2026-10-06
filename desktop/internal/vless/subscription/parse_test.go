@@ -285,3 +285,26 @@ func TestSelectProfileSingleProfileDoesNotRequireSelector(t *testing.T) {
 		t.Fatalf("profile.ID = %q, want %q", got, want)
 	}
 }
+
+// Proves: non-vless entries in a mixed subscription are skipped while vless entries
+// still parse, a malformed vless entry still fails, and a payload with no vless
+// entries is still an error (synthetic URIs only).
+func TestParseProfilesSkipsUnsupportedSchemes(t *testing.T) {
+	good := "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=reality&type=tcp#ok"
+	mixed := "hysteria2://pw@example.com:443#hy2\n" + good + "\n"
+
+	profiles, err := ParseProfiles(mixed)
+	if err != nil {
+		t.Fatalf("ParseProfiles(mixed) error = %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("profiles = %d, want 1 (hysteria2 skipped)", len(profiles))
+	}
+
+	if _, err := ParseProfiles("hysteria2://pw@example.com:443#hy2\n"); err == nil {
+		t.Fatal("ParseProfiles(only hysteria2) = nil error, want no-profiles error")
+	}
+	if _, err := ParseProfiles("vless://nouser.example.com:443#bad\n"); err == nil {
+		t.Fatal("ParseProfiles(malformed vless) = nil error, want error")
+	}
+}

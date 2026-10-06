@@ -55,6 +55,12 @@ func ParseProfiles(payload string) ([]model.Profile, error) {
 			continue
 		}
 
+		// Mixed subscriptions may carry other protocols (hysteria2, trojan, ...)
+		// that this tool cannot render; skip them instead of failing the whole payload.
+		if scheme, _, found := strings.Cut(candidate, "://"); found && !strings.EqualFold(scheme, "vless") {
+			continue
+		}
+
 		profile, err := ParseVLESSURI(candidate)
 		if err != nil {
 			return nil, err

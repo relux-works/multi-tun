@@ -214,7 +214,7 @@ func (a *App) runRefresh(args []string) int {
 		return 1
 	}
 
-	snapshot, err := subscription.Refresh(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir)
+	snapshot, err := refreshSource(cfg)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "refresh failed: %v\n", err)
 		return 1
@@ -328,7 +328,7 @@ func (a *App) runRender(args []string) int {
 
 func (a *App) loadSnapshot(cfg config.ProjectConfig, refresh bool) (subscription.CacheSnapshot, error) {
 	if refresh {
-		return subscription.Refresh(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir)
+		return refreshSource(cfg)
 	}
 
 	snapshot, err := subscription.LoadCache(cfg.CacheDir)
@@ -338,7 +338,7 @@ func (a *App) loadSnapshot(cfg config.ProjectConfig, refresh bool) (subscription
 	if !errors.Is(err, os.ErrNotExist) {
 		return subscription.CacheSnapshot{}, err
 	}
-	return subscription.Refresh(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir)
+	return refreshSource(cfg)
 }
 
 func loadConfig(configPath string) (config.ProjectConfig, error) {
@@ -486,4 +486,11 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  Lifecycle command positionals override current.server/current.profile; reconnect, stop, and diagnose tunnel scan all configured session caches.")
 	fmt.Fprintln(a.stdout, "  Use --config to choose a non-default config file.")
 	fmt.Fprintln(a.stdout, "  setup/init still accept one positional config path for bootstrapping.")
+}
+
+func refreshSource(cfg config.ProjectConfig) (subscription.CacheSnapshot, error) {
+	return subscription.RefreshWithOptions(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir, subscription.FetchOptions{
+		UserAgent: cfg.SourceUserAgent(),
+		Headers:   cfg.SourceHeaders(),
+	})
 }

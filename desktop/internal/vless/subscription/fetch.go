@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"multi-tun/desktop/internal/vless/model"
@@ -27,13 +28,33 @@ type CacheSnapshot struct {
 	Profiles      []model.Profile `json:"profiles"`
 }
 
+// FetchOptions customizes how a subscription is requested. Some providers only
+// serve real profiles to specific client User-Agents or device headers.
+type FetchOptions struct {
+	UserAgent string
+	Headers   map[string]string
+}
+
 func Fetch(ctx context.Context, subscriptionURL string) ([]byte, error) {
+	return FetchWithOptions(ctx, subscriptionURL, FetchOptions{})
+}
+
+func FetchWithOptions(ctx context.Context, subscriptionURL string, options FetchOptions) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, subscriptionURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "vless-tun/0.1")
+	userAgent := strings.TrimSpace(options.UserAgent)
+	if userAgent == "" {
+		userAgent = "vless-tun/0.1"
+	}
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/plain, application/json;q=0.9, */*;q=0.8")
+	for name, value := range options.Headers {
+		if name = strings.TrimSpace(name); name != "" {
+			req.Header.Set(name, value)
+		}
+	}
 
 	client := &http.Client{
 		Timeout: 20 * time.Second,
@@ -53,7 +74,11 @@ func Fetch(ctx context.Context, subscriptionURL string) ([]byte, error) {
 }
 
 func Refresh(ctx context.Context, sourceMode, sourceURL, cacheDir string) (CacheSnapshot, error) {
-	normalized, payloadFormat, err := resolveSourcePayload(ctx, sourceMode, sourceURL)
+	return RefreshWithOptions(ctx, sourceMode, sourceURL, cacheDir, FetchOptions{})
+}
+
+func RefreshWithOptions(ctx context.Context, sourceMode, sourceURL, cacheDir string, options FetchOptions) (CacheSnapshot, error) {
+	normalized, payloadFormat, err := resolveSourcePayload(ctx, sourceMode, sourceURL, options)
 	if err != nil {
 		return CacheSnapshot{}, err
 	}
@@ -79,7 +104,7 @@ func Refresh(ctx context.Context, sourceMode, sourceURL, cacheDir string) (Cache
 	return snapshot, nil
 }
 
-func resolveSourcePayload(ctx context.Context, sourceMode, sourceURL string) (string, string, error) {
+func resolveSourcePayload(ctx context.Context, sourceMode, sourceURL string, options FetchOptions) (string, string, error) {
 	switch sourceMode {
 	case "direct":
 		normalized, _, err := NormalizePayload([]byte(sourceURL))
@@ -88,7 +113,7 @@ func resolveSourcePayload(ctx context.Context, sourceMode, sourceURL string) (st
 		}
 		return normalized, "direct", nil
 	case "", "proxy":
-		body, err := Fetch(ctx, sourceURL)
+		body, err := FetchWithOptions(ctx, sourceURL, options)
 		if err != nil {
 			return "", "", err
 		}
