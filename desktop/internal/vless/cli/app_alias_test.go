@@ -327,35 +327,6 @@ func TestCleanupStaleCurrentSessionUsesStopLogic(t *testing.T) {
 	}
 }
 
-func TestReconnectStopsConfiguredSessionsBeforePreparingNewStart(t *testing.T) {
-	path := writeReconnectUnmatchedProfileConfig(t)
-
-	previous := stopCurrentSessionFunc
-	var stoppedCacheDirs []string
-	stopCurrentSessionFunc = func(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
-		stoppedCacheDirs = append(stoppedCacheDirs, cacheDir)
-		return nil, "none", nil
-	}
-	t.Cleanup(func() {
-		stopCurrentSessionFunc = previous
-	})
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	app := New(&stdout, &stderr)
-
-	exitCode := app.Run([]string{"reconnect", "--config", path})
-	if exitCode != 1 {
-		t.Fatalf("Run(reconnect) exitCode = %d, want 1", exitCode)
-	}
-	if len(stoppedCacheDirs) != 1 || stoppedCacheDirs[0] != "/tmp/vless-dance" {
-		t.Fatalf("stoppedCacheDirs = %v, want [/tmp/vless-dance]", stoppedCacheDirs)
-	}
-	if !strings.Contains(stderr.String(), "reconnect failed:") {
-		t.Fatalf("stderr = %q, want reconnect failure", stderr.String())
-	}
-}
-
 func TestDiagnoseDefaultsToTunnelAndRejectsProviderArgument(t *testing.T) {
 	t.Parallel()
 
@@ -645,39 +616,6 @@ func writeCLISelectionConfig(t *testing.T) string {
       "engine": {"type": "xray"},
       "profiles": {
         "fr": {"selector": "France"}
-      }
-    }
-  },
-  "network": {
-    "mode": "tun",
-    "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}
-  },
-  "dns": {
-    "proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}
-  }
-}`), 0o644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-	return path
-}
-
-func writeReconnectUnmatchedProfileConfig(t *testing.T) string {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{
-  "current": {
-    "server": "dance",
-    "profile": "default"
-  },
-  "servers": {
-    "dance": {
-      "source": {"mode": "direct", "url": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=tcp#demo"},
-      "cache_dir": "/tmp/vless-dance",
-      "artifacts": {"singbox_config_path": "/tmp/dance.json"},
-      "engine": {"type": "sing-box"},
-      "profiles": {
-        "default": {"selector": "missing-profile"}
       }
     }
   },

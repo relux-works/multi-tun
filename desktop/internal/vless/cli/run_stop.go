@@ -41,6 +41,7 @@ type stopSessionResult struct {
 }
 
 var stopCurrentSessionFunc = stopCurrentSession
+var startSessionFunc = session.Start
 
 func (a *App) runStart(args []string) int {
 	return a.runStartCommand("start", args)
@@ -93,7 +94,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		return 1
 	}
 
-	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
+	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:              cfg.NetworkMode(),
 		Engine:            prepared.engine,
 		BypassSuffixes:    cfg.BypassSuffixes(),
@@ -159,17 +160,8 @@ func (a *App) runReconnect(args []string) int {
 		fmt.Fprintf(a.stderr, "warning: %s\n", warning)
 	}
 
-	stoppedSessions, err := stopConfiguredSessions(*configPath, *force, *timeout)
-	if err != nil {
-		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		for _, result := range stoppedSessions {
-			if result.stopped != nil && result.stopped.LogPath != "" {
-				fmt.Fprintf(a.stderr, "log=%s\n", result.stopped.LogPath)
-			}
-		}
-		return 1
-	}
-
+	// Prepare the replacement before stopping anything: a refresh that drops the
+	// selected profile, or any render error, must leave the running tunnel alone.
 	prepared, err := a.prepareStart(cfg, startOptions{
 		configPath:      *configPath,
 		serverName:      selectionOptions.Server,
@@ -182,10 +174,22 @@ func (a *App) runReconnect(args []string) int {
 	}.withEffectiveSelection(selection))
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		fmt.Fprintln(a.stderr, "running sessions were left untouched")
 		return 1
 	}
 
-	started, err := session.Start(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
+	stoppedSessions, err := stopConfiguredSessions(*configPath, *force, *timeout)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		for _, result := range stoppedSessions {
+			if result.stopped != nil && result.stopped.LogPath != "" {
+				fmt.Fprintf(a.stderr, "log=%s\n", result.stopped.LogPath)
+			}
+		}
+		return 1
+	}
+
+	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:              cfg.NetworkMode(),
 		Engine:            prepared.engine,
 		BypassSuffixes:    cfg.BypassSuffixes(),
@@ -330,7 +334,7 @@ func (a *App) parseStartOptions(name string, args []string, refreshDefault bool)
 }
 
 func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (preparedStart, error) {
-	snapshot, err := a.loadSnapshot(cfg, effectiveStartRefresh(cfg, options))
+	snapshot, refreshed, err := a.loadStartSnapshot(cfg, effectiveStartRefresh(cfg, options))
 	if err != nil {
 		return preparedStart{}, err
 	}
@@ -340,7 +344,7 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		Transport: cfg.DefaultProfileTransport(),
 	})
 	if err != nil {
-		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options, effectiveStartRefresh(cfg, options))
+		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options, refreshed)
 	}
 
 	renderOptions := resolveRenderOptions(cfg.NetworkMode())

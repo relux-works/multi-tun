@@ -443,7 +443,7 @@ vless-tun diagnose
 vless-tun diagnose config [server [profile]]
 ```
 
-`stop` and `diagnose` do not require a provider/profile; they scan all configured session cache directories for recorded tunnel state. `reconnect` is the one-command, synchronous stop-to-start path: it uses the same stop-all scan, waits for it to finish, then starts the selected provider/profile. Switching `current.server` therefore does not leave the old tunnel blocking the new one. Use `diagnose config` when you want to validate provider/profile selection.
+`stop` and `diagnose` do not require a provider/profile; they scan all configured session cache directories for recorded tunnel state. `reconnect` is the one-command, synchronous stop-to-start path: it first refreshes and renders the selected provider/profile, then uses the same stop-all scan, waits for it to finish, and starts the replacement. If the refresh drops the selected profile or rendering fails, `reconnect` exits non-zero and leaves the running session untouched. Switching `current.server` therefore does not leave the old tunnel blocking the new one. Use `diagnose config` when you want to validate provider/profile selection.
 
 Use `--config` when you intentionally want a non-default config file. `setup` and `init` still accept one positional config path for bootstrapping.
 
@@ -521,7 +521,7 @@ In `network.mode=tun`, `start` resolves the launch backend automatically. If the
 
 ### `vless-tun reconnect`
 
-Reloads the local config, synchronously stops any currently recorded session across all configured VLESS server cache directories, refreshes the subscription cache by default, rerenders the selected profile, and starts a fresh `vless-tun` session with the selected engine. It is the canonical single-command stop-to-start workflow; do not script separate `stop` and `start` calls for normal reconfiguration.
+Reloads the local config, refreshes the subscription cache by default, rerenders the selected profile, and only then synchronously stops any currently recorded session across all configured VLESS server cache directories and starts a fresh `vless-tun` session with the selected engine. A profile-selection or render failure aborts before anything is stopped. A failed subscription fetch falls back to the cached snapshot with a warning; without a cache it is a hard failure, again before anything is stopped. It is the canonical single-command stop-to-start workflow; do not script separate `stop` and `start` calls for normal reconfiguration.
 
 This is the command to use after changing:
 
@@ -870,7 +870,9 @@ go build -o cisco-dump ./desktop/cmd/cisco-dump
 
 - This version manages the local `sing-box` session lifecycle with `start`, `status`, `stop`, and a configurable privileged TUN backend for macOS.
 - `start` refreshes the selected provider subscription before rendering by default, so configured profile aliases follow provider-side endpoint changes. When a provider exposes multiple remote profiles, configure `transport` or `selector`; vless-tun no longer silently follows provider order. `--refresh=false` is the explicit cached fallback for offline starts.
-- `reconnect` is the "restart with latest config" path: it rereads local config, stops any recorded VLESS session across configured server cache directories, refreshes the subscription by default, rerenders, and starts the selected session.
+- `reconnect` is the "restart with latest config" path: it rereads local config, refreshes the subscription by default, rerenders, and only then stops any recorded VLESS session across configured server cache directories and starts the selected session. Preparation errors leave the running session in place.
+- `start` and `reconnect` fall back to the cached subscription snapshot, with a warning, when the subscription fetch fails. Fetch errors never echo the subscription URL.
+- `connect` and `disconnect` are compatibility aliases for `start` and `stop`, matching `openconnect-tun`.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
 - `system_proxy` render mode has been removed; legacy configs should use `network.mode=tun` and drop any old `network.system_proxy` block.
