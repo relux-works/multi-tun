@@ -83,3 +83,27 @@ func TestInspectVLESSURLRequiresOneURL(t *testing.T) {
 		t.Fatalf("stderr = %q, want URL count error", stderr.String())
 	}
 }
+
+// A malformed direct URI must not be echoed back on stderr: it carries the
+// account UUID and REALITY keys.
+func TestInspectVLESSURLMalformedDirectURIDoesNotLeakIt(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(&stdout, &stderr)
+
+	raw := "vless://SECRET-UUID-0000@bad host.example:443?pbk=SECRET-PBK#x"
+	exitCode := app.Run([]string{"inspect-vless-url", raw})
+	if exitCode == 0 {
+		t.Fatalf("exitCode = 0, want failure for malformed URI")
+	}
+	for _, out := range []string{stdout.String(), stderr.String()} {
+		if strings.Contains(out, "SECRET-UUID") || strings.Contains(out, "SECRET-PBK") {
+			t.Fatalf("output leaks the URI: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "inspect-vless-url failed") {
+		t.Fatalf("stderr = %q, want failure line", stderr.String())
+	}
+}

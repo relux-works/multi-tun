@@ -27,6 +27,10 @@ func installReconnectHarness(t *testing.T) *reconnectHarness {
 	h := &reconnectHarness{}
 	previousStop := stopCurrentSessionFunc
 	previousStart := startSessionFunc
+	previousLookPath := lookPathFunc
+	lookPathFunc = func(file string) (string, error) {
+		return "/usr/local/bin/" + file, nil
+	}
 	stopCurrentSessionFunc = func(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
 		h.events = append(h.events, "stop")
 		return &session.CurrentSession{ID: "previous", PID: 4242}, "stopped", nil
@@ -39,6 +43,7 @@ func installReconnectHarness(t *testing.T) *reconnectHarness {
 	t.Cleanup(func() {
 		stopCurrentSessionFunc = previousStop
 		startSessionFunc = previousStart
+		lookPathFunc = previousLookPath
 	})
 	return h
 }
@@ -52,6 +57,10 @@ func installRefreshFailure(t *testing.T, err error) {
 	t.Cleanup(func() {
 		refreshSourceFunc = previous
 	})
+}
+
+func transientFetchError(message string) error {
+	return &subscription.TransientFetchError{Err: errors.New(message)}
 }
 
 func writeReconnectConfig(t *testing.T, selector string) (string, string) {
@@ -138,7 +147,7 @@ func TestReconnectStopsThenStartsWhenPrepareSucceeds(t *testing.T) {
 func TestReconnectFallsBackToCachedSnapshotWhenRefreshFails(t *testing.T) {
 	path, cacheDir := writeReconnectConfig(t, "us-east")
 	seedReconnectCache(t, cacheDir)
-	installRefreshFailure(t, errors.New("subscription request failed: net/http: TLS handshake timeout"))
+	installRefreshFailure(t, transientFetchError("subscription request failed: net/http: TLS handshake timeout"))
 	h := installReconnectHarness(t)
 
 	var stdout, stderr bytes.Buffer
@@ -159,7 +168,7 @@ func TestReconnectFallsBackToCachedSnapshotWhenRefreshFails(t *testing.T) {
 // running session is not stopped.
 func TestReconnectFailsWithoutStoppingWhenRefreshFailsAndNoCache(t *testing.T) {
 	path, _ := writeReconnectConfig(t, "us-east")
-	installRefreshFailure(t, errors.New("subscription request failed: net/http: TLS handshake timeout"))
+	installRefreshFailure(t, transientFetchError("subscription request failed: net/http: TLS handshake timeout"))
 	h := installReconnectHarness(t)
 
 	var stdout, stderr bytes.Buffer
@@ -181,7 +190,7 @@ func TestReconnectFailsWithoutStoppingWhenRefreshFailsAndNoCache(t *testing.T) {
 func TestReconnectLabelsCachedSnapshotInSelectionError(t *testing.T) {
 	path, cacheDir := writeReconnectConfig(t, "rotated-away-id")
 	seedReconnectCache(t, cacheDir)
-	installRefreshFailure(t, errors.New("subscription request failed: i/o timeout"))
+	installRefreshFailure(t, transientFetchError("subscription request failed: i/o timeout"))
 	h := installReconnectHarness(t)
 
 	var stdout, stderr bytes.Buffer
@@ -214,5 +223,72 @@ func TestConnectAndDisconnectAliasesAreAccepted(t *testing.T) {
 	}
 	if code := app.Run([]string{"konnect"}); code != 2 {
 		t.Fatalf("unknown command exitCode = %d, want 2", code)
+	}
+}
+
+// A refused (4xx) or unparsable subscription is not transient: reconnect must
+// not fall back to possibly revoked cached credentials, and must not stop the
+// running session either.
+func TestReconnectDoesNotFallBackOnNonTransientRefreshErrors(t *testing.T) {
+	for _, cause := range []error{
+		errors.New("subscription request failed with status 403 Forbidden"),
+		errors.New("parse vless profile: missing uuid"),
+	} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			path, cacheDir := writeReconnectConfig(t, "us-east")
+			seedReconnectCache(t, cacheDir)
+			installRefreshFailure(t, cause)
+			h := installReconnectHarness(t)
+
+			var stdout, stderr bytes.Buffer
+			exitCode := New(&stdout, &stderr).Run([]string{"reconnect", "--config", path})
+
+			if exitCode != 1 || len(h.events) != 0 {
+				t.Fatalf("exitCode = %d events = %v, want 1 and none", exitCode, h.events)
+			}
+			if strings.Contains(stderr.String(), "using cached snapshot") {
+				t.Fatalf("stderr = %q, must not fall back to the cache", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), cause.Error()) {
+				t.Fatalf("stderr = %q, want cause %q", stderr.String(), cause.Error())
+			}
+		})
+	}
+}
+
+// A replacement whose engine executable is missing is caught before anything
+// is stopped.
+func TestReconnectPreflightMissingExecutableLeavesSessions(t *testing.T) {
+	path, _ := writeReconnectConfig(t, "us-east")
+	h := installReconnectHarness(t)
+	lookPathFunc = func(file string) (string, error) {
+		return "", errors.New("executable file not found in $PATH")
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"reconnect", "--config", path})
+
+	if exitCode != 1 || len(h.events) != 0 {
+		t.Fatalf("exitCode = %d events = %v, want 1 and none", exitCode, h.events)
+	}
+	if !strings.Contains(stderr.String(), "sing-box executable not found") || !strings.Contains(stderr.String(), "left untouched") {
+		t.Fatalf("stderr = %q, want preflight failure and untouched notice", stderr.String())
+	}
+}
+
+// With --refresh=false and no cache the loader fetches fresh, so a selection
+// error must be labelled "refreshed", not "cached".
+func TestReconnectNoRefreshWithoutCacheLabelsFreshSnapshot(t *testing.T) {
+	path, _ := writeReconnectConfig(t, "rotated-away-id")
+	h := installReconnectHarness(t)
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"reconnect", "--config", path, "--refresh=false"})
+
+	if exitCode != 1 || len(h.events) != 0 {
+		t.Fatalf("exitCode = %d events = %v, want 1 and none", exitCode, h.events)
+	}
+	if !strings.Contains(stderr.String(), "did not match any refreshed subscription profile") {
+		t.Fatalf("stderr = %q, want refreshed label", stderr.String())
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -42,6 +43,23 @@ type stopSessionResult struct {
 
 var stopCurrentSessionFunc = stopCurrentSession
 var startSessionFunc = session.Start
+var lookPathFunc = exec.LookPath
+
+// preflightReplacement checks what session start needs and can be verified
+// without touching the network or the running tunnel, so reconnect fails
+// before it stops anything. Route checks cannot run here: while the old
+// tunnel is up the new upstream legitimately routes through it.
+func preflightReplacement(prepared preparedStart) error {
+	if _, err := lookPathFunc("sing-box"); err != nil {
+		return fmt.Errorf("sing-box executable not found: %w", err)
+	}
+	for _, sidecar := range prepared.sidecars {
+		if _, err := lookPathFunc(sidecar.Executable); err != nil {
+			return fmt.Errorf("%s executable not found: %w", sidecar.Name, err)
+		}
+	}
+	return nil
+}
 
 func (a *App) runStart(args []string) int {
 	return a.runStartCommand("start", args)
@@ -173,6 +191,11 @@ func (a *App) runReconnect(args []string) int {
 		refreshSet:      true,
 	}.withEffectiveSelection(selection))
 	if err != nil {
+		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		fmt.Fprintln(a.stderr, "running sessions were left untouched")
+		return 1
+	}
+	if err := preflightReplacement(prepared); err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		fmt.Fprintln(a.stderr, "running sessions were left untouched")
 		return 1

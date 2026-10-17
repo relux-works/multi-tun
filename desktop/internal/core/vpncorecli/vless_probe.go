@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -85,7 +86,7 @@ func (a *App) runInspectVLESSURL(args []string) int {
 	fmt.Fprintf(a.stdout, "source_mode: %s\n", report.SourceMode)
 	printVLESSProbeAttempts(a.stdout, sourceURL, report.Attempts)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "inspect-vless-url failed: %v\n", err)
+		fmt.Fprintf(a.stderr, "inspect-vless-url failed: %s\n", redactVLESSProbeText(err.Error(), sourceURL))
 		return 1
 	}
 
@@ -435,6 +436,12 @@ func printVLESSProbeAttempts(w io.Writer, sourceURL string, attempts []vlessProb
 	}
 }
 
+// probeURLPattern matches URLs inside error text. url.Parse and net/http quote
+// the URL (%q) and may drop its fragment, and a malformed URL can contain
+// spaces, so the match runs to the closing quote, backslash or end of line
+// rather than relying on exact matches of the raw input.
+var probeURLPattern = regexp.MustCompile(`(?i)\b(?:vless|vmess|trojan|ss|https?)://[^"\\\n]*`)
+
 func redactVLESSProbeText(text string, rawURLs ...string) string {
 	for _, rawURL := range rawURLs {
 		if rawURL == "" {
@@ -442,7 +449,12 @@ func redactVLESSProbeText(text string, rawURLs ...string) string {
 		}
 		text = strings.ReplaceAll(text, rawURL, redactURLValue(rawURL))
 	}
-	return text
+	return probeURLPattern.ReplaceAllStringFunc(text, func(token string) string {
+		if strings.HasPrefix(token, "<") || strings.Contains(token, "<redacted") {
+			return token
+		}
+		return redactURLValue(token)
+	})
 }
 
 func redactURLValue(raw string) string {

@@ -30,6 +30,24 @@ type CacheSnapshot struct {
 	Profiles      []model.Profile `json:"profiles"`
 }
 
+// TransientFetchError marks a subscription fetch failure that may succeed on a
+// later attempt (transport error, HTTP 5xx or 429). Only these allow callers to
+// fall back to a cached snapshot; a 4xx means the subscription itself was
+// refused and must not be papered over with stale credentials.
+type TransientFetchError struct {
+	Err error
+}
+
+func (e *TransientFetchError) Error() string { return e.Err.Error() }
+
+func (e *TransientFetchError) Unwrap() error { return e.Err }
+
+// IsTransientFetchError reports whether err wraps a TransientFetchError.
+func IsTransientFetchError(err error) bool {
+	var transient *TransientFetchError
+	return errors.As(err, &transient)
+}
+
 // FetchOptions customizes how a subscription is requested. Some providers only
 // serve real profiles to specific client User-Agents or device headers.
 type FetchOptions struct {
@@ -70,12 +88,16 @@ func FetchWithOptions(ctx context.Context, subscriptionURL string, options Fetch
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return nil, fmt.Errorf("subscription request failed: %w", err)
+		return nil, &TransientFetchError{Err: fmt.Errorf("subscription request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("subscription request failed with status %s", resp.Status)
+		err := fmt.Errorf("subscription request failed with status %s", resp.Status)
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			return nil, &TransientFetchError{Err: err}
+		}
+		return nil, err
 	}
 
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))

@@ -347,17 +347,28 @@ func (a *App) loadSnapshot(cfg config.ProjectConfig, refresh bool) (subscription
 }
 
 // loadStartSnapshot refreshes the subscription when asked and falls back to the
-// cached snapshot when the refresh fails, so a flaky provider endpoint does not
-// block a start or reconnect that the cache can still serve. The bool reports
-// whether the returned snapshot is the fresh one.
+// cached snapshot when the fetch fails transiently, so a flaky provider endpoint
+// does not block a start or reconnect that the cache can still serve. Refused
+// (4xx), unparsable or unsaved refreshes stay hard failures. The bool reports
+// whether the returned snapshot was fetched just now.
 func (a *App) loadStartSnapshot(cfg config.ProjectConfig, refresh bool) (subscription.CacheSnapshot, bool, error) {
 	if !refresh {
-		snapshot, err := a.loadSnapshot(cfg, false)
-		return snapshot, false, err
+		snapshot, err := subscription.LoadCache(cfg.CacheDir)
+		if err == nil {
+			return snapshot, false, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return subscription.CacheSnapshot{}, false, err
+		}
+		snapshot, err = refreshSourceFunc(cfg)
+		return snapshot, err == nil, err
 	}
 	snapshot, err := refreshSourceFunc(cfg)
 	if err == nil {
 		return snapshot, true, nil
+	}
+	if !subscription.IsTransientFetchError(err) {
+		return subscription.CacheSnapshot{}, false, err
 	}
 	cached, cacheErr := subscription.LoadCache(cfg.CacheDir)
 	if cacheErr != nil {

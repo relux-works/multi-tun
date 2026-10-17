@@ -109,3 +109,41 @@ func TestFetchInvalidURLDoesNotLeakIt(t *testing.T) {
 		t.Fatalf("Fetch() error = %q, leaks the subscription URL", err.Error())
 	}
 }
+
+// Only transport failures, 5xx and 429 are transient; a 4xx refusal is not, so
+// callers cannot mask a revoked subscription with a cached one.
+func TestFetchClassifiesTransientFailures(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		status    int
+		transient bool
+	}{
+		{http.StatusForbidden, false},
+		{http.StatusUnauthorized, false},
+		{http.StatusNotFound, false},
+		{http.StatusTooManyRequests, true},
+		{http.StatusBadGateway, true},
+		{http.StatusServiceUnavailable, true},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.status)
+		}))
+		_, err := Fetch(context.Background(), server.URL)
+		server.Close()
+		if err == nil {
+			t.Fatalf("status %d: Fetch() error = nil", tc.status)
+		}
+		if got := IsTransientFetchError(err); got != tc.transient {
+			t.Fatalf("status %d: IsTransientFetchError = %v, want %v (err=%v)", tc.status, got, tc.transient, err)
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := server.URL
+	server.Close()
+	_, err := Fetch(context.Background(), url)
+	if err == nil || !IsTransientFetchError(err) {
+		t.Fatalf("closed server: err = %v, want transient transport error", err)
+	}
+}
