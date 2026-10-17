@@ -437,10 +437,11 @@ func printVLESSProbeAttempts(w io.Writer, sourceURL string, attempts []vlessProb
 }
 
 // probeURLPattern matches URLs inside error text. url.Parse and net/http quote
-// the URL (%q) and may drop its fragment, and a malformed URL can contain
-// spaces, so the match runs to the closing quote, backslash or end of line
-// rather than relying on exact matches of the raw input.
-var probeURLPattern = regexp.MustCompile(`(?i)\b(?:vless|vmess|trojan|ss|https?)://[^"\\\n]*`)
+// the URL (%q), escape backslashes and may drop its fragment, and a malformed
+// URL can contain spaces, so the match consumes escape pairs and runs to the
+// first unescaped quote or end of line rather than relying on exact matches of
+// the raw input. Nested quoting over-redacts, which is the safe direction.
+var probeURLPattern = regexp.MustCompile(`(?i)\b(?:vless|vmess|trojan|ss|https?)://(?:\\.|[^"\\\n])*`)
 
 func redactVLESSProbeText(text string, rawURLs ...string) string {
 	for _, rawURL := range rawURLs {

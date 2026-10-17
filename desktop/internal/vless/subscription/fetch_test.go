@@ -147,3 +147,27 @@ func TestFetchClassifiesTransientFailures(t *testing.T) {
 		t.Fatalf("closed server: err = %v, want transient transport error", err)
 	}
 }
+
+// A body cut off after 200 OK is a transport failure and therefore transient;
+// statuses outside 5xx and 429 are not.
+func TestFetchTruncatedBodyIsTransientAndOddStatusIsNot(t *testing.T) {
+	t.Parallel()
+
+	truncated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+	}))
+	defer truncated.Close()
+	if _, err := Fetch(context.Background(), truncated.URL); err == nil || !IsTransientFetchError(err) {
+		t.Fatalf("truncated body: err = %v, want transient", err)
+	}
+
+	odd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(600)
+	}))
+	defer odd.Close()
+	if _, err := Fetch(context.Background(), odd.URL); err == nil || IsTransientFetchError(err) {
+		t.Fatalf("status 600: err = %v, want non-transient", err)
+	}
+}

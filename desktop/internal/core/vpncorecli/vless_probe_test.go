@@ -2,6 +2,7 @@ package vpncorecli
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -105,5 +106,26 @@ func TestInspectVLESSURLMalformedDirectURIDoesNotLeakIt(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "inspect-vless-url failed") {
 		t.Fatalf("stderr = %q, want failure line", stderr.String())
+	}
+}
+
+// Go escapes a backslash when quoting a malformed URL; secrets after it must
+// still be redacted, and the error cause must survive.
+func TestRedactVLESSProbeTextHandlesEscapedBackslash(t *testing.T) {
+	t.Parallel()
+
+	raw := `vless://SECRET-UUID@bad\host:443?pbk=SECRET-PBK&sid=SECRET-SID`
+	single := fmt.Sprintf("parse %q: invalid character", raw)
+	double := fmt.Sprintf("error=%q", single)
+	for _, text := range []string{single, double} {
+		got := redactVLESSProbeText(text, raw)
+		for _, secret := range []string{"SECRET-UUID", "SECRET-PBK", "SECRET-SID"} {
+			if strings.Contains(got, secret) {
+				t.Fatalf("redactVLESSProbeText(%q) = %q, leaks %s", text, got, secret)
+			}
+		}
+	}
+	if got := redactVLESSProbeText(single, raw); !strings.Contains(got, "invalid character") {
+		t.Fatalf("redactVLESSProbeText() = %q, lost the error cause", got)
 	}
 }
