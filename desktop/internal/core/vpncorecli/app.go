@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
 )
@@ -21,6 +24,16 @@ var inspectServiceVPNCoreCLI = vpncore.InspectService
 var (
 	installServiceVPNCoreCLI = vpncore.InstallService
 	installDigestVPNCoreCLI  = vpncore.InstallDigest
+	installSleepVPNCoreCLI   = time.Sleep
+	installNowVPNCoreCLI     = time.Now
+	launchctlPrintVPNCoreCLI = func(label string) ([]byte, error) {
+		return exec.Command("launchctl", "print", "system/"+label).CombinedOutput()
+	}
+)
+
+const (
+	installReachabilityTimeoutVPNCoreCLI = 5 * time.Second
+	installReachabilityPollVPNCoreCLI    = 100 * time.Millisecond
 )
 
 var lowercaseSHA256CLI = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -85,10 +98,25 @@ func (a *App) runInstall(args []string) int {
 		return 1
 	}
 
-	status, err := inspectServiceVPNCoreCLI(cfg)
-	if err != nil {
-		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
-		return 1
+	deadline := installNowVPNCoreCLI().Add(installReachabilityTimeoutVPNCoreCLI)
+	var status vpncore.ServiceStatus
+	for {
+		status, err = inspectServiceVPNCoreCLI(cfg)
+		if err == nil && status.Reachable {
+			break
+		}
+		if !installNowVPNCoreCLI().Before(deadline) {
+			fmt.Fprintf(a.stderr, "install failed: vpn core did not become reachable within %s\n", installReachabilityTimeoutVPNCoreCLI)
+			if err != nil {
+				fmt.Fprintf(a.stderr, "status: %v\n", err)
+			}
+			fmt.Fprintf(a.stderr, "socket: %s\n", cfg.SocketPath)
+			if output, printErr := launchctlPrintVPNCoreCLI(cfg.Label); printErr == nil && len(output) != 0 {
+				fmt.Fprintf(a.stderr, "launchctl print system/%s (tail):\n%s\n", cfg.Label, diagnosticTail(output, 4096))
+			}
+			return 1
+		}
+		installSleepVPNCoreCLI(installReachabilityPollVPNCoreCLI)
 	}
 
 	fmt.Fprintln(a.stdout, "installed vpn core")
@@ -99,6 +127,13 @@ func (a *App) runInstall(args []string) int {
 		fmt.Fprintf(a.stdout, "compatibility: %s\n", status.Compatibility)
 	}
 	return 0
+}
+
+func diagnosticTail(data []byte, maxBytes int) string {
+	if len(data) > maxBytes {
+		data = data[len(data)-maxBytes:]
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func (a *App) runInstallDigest(args []string) int {

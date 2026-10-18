@@ -87,23 +87,66 @@ func UninstallService(cfg ServiceConfig) error {
 	if err := ensureSudoCredentialsVPNCore(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
-	cleanupCompatibilityServices(cfg)
-	uninstallExactService(cfg)
-	return nil
+	compatibilityErr := cleanupCompatibilityServices(cfg)
+	uninstallErr := uninstallExactService(cfg)
+	return errors.Join(compatibilityErr, uninstallErr)
 }
 
-func cleanupCompatibilityServices(cfg ServiceConfig) {
+func cleanupCompatibilityServices(cfg ServiceConfig) error {
+	var errs []error
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
-		uninstallExactService(compat.ServiceConfig)
+		if err := uninstallExactService(compat.ServiceConfig); err != nil {
+			errs = append(errs, fmt.Errorf("uninstall compatibility service %s: %w", compat.Label, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func uninstallExactService(cfg ServiceConfig) error {
+	forgetErr := forgetLaunchdLabel(cfg.Label)
+	var removalErrs []error
+	if _, err := runPrivilegedCommandVPNCore("rm", "-f", cfg.PlistPath, cfg.SocketPath); err != nil {
+		removalErrs = append(removalErrs, fmt.Errorf("remove plist and socket: %w", err))
+	}
+	if cfg.HelperDir != "" {
+		if _, err := runPrivilegedCommandVPNCore("rm", "-rf", cfg.HelperDir); err != nil {
+			removalErrs = append(removalErrs, fmt.Errorf("remove helper directory: %w", err))
+		}
+	}
+	absentErr := verifyServicePathsAbsent(cfg)
+	if forgetErr == nil && absentErr == nil {
+		return nil
+	}
+	return errors.Join(forgetErr, errors.Join(removalErrs...), absentErr)
+}
+
+func forgetLaunchdLabel(label string) error {
+	_, bootoutErr := runPrivilegedCommandVPNCore("launchctl", "bootout", launchctlTarget(label))
+	deadline := installNowVPNCore().Add(launchctlForgetTimeout)
+	for {
+		if _, err := runPrivilegedCommandVPNCore("launchctl", "print", launchctlTarget(label)); err != nil {
+			return nil
+		}
+		if !installNowVPNCore().Before(deadline) {
+			return errors.Join(bootoutErr, fmt.Errorf("launchd did not forget %s within %s", label, launchctlForgetTimeout))
+		}
+		installSleepVPNCore(launchctlForgetPollDelay)
 	}
 }
 
-func uninstallExactService(cfg ServiceConfig) {
-	_, _ = runPrivilegedCommandVPNCore("launchctl", "bootout", launchctlTarget(cfg.Label))
-	_, _ = runPrivilegedCommandVPNCore("rm", "-f", cfg.PlistPath, cfg.SocketPath)
-	if cfg.HelperDir != "" {
-		_, _ = runPrivilegedCommandVPNCore("rm", "-rf", cfg.HelperDir)
+func verifyServicePathsAbsent(cfg ServiceConfig) error {
+	var errs []error
+	for _, path := range []string{cfg.PlistPath, cfg.SocketPath, cfg.HelperDir} {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Lstat(path); err == nil {
+			errs = append(errs, fmt.Errorf("%s still exists", path))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("inspect removed path %s: %w", path, err))
+		}
 	}
+	return errors.Join(errs...)
 }
 
 func RunDaemon(cfg ServiceConfig, clientUID, clientGID int, binarySHA256, manifestSHA256 string) error {
@@ -306,7 +349,14 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 					closeFDs()
 					return Request{}, nil, fmt.Errorf("parse passed file descriptor: %w", err)
 				}
-				receivedFDs = append(receivedFDs, fds...)
+				for _, fd := range fds {
+					unix.CloseOnExec(fd)
+					receivedFDs = append(receivedFDs, fd)
+					if len(receivedFDs) > 1 {
+						closeFDs()
+						return Request{}, nil, errors.New("vpn core request received more than one file descriptor")
+					}
+				}
 			}
 		}
 		if flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 {
@@ -425,11 +475,18 @@ func (d *serviceDaemon) handleSpawn(request Request, logFile *os.File) (int, err
 	}
 	pid := cmd.Process.Pid
 	d.children.add(pid, request.SetPGID)
-	go func() {
-		_ = cmd.Wait()
+	if err := watchProcessExitVPNCore(pid, func() {
+		d.children.removeBeforeReap(pid, func() {
+			_ = cmd.Wait()
+			_ = logWriter.Close()
+		})
+	}); err != nil {
 		d.children.remove(pid)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		_ = logWriter.Close()
-	}()
+		return 0, fmt.Errorf("watch spawned process %d: %w", pid, err)
+	}
 	return pid, nil
 }
 
@@ -440,22 +497,11 @@ func (d *serviceDaemon) handleSignal(request Request) error {
 	if request.Signal == "" {
 		return errors.New("missing signal")
 	}
-	child, ok := d.children.get(request.PID)
-	if !ok {
-		return fmt.Errorf("pid %d was not spawned by this vpn core daemon or is no longer its child", request.PID)
-	}
-	if request.Group && !child.setPGID {
-		return fmt.Errorf("pid %d was not spawned in its own process group", request.PID)
-	}
 	sig, err := parseSignal(request.Signal)
 	if err != nil {
 		return err
 	}
-	target := request.PID
-	if request.Group {
-		target = -request.PID
-	}
-	return syscall.Kill(target, sig)
+	return d.children.signal(request.PID, request.Group, sig)
 }
 
 type childRecord struct{ setPGID bool }
@@ -476,11 +522,33 @@ func (r *childRegistry) remove(pid int) {
 	delete(r.children, pid)
 	r.mu.Unlock()
 }
+func (r *childRegistry) removeBeforeReap(pid int, reap func()) {
+	r.mu.Lock()
+	delete(r.children, pid)
+	r.mu.Unlock()
+	reap()
+}
 func (r *childRegistry) get(pid int) (childRecord, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	child, ok := r.children[pid]
 	return child, ok
+}
+func (r *childRegistry) signal(pid int, group bool, sig syscall.Signal) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	child, ok := r.children[pid]
+	if !ok {
+		return fmt.Errorf("pid %d was not spawned by this vpn core daemon or is no longer its child", pid)
+	}
+	if group && !child.setPGID {
+		return fmt.Errorf("pid %d was not spawned in its own process group", pid)
+	}
+	target := pid
+	if group {
+		target = -pid
+	}
+	return syscall.Kill(target, sig)
 }
 
 // validateInterimCommand is a deliberately narrow PR A compatibility shim.

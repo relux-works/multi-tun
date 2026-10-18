@@ -129,6 +129,60 @@ func TestReadRequestAcceptsRegularLogFD(t *testing.T) {
 	if decoded.Action != "run" || received == nil {
 		t.Fatalf("decoded = %#v, fd=%v", decoded, received)
 	}
+	flags, err := unix.FcntlInt(received.Fd(), unix.F_GETFD, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		t.Fatal("received log fd is missing close-on-exec")
+	}
+}
+
+func TestReadRequestImmediatelyRefusesAndClosesMultipleFDs(t *testing.T) {
+	// This proves two descriptors, whether coalesced or split across ancillary messages, are both closed at the second descriptor and the request is refused.
+	for _, split := range []bool{false, true} {
+		t.Run(map[bool]string{false: "one-message", true: "two-messages"}[split], func(t *testing.T) {
+			server, client := unixSocketPair(t)
+			readers := make([]*os.File, 0, 2)
+			writers := make([]*os.File, 0, 2)
+			for range 2 {
+				reader, writer, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				readers = append(readers, reader)
+				writers = append(writers, writer)
+				t.Cleanup(func() { _ = reader.Close() })
+			}
+			request := []byte("{\"action\":\"run\",\"command\":[\"/bin/sh\",\"-c\",\"true\"]}\n")
+			if split {
+				writeUnixPayload(t, client, request[:10], unix.UnixRights(int(writers[0].Fd())))
+				writeUnixPayload(t, client, request[10:], unix.UnixRights(int(writers[1].Fd())))
+			} else {
+				rights := unix.UnixRights(int(writers[0].Fd()), int(writers[1].Fd()))
+				writeUnixPayload(t, client, request, rights)
+			}
+			for _, writer := range writers {
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, _, err := readRequest(server)
+			if err == nil || !strings.Contains(err.Error(), "more than one") {
+				t.Fatalf("readRequest() error = %v, want multiple-fd refusal", err)
+			}
+			for index, reader := range readers {
+				if err := unix.SetNonblock(int(reader.Fd()), true); err != nil {
+					t.Fatal(err)
+				}
+				buffer := make([]byte, 1)
+				n, readErr := reader.Read(buffer)
+				if n != 0 || readErr != io.EOF {
+					t.Fatalf("pipe %d read = (%d, %v), want EOF after received fd close", index, n, readErr)
+				}
+			}
+		})
+	}
 }
 
 func TestHandleConnBoundsSlowClientWithReadDeadline(t *testing.T) {
@@ -265,6 +319,39 @@ func TestSpawnedChildCanBeSignalled(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("spawned pid %d was not reaped", pid)
+}
+
+func TestChildRegistryRemovesBeforeReaping(t *testing.T) {
+	// This seam-level ordering control proves registry authorization is revoked before the reaping callback can make the PID reusable.
+	registry := newChildRegistry()
+	registry.add(4242, true)
+	registry.removeBeforeReap(4242, func() {
+		if _, ok := registry.get(4242); ok {
+			t.Fatal("child remained registered when reaping began")
+		}
+	})
+}
+
+func TestSignalAfterChildExitIsRefused(t *testing.T) {
+	// This proves kqueue exit observation removes an exited child before a later PID-based signal authorization check.
+	logFile := openSecurityTestLog(t, "exited-child.log")
+	d := newServiceDaemon(ServiceConfig{}, 501, 20)
+	pid, err := d.handleSpawn(Request{Command: []string{"/bin/sh", "-c", "exit 0"}}, logFile)
+	if err != nil {
+		t.Fatalf("handleSpawn() error = %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := d.children.get(pid); !ok {
+			err := d.handleSignal(Request{PID: pid, Signal: "TERM"})
+			if err == nil || !strings.Contains(err.Error(), "no longer its child") {
+				t.Fatalf("handleSignal() error = %v, want exited-child refusal", err)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("exited child pid %d remained registered", pid)
 }
 
 func TestInterimAllowlistRefusesArbitraryExecutable(t *testing.T) {

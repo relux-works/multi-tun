@@ -20,7 +20,7 @@ type ownerLookup func(path string, stat *unix.Stat_t) (uint32, error)
 type verificationDependencies struct {
 	executable func() (string, error)
 	owner      ownerLookup
-	checkACL   func(string) error
+	checkACL   func(string, int) error
 }
 
 func productionVerificationDependencies() verificationDependencies {
@@ -227,7 +227,7 @@ func verifyOpenedNode(path string, fd int, directory, allowSticky bool, deps ver
 			return fmt.Errorf("%s is group/world-writable", path)
 		}
 	}
-	if err := deps.checkACL(path); err != nil {
+	if err := deps.checkACL(path, fd); err != nil {
 		return fmt.Errorf("unsafe ACL on %s: %w", path, err)
 	}
 	return nil

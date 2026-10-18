@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestInstallServiceRefusesDigestMismatchBeforePrivilege(t *testing.T) {
@@ -72,14 +74,14 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 	installSleepVPNCore = func(_ time.Duration) {}
 	t.Cleanup(func() { installSleepVPNCore = previousSleep })
 	cfg := testInstallConfig(t)
-	withRootOwner(t, 0)
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
 	if err := InstallService(cfg, binary, 501, 20, digest); err != nil {
 		t.Fatalf("InstallService() error = %v", err)
 	}
-	if len(commands) != 9 {
-		t.Fatalf("commands = %v, want 9 ordered commands", commands)
+	if len(commands) != 11 {
+		t.Fatalf("commands = %v, want 11 ordered commands", commands)
 	}
-	wantKinds := []string{"install -d", "install -o", "install -o", "install -o", "launchctl bootout", "launchctl print", "launchctl print", "launchctl enable", "launchctl bootstrap"}
+	wantKinds := []string{"rm -rf", "install -d", "chmod -N", "install -o", "install -o", "install -o", "launchctl bootout", "launchctl print", "launchctl print", "launchctl enable", "launchctl bootstrap"}
 	gotKinds := make([]string, 0, len(wantKinds))
 	for _, command := range commands {
 		for _, prefix := range wantKinds {
@@ -93,7 +95,9 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 		t.Fatalf("command order = %v, want %v; raw=%v", gotKinds, wantKinds, commands)
 	}
 	for index, want := range []string{
+		"rm -rf " + cfg.HelperDir,
 		"install -d -o root -g wheel -m 0755 " + cfg.HelperDir,
+		"chmod -N " + cfg.HelperDir,
 		" -m 0755 ",
 		" -m 0644 ",
 		" -m 0644 ",
@@ -102,8 +106,8 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 			t.Fatalf("commands[%d] = %q, want fragment %q", index, commands[index], want)
 		}
 	}
-	if !strings.HasSuffix(commands[1], " "+cfg.BinaryPath()) || !strings.HasSuffix(commands[2], " "+cfg.ManifestPath()) || !strings.HasSuffix(commands[3], " "+cfg.PlistPath) {
-		t.Fatalf("installed destinations are wrong: %v", commands[:4])
+	if !strings.HasSuffix(commands[3], " "+cfg.BinaryPath()) || !strings.HasSuffix(commands[4], " "+cfg.ManifestPath()) || !strings.HasSuffix(commands[5], " "+cfg.PlistPath) {
+		t.Fatalf("installed destinations are wrong: %v", commands[:6])
 	}
 	for index, want := range []string{
 		"launchctl bootout system/" + cfg.Label,
@@ -112,8 +116,8 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 		"launchctl enable system/" + cfg.Label,
 		"launchctl bootstrap system " + cfg.PlistPath,
 	} {
-		if commands[index+4] != want {
-			t.Fatalf("commands[%d] = %q, want %q", index+4, commands[index+4], want)
+		if commands[index+6] != want {
+			t.Fatalf("commands[%d] = %q, want %q", index+6, commands[index+6], want)
 		}
 	}
 }
@@ -123,11 +127,17 @@ func TestCompatibilityCleanupStillTargetsLegacyService(t *testing.T) {
 	var commands []string
 	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
 		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		if name == "launchctl" && len(args) > 0 && args[0] == "print" {
+			return nil, errors.New("service absent")
+		}
 		return nil, nil
 	})
-	cleanupCompatibilityServices(DefaultServiceConfig())
+	if err := cleanupCompatibilityServices(DefaultServiceConfig()); err != nil {
+		t.Fatalf("cleanupCompatibilityServices() error = %v", err)
+	}
 	want := []string{
 		"launchctl bootout system/" + legacyOpenConnectHelperLabel,
+		"launchctl print system/" + legacyOpenConnectHelperLabel,
 		"rm -f " + legacyOpenConnectHelperPlistPath + " " + legacyOpenConnectHelperSocketPath,
 	}
 	if !reflect.DeepEqual(commands, want) {
@@ -146,7 +156,13 @@ func writeInstallTestBinary(t *testing.T) string {
 
 func testInstallConfig(t *testing.T) ServiceConfig {
 	t.Helper()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	return ServiceConfig{
 		Label:      "works.relux.test-vpn-core",
 		PlistPath:  filepath.Join(root, "service.plist"),
@@ -171,6 +187,14 @@ func withInstallSeams(t *testing.T, ensure func() error, run func(string, ...str
 // the post-install verification reads real destination files. tamper, when set,
 // rewrites the copied bytes for destinations whose base name it returns true for.
 func performFakeInstall(name string, args []string, tamper func(dest string) []byte) error {
+	if name == "rm" {
+		for _, path := range args[1:] {
+			if err := os.RemoveAll(path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if name != "install" || len(args) < 2 || args[0] == "-d" {
 		if name == "install" && len(args) > 0 && args[0] == "-d" {
 			return os.MkdirAll(args[len(args)-1], 0o755)
@@ -193,11 +217,13 @@ func performFakeInstall(name string, args []string, tamper func(dest string) []b
 	return os.WriteFile(dest, data, 0o644)
 }
 
-func withRootOwner(t *testing.T, uid uint32) {
+func withInstallVerification(t *testing.T, owner ownerLookup, checkACL func(string, int) error) {
 	t.Helper()
-	previous := installedOwnerUIDVPNCore
-	installedOwnerUIDVPNCore = func(string) (uint32, error) { return uid, nil }
-	t.Cleanup(func() { installedOwnerUIDVPNCore = previous })
+	previous := installVerificationDepsVPNCore
+	installVerificationDepsVPNCore = func() verificationDependencies {
+		return verificationDependencies{owner: owner, checkACL: checkACL}
+	}
+	t.Cleanup(func() { installVerificationDepsVPNCore = previous })
 }
 
 // A staged file swapped between hashing and the privileged copy is caught on
@@ -211,7 +237,7 @@ func TestInstallServiceRefusesSwappedStagedFiles(t *testing.T) {
 				t.Fatalf("InstallDigest() error = %v", err)
 			}
 			cfg := testInstallConfig(t)
-			withRootOwner(t, 0)
+			withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
 			var commands []string
 			withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
 				commands = append(commands, strings.Join(append([]string{name}, args...), " "))
@@ -230,7 +256,7 @@ func TestInstallServiceRefusesSwappedStagedFiles(t *testing.T) {
 			if strings.Contains(joined, "launchctl") {
 				t.Fatalf("launchctl was invoked after a failed verification: %v", commands)
 			}
-			if !strings.Contains(joined, "rm -f "+cfg.BinaryPath()) {
+			if !strings.Contains(joined, "rm -rf "+cfg.HelperDir) || !strings.Contains(joined, "rm -f "+cfg.PlistPath) {
 				t.Fatalf("installed files were not removed: %v", commands)
 			}
 		})
@@ -245,7 +271,12 @@ func TestInstallServiceRefusesNonRootOwnedDestinations(t *testing.T) {
 		t.Fatalf("InstallDigest() error = %v", err)
 	}
 	cfg := testInstallConfig(t)
-	withRootOwner(t, 501)
+	withInstallVerification(t, func(path string, _ *unix.Stat_t) (uint32, error) {
+		if path == cfg.HelperDir {
+			return 501, nil
+		}
+		return 0, nil
+	}, func(string, int) error { return nil })
 	var commands []string
 	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
 		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
@@ -258,4 +289,150 @@ func TestInstallServiceRefusesNonRootOwnedDestinations(t *testing.T) {
 	if strings.Contains(strings.Join(commands, "\n"), "launchctl bootstrap") {
 		t.Fatalf("bootstrap ran despite failed verification: %v", commands)
 	}
+}
+
+func TestInstallServiceRefusesHelperSymlinkThatSurvivesPrivilegedPreparation(t *testing.T) {
+	// This proves a pre-existing helper symlink cannot survive preparation and reach launchctl even if the privileged removal seam is subverted.
+	binary := writeInstallTestBinary(t)
+	digest, err := InstallDigest(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testInstallConfig(t)
+	target := t.TempDir()
+	if err := os.Symlink(target, cfg.HelperDir); err != nil {
+		t.Fatal(err)
+	}
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
+	var commands []string
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		if name == "rm" && len(args) > 1 && args[0] == "-rf" && args[1] == cfg.HelperDir {
+			return nil, nil
+		}
+		return nil, performFakeInstall(name, args, nil)
+	})
+	err = InstallService(cfg, binary, 501, 20, digest)
+	if err == nil || !strings.Contains(err.Error(), "without following symlinks") {
+		t.Fatalf("InstallService() error = %v, want symlink refusal", err)
+	}
+	if strings.Contains(strings.Join(commands, "\n"), "launchctl") {
+		t.Fatalf("launchctl was invoked for symlinked helper: %v", commands)
+	}
+}
+
+func TestInstallServiceRefusesWriteACLOnHelperDirectory(t *testing.T) {
+	// This proves a write ACL on the freshly created helper directory aborts installation and cleanup before launchctl.
+	binary := writeInstallTestBinary(t)
+	digest, err := InstallDigest(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testInstallConfig(t)
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(path string, _ int) error {
+		if path == cfg.HelperDir {
+			return errors.New("write-capable ACL entry")
+		}
+		return nil
+	})
+	var commands []string
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		return nil, performFakeInstall(name, args, nil)
+	})
+	err = InstallService(cfg, binary, 501, 20, digest)
+	if err == nil || !strings.Contains(err.Error(), "write-capable ACL") {
+		t.Fatalf("InstallService() error = %v, want ACL refusal", err)
+	}
+	if strings.Contains(strings.Join(commands, "\n"), "launchctl") {
+		t.Fatalf("launchctl was invoked for ACL failure: %v", commands)
+	}
+}
+
+func TestInstallServiceFailsWhenBootoutLeavesServiceLoaded(t *testing.T) {
+	// This proves a failed bootout cannot be ignored when launchd continues to report the service loaded, and bootstrap never runs.
+	binary := writeInstallTestBinary(t)
+	digest, err := InstallDigest(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testInstallConfig(t)
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
+	withExpiredInstallClock(t)
+	var commands []string
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		if name == "launchctl" && args[0] == "bootout" {
+			return nil, errors.New("bootout refused")
+		}
+		if name == "launchctl" && args[0] == "print" {
+			return []byte("still loaded"), nil
+		}
+		return nil, performFakeInstall(name, args, nil)
+	})
+	err = InstallService(cfg, binary, 501, 20, digest)
+	if err == nil || !strings.Contains(err.Error(), "did not forget") {
+		t.Fatalf("InstallService() error = %v, want loaded-service failure", err)
+	}
+	if strings.Contains(strings.Join(commands, "\n"), "launchctl bootstrap") {
+		t.Fatalf("bootstrap ran while old service stayed loaded: %v", commands)
+	}
+}
+
+func TestUninstallServiceFailsWhenBootoutLeavesServiceLoaded(t *testing.T) {
+	// This proves uninstall reports a bootout failure when launchd retains the label even if path cleanup succeeds.
+	cfg := testInstallConfig(t)
+	if err := os.Mkdir(cfg.HelperDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.PlistPath, []byte("plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withExpiredInstallClock(t)
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		if name == "launchctl" && args[0] == "bootout" {
+			return nil, errors.New("bootout refused")
+		}
+		if name == "launchctl" && args[0] == "print" {
+			return []byte("still loaded"), nil
+		}
+		return nil, performFakeInstall(name, args, nil)
+	})
+	if err := UninstallService(cfg); err == nil || !strings.Contains(err.Error(), "did not forget") {
+		t.Fatalf("UninstallService() error = %v, want loaded-service failure", err)
+	}
+}
+
+func TestUninstallServiceToleratesVerifiedAbsentState(t *testing.T) {
+	// This proves bootout/removal command failures are tolerated only when launchd and every configured service path are verified absent.
+	cfg := testInstallConfig(t)
+	if err := os.RemoveAll(filepath.Dir(cfg.PlistPath)); err != nil {
+		t.Fatal(err)
+	}
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		return nil, errors.New("already absent")
+	})
+	if err := UninstallService(cfg); err != nil {
+		t.Fatalf("UninstallService() error = %v for verified absent state", err)
+	}
+}
+
+func withExpiredInstallClock(t *testing.T) {
+	t.Helper()
+	previousNow := installNowVPNCore
+	previousSleep := installSleepVPNCore
+	base := time.Unix(1, 0)
+	calls := 0
+	installNowVPNCore = func() time.Time {
+		calls++
+		if calls == 1 {
+			return base
+		}
+		return base.Add(launchctlForgetTimeout)
+	}
+	installSleepVPNCore = func(time.Duration) {}
+	t.Cleanup(func() {
+		installNowVPNCore = previousNow
+		installSleepVPNCore = previousSleep
+	})
 }

@@ -398,7 +398,11 @@ install_vpn_core() {
     warn "vpn-core is not in PATH after setup; skipping vpn-core install"
     return 0
   fi
-  run vpn-core install
+  local digest
+  digest="$(vpn-core install-digest)"
+  log "vpn-core install digest: $digest"
+  run vpn-core install --expect-sha256 "$digest"
+  # TODO(PR B): print the Homebrew-upgrade reinstall note once those binaries are pinned into the helper package.
 }
 
 verify_tool() {

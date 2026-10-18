@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCheckWriteACLAcceptsFileWithoutExtendedACL(t *testing.T) {
@@ -15,21 +17,74 @@ func TestCheckWriteACLAcceptsFileWithoutExtendedACL(t *testing.T) {
 	if err := os.WriteFile(path, []byte("plain\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkWriteACL(path); err != nil {
+	fd := openACLTestPath(t, path, false)
+	if err := checkWriteACL(path, fd); err != nil {
 		t.Fatalf("checkWriteACL() error = %v", err)
 	}
 }
 
-func TestCheckWriteACLRejectsWriteCapableExtendedACL(t *testing.T) {
-	// This control plants a real macOS write ACL and proves the cgo checker detects the intended violation.
-	path := filepath.Join(t.TempDir(), "acl-write")
+func TestCheckWriteACLRejectsEveryMutatingExtendedACLPermission(t *testing.T) {
+	// These controls prove every Darwin ACL permission that can mutate content, children, metadata, security, or ownership is refused.
+	for _, test := range []struct {
+		permission string
+		directory  bool
+	}{
+		{"write", false},
+		{"add_file", true},
+		{"append", false},
+		{"add_subdirectory", true},
+		{"delete", false},
+		{"delete_child", true},
+		{"writeattr", false},
+		{"writeextattr", false},
+		{"writesecurity", false},
+		{"chown", false},
+	} {
+		t.Run(test.permission, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "acl-target")
+			if test.directory {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte("plain\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("chmod", "+a", "everyone allow "+test.permission, path).CombinedOutput(); err != nil {
+				t.Fatalf("plant %s ACL: %v (%s)", test.permission, err, output)
+			}
+			fd := openACLTestPath(t, path, test.directory)
+			if err := checkWriteACL(path, fd); err == nil {
+				t.Fatalf("checkWriteACL() error = nil for %s ACL", test.permission)
+			}
+		})
+	}
+}
+
+func TestCheckWriteACLAcceptsReadOnlyExtendedACL(t *testing.T) {
+	// This positive control proves a real read-only Darwin ACL is not mistaken for mutation authority.
+	path := filepath.Join(t.TempDir(), "acl-read")
 	if err := os.WriteFile(path, []byte("plain\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := exec.Command("chmod", "+a", "everyone allow write", path).CombinedOutput(); err != nil {
-		t.Fatalf("plant write ACL: %v (%s)", err, output)
+	if output, err := exec.Command("chmod", "+a", "everyone allow read,readattr,readextattr,readsecurity", path).CombinedOutput(); err != nil {
+		t.Fatalf("plant read-only ACL: %v (%s)", err, output)
 	}
-	if err := checkWriteACL(path); err == nil {
-		t.Fatal("checkWriteACL() error = nil for write ACL")
+	fd := openACLTestPath(t, path, false)
+	if err := checkWriteACL(path, fd); err != nil {
+		t.Fatalf("checkWriteACL() error = %v for read-only ACL", err)
 	}
+}
+
+func openACLTestPath(t *testing.T, path string, directory bool) int {
+	t.Helper()
+	flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	if directory {
+		flags |= unix.O_DIRECTORY
+	}
+	fd, err := unix.Open(path, flags, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	return fd
 }

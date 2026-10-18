@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"syscall"
 	"time"
 )
 
@@ -45,11 +44,11 @@ type installPackage struct {
 }
 
 var (
-	ensureSudoCredentialsVPNCore = ensureSudoCredentials
-	runPrivilegedCommandVPNCore  = runPrivilegedCommand
-	installSleepVPNCore          = time.Sleep
-	installNowVPNCore            = time.Now
-	installedOwnerUIDVPNCore     = installedOwnerUID
+	ensureSudoCredentialsVPNCore   = ensureSudoCredentials
+	runPrivilegedCommandVPNCore    = runPrivilegedCommand
+	installSleepVPNCore            = time.Sleep
+	installNowVPNCore              = time.Now
+	installVerificationDepsVPNCore = productionVerificationDependencies
 )
 
 func InstallDigest(binaryPath string) (string, error) {
@@ -94,7 +93,9 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 		label string
 		args  []string
 	}{
+		{"remove existing vpn core helper path", []string{"rm", "-rf", cfg.HelperDir}},
 		{"create vpn core helper directory", []string{"install", "-d", "-o", "root", "-g", "wheel", "-m", "0755", cfg.HelperDir}},
+		{"strip vpn core helper directory ACL", []string{"chmod", "-N", cfg.HelperDir}},
 		{"install vpn core binary", []string{"install", "-o", "root", "-g", "wheel", "-m", "0755", pkg.binaryPath, cfg.BinaryPath()}},
 		{"install vpn core manifest", []string{"install", "-o", "root", "-g", "wheel", "-m", "0644", pkg.manifestPath, cfg.ManifestPath()}},
 		{"install vpn core plist", []string{"install", "-o", "root", "-g", "wheel", "-m", "0644", plistPath, cfg.PlistPath}},
@@ -105,21 +106,14 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 		}
 	}
 	if err := verifyInstalledPackage(cfg, pkg, plistData); err != nil {
-		_, _ = runPrivilegedCommandVPNCore("rm", "-f", cfg.BinaryPath(), cfg.ManifestPath(), cfg.PlistPath)
-		return fmt.Errorf("installed vpn core package failed verification, nothing was bootstrapped: %w", err)
+		cleanupErr := removeInstalledPackage(cfg)
+		return errors.Join(fmt.Errorf("installed vpn core package failed verification, nothing was bootstrapped: %w", err), cleanupErr)
 	}
-	cleanupCompatibilityServices(cfg)
-
-	_, _ = runPrivilegedCommandVPNCore("launchctl", "bootout", launchctlTarget(cfg.Label))
-	deadline := installNowVPNCore().Add(launchctlForgetTimeout)
-	for {
-		if _, err := runPrivilegedCommandVPNCore("launchctl", "print", launchctlTarget(cfg.Label)); err != nil {
-			break
-		}
-		if !installNowVPNCore().Before(deadline) {
-			return fmt.Errorf("launchd did not forget %s within %s", cfg.Label, launchctlForgetTimeout)
-		}
-		installSleepVPNCore(launchctlForgetPollDelay)
+	if err := cleanupCompatibilityServices(cfg); err != nil {
+		return fmt.Errorf("remove compatibility service: %w", err)
+	}
+	if err := forgetLaunchdLabel(cfg.Label); err != nil {
+		return fmt.Errorf("replace vpn core service: %w", err)
 	}
 	if _, err := runPrivilegedCommandVPNCore("launchctl", "enable", launchctlTarget(cfg.Label)); err != nil {
 		return fmt.Errorf("enable vpn core service: %w", err)
@@ -135,30 +129,14 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 // process running as the same user could swap them between hashing and the
 // privileged copy; only the root-owned result is trusted.
 func verifyInstalledPackage(cfg ServiceConfig, pkg installPackage, plistData []byte) error {
-	for _, file := range []struct {
-		path string
-		want string
-	}{
-		{cfg.BinaryPath(), pkg.binarySHA256},
-		{cfg.ManifestPath(), pkg.manifestSHA256},
-	} {
-		if err := requireRootOwnedRegularFile(file.path); err != nil {
-			return err
-		}
-		got, err := hashFile(file.path)
-		if err != nil {
-			return err
-		}
-		if got != file.want {
-			return fmt.Errorf("%s sha256 %s does not match staged %s", file.path, got, file.want)
-		}
-	}
-	if err := requireRootOwnedRegularFile(cfg.PlistPath); err != nil {
+	deps := installVerificationDepsVPNCore()
+	deps.executable = func() (string, error) { return cfg.BinaryPath(), nil }
+	if err := verifyDaemonInstallation(cfg, pkg.binarySHA256, pkg.manifestSHA256, deps); err != nil {
 		return err
 	}
-	installed, err := os.ReadFile(cfg.PlistPath)
+	installed, err := readVerifiedRegularFile(cfg.PlistPath, deps, false)
 	if err != nil {
-		return fmt.Errorf("read installed plist: %w", err)
+		return fmt.Errorf("verify installed plist: %w", err)
 	}
 	if !bytes.Equal(installed, plistData) {
 		return fmt.Errorf("%s does not match the rendered plist", cfg.PlistPath)
@@ -166,34 +144,15 @@ func verifyInstalledPackage(cfg ServiceConfig, pkg installPackage, plistData []b
 	return nil
 }
 
-func requireRootOwnedRegularFile(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("inspect installed file: %w", err)
+func removeInstalledPackage(cfg ServiceConfig) error {
+	var errs []error
+	if _, err := runPrivilegedCommandVPNCore("rm", "-f", cfg.PlistPath); err != nil {
+		errs = append(errs, fmt.Errorf("remove installed plist: %w", err))
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", path)
+	if _, err := runPrivilegedCommandVPNCore("rm", "-rf", cfg.HelperDir); err != nil {
+		errs = append(errs, fmt.Errorf("remove installed helper directory: %w", err))
 	}
-	uid, err := installedOwnerUIDVPNCore(path)
-	if err != nil {
-		return err
-	}
-	if uid != 0 {
-		return fmt.Errorf("%s is owned by uid %d, want root", path, uid)
-	}
-	return nil
-}
-
-func installedOwnerUID(path string) (uint32, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return 0, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, fmt.Errorf("%s: owner unavailable", path)
-	}
-	return stat.Uid, nil
+	return errors.Join(errs...)
 }
 
 func prepareInstallPackage(binaryPath string) (installPackage, error) {

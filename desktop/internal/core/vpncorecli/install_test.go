@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
 )
@@ -63,5 +64,71 @@ func TestInstallDigestFailureIsReported(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := New(&stdout, &stderr).Run([]string{"install-digest"}); code != 1 {
 		t.Fatalf("install-digest code = %d, want 1", code)
+	}
+}
+
+func TestInstallRefusesSuccessWhenDaemonRemainsUnreachable(t *testing.T) {
+	// This proves a completed bootstrap is not reported as success when bounded status polling never reaches the daemon, and diagnostics identify its socket and launchd tail.
+	previousInstall := installServiceVPNCoreCLI
+	previousInspect := inspectServiceVPNCoreCLI
+	previousNow := installNowVPNCoreCLI
+	previousSleep := installSleepVPNCoreCLI
+	previousPrint := launchctlPrintVPNCoreCLI
+	installServiceVPNCoreCLI = func(vpncore.ServiceConfig, string, int, int, string) error { return nil }
+	inspectServiceVPNCoreCLI = func(cfg vpncore.ServiceConfig) (vpncore.ServiceStatus, error) {
+		return vpncore.ServiceStatus{Label: cfg.Label, SocketPath: cfg.SocketPath, PlistPath: cfg.PlistPath}, nil
+	}
+	base := time.Unix(1, 0)
+	calls := 0
+	installNowVPNCoreCLI = func() time.Time {
+		calls++
+		if calls == 1 {
+			return base
+		}
+		return base.Add(installReachabilityTimeoutVPNCoreCLI)
+	}
+	installSleepVPNCoreCLI = func(time.Duration) {}
+	launchctlPrintVPNCoreCLI = func(string) ([]byte, error) { return []byte("line one\nself-verification failed\n"), nil }
+	t.Cleanup(func() {
+		installServiceVPNCoreCLI = previousInstall
+		inspectServiceVPNCoreCLI = previousInspect
+		installNowVPNCoreCLI = previousNow
+		installSleepVPNCoreCLI = previousSleep
+		launchctlPrintVPNCoreCLI = previousPrint
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := New(&stdout, &stderr).Run([]string{"install", "--expect-sha256", strings.Repeat("a", 64)})
+	if code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+	if strings.Contains(stdout.String(), "installed vpn core") {
+		t.Fatalf("false success output = %q", stdout.String())
+	}
+	for _, want := range []string{"did not become reachable", vpncore.DefaultServiceConfig().SocketPath, "self-verification failed"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestInstallPrintsSuccessAfterReachableStatus(t *testing.T) {
+	// This positive control proves install still succeeds once bounded polling observes the hardened daemon as reachable.
+	previousInstall := installServiceVPNCoreCLI
+	previousInspect := inspectServiceVPNCoreCLI
+	installServiceVPNCoreCLI = func(vpncore.ServiceConfig, string, int, int, string) error { return nil }
+	inspectServiceVPNCoreCLI = func(cfg vpncore.ServiceConfig) (vpncore.ServiceStatus, error) {
+		return vpncore.ServiceStatus{Label: cfg.Label, SocketPath: cfg.SocketPath, PlistPath: cfg.PlistPath, Reachable: true}, nil
+	}
+	t.Cleanup(func() {
+		installServiceVPNCoreCLI = previousInstall
+		inspectServiceVPNCoreCLI = previousInspect
+	})
+	var stdout, stderr bytes.Buffer
+	if code := New(&stdout, &stderr).Run([]string{"install", "--expect-sha256", strings.Repeat("a", 64)}); code != 0 {
+		t.Fatalf("install code = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "installed vpn core") {
+		t.Fatalf("success output = %q", stdout.String())
 	}
 }

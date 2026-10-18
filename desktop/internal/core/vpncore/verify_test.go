@@ -85,7 +85,7 @@ func TestVerifyDaemonInstallationRejectsSymlinkedPathComponent(t *testing.T) {
 func TestVerifyDaemonInstallationRejectsWriteACL(t *testing.T) {
 	// This proves ACL inspection fails closed even when ownership, modes, and hashes are valid.
 	fixture := newVerificationFixture(t)
-	fixture.dependencies.checkACL = func(path string) error {
+	fixture.dependencies.checkACL = func(path string, _ int) error {
 		if path == fixture.extraPath {
 			return errors.New("write-capable ACL entry")
 		}
@@ -154,7 +154,7 @@ func newVerificationFixture(t *testing.T) verificationFixture {
 		dependencies: verificationDependencies{
 			executable: func() (string, error) { return binaryPath, nil },
 			owner:      func(string, *unix.Stat_t) (uint32, error) { return 0, nil },
-			checkACL:   func(string) error { return nil },
+			checkACL:   func(string, int) error { return nil },
 		},
 	}
 }

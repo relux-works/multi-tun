@@ -4,11 +4,10 @@ package vpncore
 
 /*
 #include <errno.h>
-#include <stdlib.h>
 #include <sys/acl.h>
 
-static int vpncore_acl_has_write(const char *path) {
-	acl_t acl = acl_get_file(path, ACL_TYPE_EXTENDED);
+static int vpncore_acl_has_write(int fd) {
+	acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
 	if (acl == NULL) {
 		return -errno;
 	}
@@ -43,8 +42,10 @@ static int vpncore_acl_has_write(const char *path) {
 		if (acl_get_perm_np(perms, ACL_WRITE_DATA) == 1 ||
 		    acl_get_perm_np(perms, ACL_APPEND_DATA) == 1 ||
 		    acl_get_perm_np(perms, ACL_DELETE) == 1 ||
+		    acl_get_perm_np(perms, ACL_DELETE_CHILD) == 1 ||
 		    acl_get_perm_np(perms, ACL_WRITE_ATTRIBUTES) == 1 ||
 		    acl_get_perm_np(perms, ACL_WRITE_EXTATTRIBUTES) == 1 ||
+		    acl_get_perm_np(perms, ACL_WRITE_SECURITY) == 1 ||
 		    acl_get_perm_np(perms, ACL_CHANGE_OWNER) == 1) {
 			acl_free(acl);
 			return 1;
@@ -59,13 +60,10 @@ import "C"
 import (
 	"fmt"
 	"syscall"
-	"unsafe"
 )
 
-func checkWriteACL(path string) error {
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-	result := int(C.vpncore_acl_has_write(cPath))
+func checkWriteACL(_ string, fd int) error {
+	result := int(C.vpncore_acl_has_write(C.int(fd)))
 	switch {
 	case result == 0:
 		return nil
