@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +62,50 @@ func TestFetchWithOptionsSendsConfiguredHeaders(t *testing.T) {
 	}
 	if gotUA != "vless-tun/0.1" || gotHWID != "" {
 		t.Fatalf("default fetch leaked options: UA %q HWID %q", gotUA, gotHWID)
+	}
+}
+
+// Subscription URLs carry account keys, so a transport failure must report the
+// cause without echoing the URL (path token or query key).
+func TestFetchErrorDoesNotLeakSubscriptionURL(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("response writer is not a hijacker")
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Fatalf("Hijack() error = %v", err)
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	const secret = "s3cr3t-account-token"
+	_, err := Fetch(context.Background(), server.URL+"/sub/"+secret+"?key="+secret)
+	if err == nil {
+		t.Fatal("Fetch() error = nil, want transport failure")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), server.URL) {
+		t.Fatalf("Fetch() error = %q, leaks the subscription URL", err.Error())
+	}
+	if !strings.Contains(err.Error(), "subscription request failed") || !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("Fetch() error = %q, want the transport cause", err.Error())
+	}
+}
+
+// A malformed URL is rejected without echoing it back.
+func TestFetchInvalidURLDoesNotLeakIt(t *testing.T) {
+	t.Parallel()
+
+	const secret = "s3cr3t-account-token"
+	_, err := Fetch(context.Background(), "http://bad host/"+secret)
+	if err == nil {
+		t.Fatal("Fetch() error = nil, want invalid URL error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Fetch() error = %q, leaks the subscription URL", err.Error())
 	}
 }

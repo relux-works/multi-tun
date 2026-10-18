@@ -3,9 +3,11 @@ package subscription
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +44,7 @@ func Fetch(ctx context.Context, subscriptionURL string) ([]byte, error) {
 func FetchWithOptions(ctx context.Context, subscriptionURL string, options FetchOptions) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, subscriptionURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid subscription URL")
 	}
 	userAgent := strings.TrimSpace(options.UserAgent)
 	if userAgent == "" {
@@ -62,7 +64,13 @@ func FetchWithOptions(ctx context.Context, subscriptionURL string, options Fetch
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		// *url.Error embeds the full request URL, and subscription URLs carry
+		// account keys; keep only the transport cause.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return nil, fmt.Errorf("subscription request failed: %w", err)
 	}
 	defer resp.Body.Close()
 

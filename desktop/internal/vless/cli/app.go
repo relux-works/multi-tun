@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/subscription"
@@ -50,6 +51,8 @@ func (a *App) Run(args []string) int {
 		return a.runStart(args[1:])
 	case "run":
 		return a.runRun(args[1:])
+	case "connect":
+		return a.runRun(args[1:])
 	case "reconnect":
 		return a.runReconnect(args[1:])
 	case "status":
@@ -57,6 +60,8 @@ func (a *App) Run(args []string) int {
 	case "diagnose":
 		return a.runDiagnose(args[1:])
 	case "stop":
+		return a.runStop(args[1:])
+	case "disconnect":
 		return a.runStop(args[1:])
 	case "render":
 		return a.runRender(args[1:])
@@ -341,6 +346,27 @@ func (a *App) loadSnapshot(cfg config.ProjectConfig, refresh bool) (subscription
 	return refreshSource(cfg)
 }
 
+// loadStartSnapshot refreshes the subscription when asked and falls back to the
+// cached snapshot when the refresh fails, so a flaky provider endpoint does not
+// block a start or reconnect that the cache can still serve. The bool reports
+// whether the returned snapshot is the fresh one.
+func (a *App) loadStartSnapshot(cfg config.ProjectConfig, refresh bool) (subscription.CacheSnapshot, bool, error) {
+	if !refresh {
+		snapshot, err := a.loadSnapshot(cfg, false)
+		return snapshot, false, err
+	}
+	snapshot, err := refreshSourceFunc(cfg)
+	if err == nil {
+		return snapshot, true, nil
+	}
+	cached, cacheErr := subscription.LoadCache(cfg.CacheDir)
+	if cacheErr != nil {
+		return subscription.CacheSnapshot{}, false, err
+	}
+	fmt.Fprintf(a.stderr, "warning: subscription refresh failed (%v); using cached snapshot fetched at %s\n", err, cached.FetchedAt.Format(time.RFC3339))
+	return cached, false, nil
+}
+
 func loadConfig(configPath string) (config.ProjectConfig, error) {
 	cfg, err := config.Load(configPath)
 	if err == nil {
@@ -479,7 +505,8 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
-	fmt.Fprintln(a.stdout, "  run -> start")
+	fmt.Fprintln(a.stdout, "  run, connect -> start")
+	fmt.Fprintln(a.stdout, "  disconnect -> stop")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Config:")
 	fmt.Fprintln(a.stdout, "  With no config argument, vless-tun uses ~/.config/vless-tun/config.json.")
@@ -487,6 +514,8 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  Use --config to choose a non-default config file.")
 	fmt.Fprintln(a.stdout, "  setup/init still accept one positional config path for bootstrapping.")
 }
+
+var refreshSourceFunc = refreshSource
 
 func refreshSource(cfg config.ProjectConfig) (subscription.CacheSnapshot, error) {
 	return subscription.RefreshWithOptions(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir, subscription.FetchOptions{
