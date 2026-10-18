@@ -49,7 +49,7 @@ const (
 var lowercaseSHA256CLI = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func New(stdout, stderr io.Writer) *App {
-	return &App{stdout: stdout, stderr: stderr}
+	return &App{stdout: newControlEscapingWriter(stdout), stderr: newControlEscapingWriter(stderr)}
 }
 
 func (a *App) Run(args []string) int {
