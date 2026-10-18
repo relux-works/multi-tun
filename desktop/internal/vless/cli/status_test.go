@@ -153,3 +153,18 @@ func TestStatusSelectionExplicit(t *testing.T) {
 		t.Fatal("empty selection should not be explicit")
 	}
 }
+
+// Status formats persisted stable-alias metadata as the same alias-to-provider resolution shown during connect.
+func TestFormatSessionResolutionShowsStableAliasMapping(t *testing.T) {
+	current := &session.CurrentSession{
+		ResolvedServer:      "phantombot",
+		ResolvedAlias:       "us",
+		ResolvedProfileName: "🇺🇸 США",
+		ResolvedProfileID:   "abc123def456",
+		ResolutionReason:    "match country=US; pick=probe fastest reachable",
+	}
+	want := "phantombot/us -> 🇺🇸 США (abc123def456) via match country=US; pick=probe fastest reachable"
+	if got := formatSessionResolution(current); got != want {
+		t.Fatalf("formatSessionResolution() = %q, want %q", got, want)
+	}
+}

@@ -38,6 +38,8 @@ Build local CLIs and agent guidance that can:
 
 - Extract profile name, host, port, UUID, VLESS transport type, TLS/Reality settings, transport details, and diagnostic VLESS query fields such as `encryption` and `spx`.
 - Select an active configured server/profile through `current.server` and `current.profile`, with CLI overrides for `--server`, `--profile`, direct subscription `--selector`, and explicit `--transport tcp|grpc`.
+- Allow a configured alias to replace `selector` with `match` criteria (`country`, RE2 `name_pattern`, excluded name substrings, and transport) and resolve it against every fresh subscription snapshot without deriving identity from provider ids/hashes. Country detection uses flag emoji first, then whole Russian/English country names.
+- Disambiguate stable matches with `pick=only` (default), `pick=first`, or a parallel injectable TCP `pick=probe` with a two-second total budget. For example, `{"match":{"country":"US"},"pick":"probe"}` keeps `phantombot/us` stable across provider renames and rotations.
 - When a configured profile has no selector and the subscription exposes multiple remote profiles, require an explicit `transport` or `selector` instead of falling back to provider order.
 - Keep remote VLESS profiles in the refresh cache; config profile entries are local aliases/selectors plus routing policy, not copied subscription payloads.
 
@@ -88,12 +90,12 @@ Build local CLIs and agent guidance that can:
 - `init`: create `~/.config/vless-tun/config.json` by default
 - `refresh`: fetch and cache subscription
 - `list`: inspect cached profiles for the selected configured server
-- `set-current`: persist `current.server` and `current.profile`; profile may be omitted when the selected server has a `default` profile or exactly one profile
+- `set-current`: persist only local `current.server` and `current.profile` aliases; accept both `server alias` and `server/alias`; profile may be omitted when the selected server has a `default` profile or exactly one profile
 - `run`: refresh the selected configured server subscription before rendering by default, start the selected `vless-tun` runtime engine in the background, and persist session metadata; provider/profile shortcuts such as `start dance`, `start freedom`, and `start fortinetz nl` override the default config selection, while `--refresh=false` is the explicit cached fallback for offline starts and a transient fetch failure (network error, HTTP 5xx or 429) falls back to the cached snapshot automatically with a warning (4xx and parse failures never do); if the selected config profile alias no longer matches any refreshed subscription profile, fail before rendering or startup with the available profile list and a config update hint
 - before starting configured engine sidecars, `run`/`start` must clean stale sidecar processes only when they match the configured sidecar executable/name and generated sidecar config path; cleanup must not use broad process-name kills
 - `reconnect`: refresh local state and render the selected profile first, then stop recorded `vless-tun` sessions across configured server cache directories and start the selected profile in one command; a preparation failure leaves running sessions untouched
-- `status`: show local runtime state, selected engine, sidecars, launch backend, cached selection, and configured bypasses
-- `diagnose`: inspect tunnel/runtime state without requiring provider/profile selection; `diagnose config` validates config selection separately; helper-backed diagnostics include the redacted `vpn-core` request snapshot
+- `status`: show local runtime state, selected engine, sidecars, launch backend, cached selection, configured bypasses, and stable-alias resolution from session metadata/current snapshot
+- `diagnose`: inspect tunnel/runtime state without requiring provider/profile selection; `diagnose config` validates config selection and warns when an exact 12-lowercase-hex selector should be replaced by a country match; helper-backed diagnostics include the redacted `vpn-core` request snapshot
 - `stop`: stop the recorded `vless-tun` session without requiring provider/profile selection
 - `render`: emit selected runtime config, including both Xray sidecar and `sing-box` frontend configs for `engine.type=xray`
 - in `network.mode=tun` on macOS, startup must reject nested-tunnel bring-up when the upstream VLESS server route already points at another VPN interface (`utun*`, `tun*`, `ppp*`, `ipsec*`)

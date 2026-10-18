@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -33,6 +34,15 @@ const (
 )
 
 var allowedLogLevels = []string{"trace", "debug", "info", "warn", "error", "fatal", "panic"}
+
+var iso3166Alpha2 = func() map[string]struct{} {
+	codes := strings.Fields("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW")
+	result := make(map[string]struct{}, len(codes))
+	for _, code := range codes {
+		result[code] = struct{}{}
+	}
+	return result
+}()
 
 type ProjectConfig struct {
 	Current   *CurrentConfig          `json:"current,omitempty"`
@@ -75,6 +85,8 @@ type EffectiveSelection struct {
 	Profile         string
 	Selector        string
 	Transport       string
+	Match           *ProfileMatch
+	Pick            string
 	UsesServerModel bool
 }
 
@@ -98,9 +110,18 @@ type ProfileConfig struct {
 	ProfileSelector    string         `json:"profile_selector,omitempty"`
 	Transport          string         `json:"transport,omitempty"`
 	PreferredTransport string         `json:"preferred_transport,omitempty"`
+	Match              *ProfileMatch  `json:"match,omitempty"`
+	Pick               string         `json:"pick,omitempty"`
 	Routing            *RoutingConfig `json:"routing,omitempty"`
 	Engine             *EngineConfig  `json:"engine,omitempty"`
 	Singbox            *SingboxConfig `json:"singbox,omitempty"`
+}
+
+type ProfileMatch struct {
+	Country     string   `json:"country,omitempty"`
+	NamePattern string   `json:"name_pattern,omitempty"`
+	Exclude     []string `json:"exclude,omitempty"`
+	Transport   string   `json:"transport,omitempty"`
 }
 
 type SourceConfig struct {
@@ -453,11 +474,70 @@ func (c ProjectConfig) Validate() error {
 	if err := c.validateConfiguredTransports(); err != nil {
 		return err
 	}
+	if err := c.validateProfileMatches(); err != nil {
+		return err
+	}
 	effective, _, err := c.Effective(SelectionOptions{AllowMissingProfile: true})
 	if err != nil {
 		return err
 	}
 	return effective.validateFlat()
+}
+
+func (c ProjectConfig) validateProfileMatches() error {
+	for serverName, server := range c.Servers {
+		for profileName, profile := range server.Profiles {
+			path := "servers." + serverName + ".profiles." + profileName
+			selector := firstNonEmpty(profile.Selector, profile.ProfileSelector)
+			if profile.Match != nil && selector != "" {
+				return fmt.Errorf("%s.match and %s.selector cannot be used together", path, path)
+			}
+			if profile.Match == nil {
+				if strings.TrimSpace(profile.Pick) != "" {
+					return fmt.Errorf("%s.pick requires %s.match", path, path)
+				}
+				continue
+			}
+
+			match := profile.Match
+			if strings.TrimSpace(match.Country) == "" && strings.TrimSpace(match.NamePattern) == "" && len(nonEmptyStrings(match.Exclude)) == 0 && strings.TrimSpace(match.Transport) == "" {
+				return fmt.Errorf("%s.match must set at least one of: country, name_pattern, exclude, transport", path)
+			}
+			country := strings.TrimSpace(match.Country)
+			if country != "" {
+				if !regexp.MustCompile(`^[A-Za-z]{2}$`).MatchString(country) {
+					return fmt.Errorf("%s.match.country must be an ISO 3166-1 alpha-2 code", path)
+				}
+				if _, ok := iso3166Alpha2[strings.ToUpper(country)]; !ok {
+					return fmt.Errorf("%s.match.country must be an assigned ISO 3166-1 alpha-2 code", path)
+				}
+			}
+			if pattern := strings.TrimSpace(match.NamePattern); pattern != "" {
+				if _, err := regexp.Compile(pattern); err != nil {
+					return fmt.Errorf("%s.match.name_pattern is invalid: %w", path, err)
+				}
+			}
+			if err := validateTransportValue(path+".match.transport", match.Transport); err != nil {
+				return err
+			}
+			switch strings.ToLower(strings.TrimSpace(profile.Pick)) {
+			case "", "only", "first", "probe":
+			default:
+				return fmt.Errorf("%s.pick must be one of: only, first, probe", path)
+			}
+		}
+	}
+	return nil
+}
+
+func nonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func (c ProjectConfig) validateExplicitServerEngines() error {
@@ -599,12 +679,22 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 
 	selector := firstNonEmpty(options.Selector, c.legacyDefaultProfileSelector())
 	transport := firstNonEmpty(options.Transport, c.legacyDefaultProfileTransport())
+	var match *ProfileMatch
+	var pick string
 	if hasProfile {
 		effective.Routing = mergeRoutingConfig(effective.Routing, profileCfg.Routing)
 		effective.Engine = mergeEngineConfig(effective.Engine, profileCfg.Engine)
 		effective.Singbox = mergeSingboxConfig(effective.Singbox, profileCfg.Singbox)
 		selector = firstNonEmpty(options.Selector, profileCfg.Selector, profileCfg.ProfileSelector, c.legacyDefaultProfileSelector())
 		transport = firstNonEmpty(options.Transport, profileCfg.profileTransport(), c.legacyDefaultProfileTransport())
+		match = cloneProfileMatch(profileCfg.Match)
+		pick = strings.ToLower(strings.TrimSpace(profileCfg.Pick))
+		if strings.TrimSpace(options.Selector) != "" {
+			match = nil
+			pick = ""
+		} else if match != nil {
+			selector = ""
+		}
 	}
 	effective.setDefaultProfileSelector(selector)
 	effective.setDefaultProfileTransport(transport)
@@ -614,8 +704,19 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 		Profile:         profileName,
 		Selector:        selector,
 		Transport:       transport,
+		Match:           match,
+		Pick:            pick,
 		UsesServerModel: true,
 	}, nil
+}
+
+func cloneProfileMatch(value *ProfileMatch) *ProfileMatch {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	result.Exclude = append([]string(nil), value.Exclude...)
+	return &result
 }
 
 func (c ProjectConfig) resolveServerConfig(override string) (string, ServerConfig, error) {

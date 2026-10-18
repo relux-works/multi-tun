@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
@@ -52,7 +53,13 @@ func (a *App) runStatus(args []string) int {
 		return 1
 	}
 
-	snapshot, snapshotErr := a.loadSnapshot(cfg, *refresh)
+	var snapshot subscription.CacheSnapshot
+	var snapshotErr error
+	if selection.Match != nil {
+		snapshot, _, snapshotErr = a.loadStartSnapshot(cfg, true)
+	} else {
+		snapshot, snapshotErr = a.loadSnapshot(cfg, *refresh)
+	}
 	launchCfg := cfg.LaunchOrDefault()
 	current, currentState, sessionAlive, sessionErr := currentSessionState(cfg.CacheDir, launchCfg)
 	mode := cfg.NetworkMode()
@@ -102,6 +109,12 @@ func (a *App) runStatus(args []string) int {
 		}
 		if sessionProfile := formatSessionProfile(current); sessionProfile != "" {
 			fmt.Fprintf(a.stdout, "session_profile: %s\n", sessionProfile)
+		}
+		if resolved := formatSessionResolution(current); resolved != "" {
+			fmt.Fprintf(a.stdout, "session_resolved: %s\n", resolved)
+			if current.SnapshotFetchedAt != nil {
+				fmt.Fprintf(a.stdout, "session_snapshot_fetched_at: %s\n", current.SnapshotFetchedAt.Format(time.RFC3339))
+			}
 		}
 		if current.LaunchMode == config.LaunchModeLaunchd {
 			fmt.Fprintf(a.stdout, "launch_label: %s\n", current.LaunchLabel)
@@ -153,13 +166,14 @@ func (a *App) runStatus(args []string) int {
 		return 0
 	}
 
-	profile, err := subscription.SelectProfileWithOptions(snapshot.Profiles, subscription.SelectOptions{
-		Selector:  cfg.DefaultProfileSelector(),
-		Transport: cfg.DefaultProfileTransport(),
-	})
+	resolution, err := resolveProfile(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick)
 	if err != nil {
 		fmt.Fprintf(a.stdout, "selected_profile: unresolved (%v)\n", err)
 	} else {
+		profile := resolution.Profile
+		if resolution.Matched {
+			fmt.Fprintf(a.stdout, "resolved: %s/%s -> %s (%s) via %s\n", selection.Server, selection.Profile, profile.DisplayName(), profile.ID, resolution.Reason)
+		}
 		fmt.Fprintf(a.stdout, "selected_profile: %s\n", formatProfile(profile))
 	}
 
@@ -258,6 +272,13 @@ func formatSessionProfile(current *session.CurrentSession) string {
 		parts = append(parts, current.ProfileEndpoint)
 	}
 	return strings.Join(parts, " | ")
+}
+
+func formatSessionResolution(current *session.CurrentSession) string {
+	if current == nil || current.ResolvedServer == "" || current.ResolvedAlias == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/%s -> %s (%s) via %s", current.ResolvedServer, current.ResolvedAlias, current.ResolvedProfileName, current.ResolvedProfileID, current.ResolutionReason)
 }
 
 func profileTransport(profile model.Profile) string {

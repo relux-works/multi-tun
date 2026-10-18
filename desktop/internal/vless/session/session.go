@@ -100,6 +100,12 @@ type StartOptions struct {
 	PrivilegedLaunch  config.PrivilegedLaunchConfig
 	Sidecars          []SidecarOptions
 	LogMaxLines       int
+	ResolvedServer    string
+	ResolvedAlias     string
+	ResolvedName      string
+	ResolvedID        string
+	ResolutionReason  string
+	SnapshotFetchedAt *time.Time
 }
 
 type SidecarOptions struct {
@@ -121,6 +127,12 @@ type CurrentSession struct {
 	ProfileID                string           `json:"profile_id"`
 	ProfileName              string           `json:"profile_name"`
 	ProfileEndpoint          string           `json:"profile_endpoint"`
+	ResolvedServer           string           `json:"resolved_server,omitempty"`
+	ResolvedAlias            string           `json:"resolved_alias,omitempty"`
+	ResolvedProfileName      string           `json:"resolved_profile_name,omitempty"`
+	ResolvedProfileID        string           `json:"resolved_profile_id,omitempty"`
+	ResolutionReason         string           `json:"resolution_reason,omitempty"`
+	SnapshotFetchedAt        *time.Time       `json:"snapshot_fetched_at,omitempty"`
 	Mode                     string           `json:"mode"`
 	BypassSuffixes           []string         `json:"bypass_suffixes"`
 	Command                  []string         `json:"command"`
@@ -171,19 +183,25 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 
 	command := logicalCommand(executable, configPath, launchMode)
 	session := CurrentSession{
-		ID:              sessionID,
-		StartedAt:       now,
-		Engine:          firstNonEmpty(options.Engine, config.EngineSingbox),
-		ConfigPath:      configPath,
-		LogPath:         logPath,
-		MetadataPath:    metadataPath,
-		ProfileID:       profile.ID,
-		ProfileName:     profile.DisplayName(),
-		ProfileEndpoint: profile.Endpoint(),
-		Mode:            options.Mode,
-		BypassSuffixes:  append([]string(nil), options.BypassSuffixes...),
-		Command:         command,
-		LaunchMode:      launchMode,
+		ID:                  sessionID,
+		StartedAt:           now,
+		Engine:              firstNonEmpty(options.Engine, config.EngineSingbox),
+		ConfigPath:          configPath,
+		LogPath:             logPath,
+		MetadataPath:        metadataPath,
+		ProfileID:           profile.ID,
+		ProfileName:         profile.DisplayName(),
+		ProfileEndpoint:     profile.Endpoint(),
+		ResolvedServer:      options.ResolvedServer,
+		ResolvedAlias:       options.ResolvedAlias,
+		ResolvedProfileName: options.ResolvedName,
+		ResolvedProfileID:   options.ResolvedID,
+		ResolutionReason:    options.ResolutionReason,
+		SnapshotFetchedAt:   options.SnapshotFetchedAt,
+		Mode:                options.Mode,
+		BypassSuffixes:      append([]string(nil), options.BypassSuffixes...),
+		Command:             command,
+		LaunchMode:          launchMode,
 	}
 	if launchMode == config.LaunchModeLaunchd {
 		session.LaunchLabel = options.PrivilegedLaunch.Label
@@ -871,6 +889,12 @@ func writeLogHeader(file interface{ Write([]byte) (int, error) }, current Curren
 	_, _ = fmt.Fprintf(file, "session_id: %s\n", current.ID)
 	_, _ = fmt.Fprintf(file, "started_at: %s\n", current.StartedAt.Format(time.RFC3339))
 	_, _ = fmt.Fprintf(file, "profile: %s | %s | %s\n", profile.ID, profile.DisplayName(), profile.Endpoint())
+	if current.ResolvedServer != "" && current.ResolvedAlias != "" {
+		_, _ = fmt.Fprintf(file, "resolved: %s/%s -> %s (%s) via %s\n", current.ResolvedServer, current.ResolvedAlias, current.ResolvedProfileName, current.ResolvedProfileID, current.ResolutionReason)
+		if current.SnapshotFetchedAt != nil {
+			_, _ = fmt.Fprintf(file, "snapshot_fetched_at: %s\n", current.SnapshotFetchedAt.Format(time.RFC3339))
+		}
+	}
 	_, _ = fmt.Fprintf(file, "engine: %s\n", firstNonEmpty(current.Engine, config.EngineSingbox))
 	_, _ = fmt.Fprintf(file, "config_path: %s\n", current.ConfigPath)
 	if current.LogMaxLines > 0 {

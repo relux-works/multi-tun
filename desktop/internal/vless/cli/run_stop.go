@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,6 +30,8 @@ type startOptions struct {
 	outputPath      string
 	refresh         bool
 	refreshSet      bool
+	match           *config.ProfileMatch
+	pick            string
 }
 
 type sessionTarget struct {
@@ -44,6 +49,7 @@ type stopSessionResult struct {
 var stopCurrentSessionFunc = stopCurrentSession
 var startSessionFunc = session.Start
 var lookPathFunc = exec.LookPath
+var profileProbeDialContext = (&net.Dialer{}).DialContext
 
 // preflightReplacement checks what session start needs and can be verified
 // without touching the network or the running tunnel, so reconnect fails
@@ -124,6 +130,12 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		PrivilegedLaunch:  cfg.LaunchOrDefault(),
 		Sidecars:          prepared.sidecars,
 		LogMaxLines:       cfg.LogMaxLines(),
+		ResolvedServer:    prepared.resolvedServer(),
+		ResolvedAlias:     prepared.resolvedAlias(),
+		ResolvedName:      prepared.resolvedName(),
+		ResolvedID:        prepared.resolvedID(),
+		ResolutionReason:  prepared.resolution.Reason,
+		SnapshotFetchedAt: prepared.snapshotFetchedAt,
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
@@ -131,6 +143,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	}
 
 	fmt.Fprintf(a.stdout, "started vless-tun session %s\n", started.ID)
+	printProfileResolution(a.stdout, prepared)
 	fmt.Fprintf(a.stdout, "pid=%d profile=%s (%s)\n", started.PID, started.ProfileName, started.ProfileID)
 	fmt.Fprintf(a.stdout, "engine=%s\n", started.Engine)
 	fmt.Fprintf(a.stdout, "mode=%s\n", started.Mode)
@@ -224,6 +237,12 @@ func (a *App) runReconnect(args []string) int {
 		PrivilegedLaunch:  cfg.LaunchOrDefault(),
 		Sidecars:          prepared.sidecars,
 		LogMaxLines:       cfg.LogMaxLines(),
+		ResolvedServer:    prepared.resolvedServer(),
+		ResolvedAlias:     prepared.resolvedAlias(),
+		ResolvedName:      prepared.resolvedName(),
+		ResolvedID:        prepared.resolvedID(),
+		ResolutionReason:  prepared.resolution.Reason,
+		SnapshotFetchedAt: prepared.snapshotFetchedAt,
 	})
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
@@ -231,6 +250,7 @@ func (a *App) runReconnect(args []string) int {
 	}
 
 	fmt.Fprintf(a.stdout, "reconnected vless-tun session %s\n", started.ID)
+	printProfileResolution(a.stdout, prepared)
 	if len(stoppedSessions) == 0 {
 		fmt.Fprintln(a.stdout, "previous_session: none")
 	} else {
@@ -309,12 +329,16 @@ func (a *App) runStop(args []string) int {
 }
 
 type preparedStart struct {
-	profile       model.Profile
-	engine        string
-	target        string
-	xrayTarget    string
-	sidecars      []session.SidecarOptions
-	renderOptions singbox.RenderOptions
+	profile           model.Profile
+	engine            string
+	target            string
+	xrayTarget        string
+	sidecars          []session.SidecarOptions
+	renderOptions     singbox.RenderOptions
+	resolution        subscription.ProfileResolution
+	resolutionServer  string
+	resolutionAlias   string
+	snapshotFetchedAt *time.Time
 }
 
 func (a *App) parseStartOptions(name string, args []string, refreshDefault bool) (startOptions, int, error) {
@@ -362,13 +386,11 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		return preparedStart{}, err
 	}
 
-	profile, err := subscription.SelectProfileWithOptions(snapshot.Profiles, subscription.SelectOptions{
-		Selector:  cfg.DefaultProfileSelector(),
-		Transport: cfg.DefaultProfileTransport(),
-	})
+	resolution, err := resolveProfile(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options.match, options.pick)
 	if err != nil {
 		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options, refreshed)
 	}
+	profile := resolution.Profile
 
 	renderOptions := resolveRenderOptions(cfg.NetworkMode())
 	target := cfg.SingboxConfigPath()
@@ -413,14 +435,22 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		return preparedStart{}, err
 	}
 
-	return preparedStart{
-		profile:       profile,
-		engine:        engine,
-		target:        target,
-		xrayTarget:    xrayTarget,
-		sidecars:      sidecars,
-		renderOptions: renderOptions,
-	}, nil
+	prepared := preparedStart{
+		profile:          profile,
+		engine:           engine,
+		target:           target,
+		xrayTarget:       xrayTarget,
+		sidecars:         sidecars,
+		renderOptions:    renderOptions,
+		resolution:       resolution,
+		resolutionServer: options.serverName,
+		resolutionAlias:  options.configProfile,
+	}
+	if resolution.Matched && !snapshot.FetchedAt.IsZero() {
+		fetchedAt := snapshot.FetchedAt
+		prepared.snapshotFetchedAt = &fetchedAt
+	}
+	return prepared, nil
 }
 
 func (options startOptions) withEffectiveSelection(selection config.EffectiveSelection) startOptions {
@@ -436,7 +466,72 @@ func (options startOptions) withEffectiveSelection(selection config.EffectiveSel
 	if strings.TrimSpace(options.transport) == "" {
 		options.transport = selection.Transport
 	}
+	if options.match == nil {
+		options.match = selection.Match
+	}
+	if strings.TrimSpace(options.pick) == "" {
+		options.pick = selection.Pick
+	}
 	return options
+}
+
+func subscriptionMatch(match *config.ProfileMatch) *subscription.ProfileMatch {
+	if match == nil {
+		return nil
+	}
+	return &subscription.ProfileMatch{
+		Country:     match.Country,
+		NamePattern: match.NamePattern,
+		Exclude:     append([]string(nil), match.Exclude...),
+		Transport:   match.Transport,
+	}
+}
+
+func resolveProfile(profiles []model.Profile, selector, transport string, match *config.ProfileMatch, pick string) (subscription.ProfileResolution, error) {
+	return subscription.ResolveProfileWithOptions(profiles, subscription.SelectOptions{
+		Selector:  selector,
+		Transport: transport,
+		Match:     subscriptionMatch(match),
+		Pick:      pick,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return profileProbeDialContext(ctx, network, address)
+		},
+	})
+}
+
+func printProfileResolution(out io.Writer, prepared preparedStart) {
+	if !prepared.resolution.Matched {
+		return
+	}
+	fmt.Fprintf(out, "resolved: %s/%s -> %s (%s) via %s\n", prepared.resolutionServer, prepared.resolutionAlias, prepared.profile.DisplayName(), prepared.profile.ID, prepared.resolution.Reason)
+}
+
+func (prepared preparedStart) resolvedName() string {
+	if !prepared.resolution.Matched {
+		return ""
+	}
+	return prepared.profile.DisplayName()
+}
+
+func (prepared preparedStart) resolvedServer() string {
+	if !prepared.resolution.Matched {
+		return ""
+	}
+	return prepared.resolutionServer
+}
+
+func (prepared preparedStart) resolvedAlias() string {
+	if !prepared.resolution.Matched {
+		return ""
+	}
+	return prepared.resolutionAlias
+}
+
+func (prepared preparedStart) resolvedID() string {
+	if !prepared.resolution.Matched {
+		return ""
+	}
+	return prepared.profile.ID
 }
 
 func formatProfileSelectionError(cause error, profiles []model.Profile, selector string, transport string, options startOptions, refreshed bool) error {
@@ -462,6 +557,12 @@ func formatProfileSelectionError(cause error, profiles []model.Profile, selector
 	if trimmedTransport != "" {
 		fmt.Fprintf(&builder, "\ntransport: %s", trimmedTransport)
 	}
+	if options.match != nil {
+		if encoded, err := json.Marshal(options.match); err == nil {
+			fmt.Fprintf(&builder, "\nmatch: %s", encoded)
+		}
+		fmt.Fprintf(&builder, "\npick: %s", firstNonEmptyLocal(options.pick, "only"))
+	}
 	if cause != nil {
 		fmt.Fprintf(&builder, "\nreason: %v", cause)
 	}
@@ -476,8 +577,12 @@ func formatProfileSelectionError(cause error, profiles []model.Profile, selector
 		}
 	}
 	if serverName != "" && configProfile != "" {
-		fmt.Fprintf(&builder, "\n\nupdate config: servers.%s.profiles.%s.transport = \"tcp\" or \"grpc\", and add selector when transport is ambiguous", serverName, configProfile)
-		fmt.Fprintf(&builder, "\nor update config: servers.%s.profiles.%s.selector = \"<id, name, endpoint, transport, or substring from available profiles>\"", serverName, configProfile)
+		if options.match != nil {
+			fmt.Fprintf(&builder, "\n\nupdate config: servers.%s.profiles.%s.match or servers.%s.profiles.%s.pick", serverName, configProfile, serverName, configProfile)
+		} else {
+			fmt.Fprintf(&builder, "\n\nupdate config: servers.%s.profiles.%s.transport = \"tcp\" or \"grpc\", and add selector when transport is ambiguous", serverName, configProfile)
+			fmt.Fprintf(&builder, "\nor update config: servers.%s.profiles.%s.selector = \"<id, name, endpoint, transport, or substring from available profiles>\"", serverName, configProfile)
+		}
 	} else {
 		builder.WriteString("\n\nupdate the selected profile selector or transport in config")
 	}

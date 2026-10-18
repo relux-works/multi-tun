@@ -537,6 +537,27 @@ func TestSetCurrentUsesPositionalServerAndWritesConfig(t *testing.T) {
 	}
 }
 
+// A slash-form server/alias selection persists the local configured alias rather than any provider profile identity.
+func TestSetCurrentAcceptsSlashAliasAndStoresConfiguredNames(t *testing.T) {
+	path := writeCLISelectionConfig(t)
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"set-current", "--config", path, "fortinetz/nl"})
+	if exitCode != 0 {
+		t.Fatalf("Run(set-current) exitCode = %d, want 0, stderr=%s", exitCode, stderr.String())
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	for _, want := range []string{`"server": "fortinetz"`, `"profile": "nl"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("config = %s, want %s", raw, want)
+		}
+	}
+}
+
 func TestSetCurrentRequiresProfileForMultiProfileServer(t *testing.T) {
 	t.Parallel()
 

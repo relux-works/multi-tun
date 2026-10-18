@@ -947,3 +947,38 @@ func TestValidateRejectsLegacySystemProxyMode(t *testing.T) {
 		t.Fatal("Validate() returned nil error")
 	}
 }
+
+// Match configuration accepts a non-empty criterion but rejects selector conflicts and empty match objects.
+func TestValidateProfileMatchRequiresExclusiveNonEmptyCriteria(t *testing.T) {
+	makeConfig := func(profile ProfileConfig) ProjectConfig {
+		cfg := multiProfileServerSelectionConfig()
+		server := cfg.Servers["dance"]
+		server.Profiles["default"] = profile
+		cfg.Servers["dance"] = server
+		return cfg
+	}
+
+	valid := makeConfig(ProfileConfig{Match: &ProfileMatch{Country: "us"}, Pick: "probe"})
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid match Validate() error = %v", err)
+	}
+	_, selection, err := valid.Effective(SelectionOptions{})
+	if err != nil || selection.Match == nil || selection.Match.Country != "us" || selection.Pick != "probe" {
+		t.Fatalf("Effective() selection = %+v, error = %v, want propagated match/pick", selection, err)
+	}
+
+	conflicting := makeConfig(ProfileConfig{Selector: "USA", Match: &ProfileMatch{Country: "US"}})
+	if err := conflicting.Validate(); err == nil || !strings.Contains(err.Error(), "match and") {
+		t.Fatalf("conflicting Validate() error = %v, want match/selector conflict", err)
+	}
+
+	empty := makeConfig(ProfileConfig{Match: &ProfileMatch{}})
+	if err := empty.Validate(); err == nil || !strings.Contains(err.Error(), "must set at least one") {
+		t.Fatalf("empty Validate() error = %v, want non-empty match error", err)
+	}
+
+	invalidCountry := makeConfig(ProfileConfig{Match: &ProfileMatch{Country: "ZZ"}})
+	if err := invalidCountry.Validate(); err == nil || !strings.Contains(err.Error(), "assigned ISO 3166-1") {
+		t.Fatalf("invalid-country Validate() error = %v, want assigned ISO code error", err)
+	}
+}

@@ -16,8 +16,9 @@ import (
 )
 
 type reconnectHarness struct {
-	events  []string
-	started int
+	events       []string
+	started      int
+	startOptions []session.StartOptions
 }
 
 // installReconnectHarness replaces the session stop/start seams with recorders
@@ -38,6 +39,7 @@ func installReconnectHarness(t *testing.T) *reconnectHarness {
 	startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
 		h.events = append(h.events, "start")
 		h.started++
+		h.startOptions = append(h.startOptions, options)
 		return session.CurrentSession{ID: "replacement", PID: 4343}, nil
 	}
 	t.Cleanup(func() {
@@ -46,6 +48,73 @@ func installReconnectHarness(t *testing.T) *reconnectHarness {
 		lookPathFunc = previousLookPath
 	})
 	return h
+}
+
+func writeStableAliasReconnectConfig(t *testing.T, sourceURI string) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	path := filepath.Join(root, "config.json")
+	data := `{
+  "current": {"server": "phantombot", "profile": "us"},
+  "servers": {
+    "phantombot": {
+      "source": {"mode": "direct", "url": "` + sourceURI + `"},
+      "cache_dir": "` + cacheDir + `",
+      "artifacts": {"singbox_config_path": "` + filepath.Join(root, "phantombot.json") + `"},
+      "engine": {"type": "sing-box"},
+      "profiles": {"us": {"match": {"country": "US"}, "pick": "only"}}
+    }
+  },
+  "network": {"mode": "tun", "tun": {"interface_name": "utun233", "addresses": ["172.19.0.1/30"]}},
+  "dns": {"proxy_resolver": {"address": "1.1.1.1", "port": 853, "tls_server_name": "cloudflare-dns.com"}}
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path, cacheDir
+}
+
+// A removed country alias fails during prepare, lists the remaining candidate, and never stops the running session.
+func TestReconnectStableAliasRemovalLeavesRunningSessionUntouched(t *testing.T) {
+	path, _ := writeStableAliasReconnectConfig(t, "vless://00000000-0000-0000-0000-000000000003@203.0.113.20:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=example.com&sid=1#%F0%9F%87%A9%F0%9F%87%AA%20Germany")
+	h := installReconnectHarness(t)
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"reconnect", "--config", path})
+
+	if exitCode != 1 || len(h.events) != 0 {
+		t.Fatalf("exitCode = %d events = %v, want 1 and no stop/start", exitCode, h.events)
+	}
+	for _, want := range []string{"Germany", "running sessions were left untouched"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// A transient refresh failure resolves the stable alias from cache, warns, and records alias resolution metadata for the replacement.
+func TestReconnectStableAliasUsesCachedSnapshotAfterTransientFailure(t *testing.T) {
+	path, cacheDir := writeStableAliasReconnectConfig(t, "vless://00000000-0000-0000-0000-000000000003@203.0.113.10:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=example.com&sid=1#%F0%9F%87%BA%F0%9F%87%B8%20USA")
+	snapshot, err := subscription.Refresh(t.Context(), "direct", "vless://00000000-0000-0000-0000-000000000004@203.0.113.99:8443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=example.com&sid=1#%F0%9F%87%BA%F0%9F%87%B8%20USA", cacheDir)
+	if err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+	installRefreshFailure(t, transientFetchError("temporary timeout"))
+	h := installReconnectHarness(t)
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"reconnect", "--config", path})
+
+	if exitCode != 0 || strings.Join(h.events, ",") != "stop,start" {
+		t.Fatalf("exitCode = %d events = %v stderr=%q", exitCode, h.events, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "using cached snapshot") || !strings.Contains(stdout.String(), "resolved: phantombot/us -> 🇺🇸 USA") {
+		t.Fatalf("stdout=%q stderr=%q, want warning and resolution", stdout.String(), stderr.String())
+	}
+	if len(h.startOptions) != 1 || h.startOptions[0].ResolvedAlias != "us" || h.startOptions[0].ResolvedID != snapshot.Profiles[0].ID || h.startOptions[0].SnapshotFetchedAt == nil {
+		t.Fatalf("start options = %+v, want cached alias metadata", h.startOptions)
+	}
 }
 
 func installRefreshFailure(t *testing.T, err error) {

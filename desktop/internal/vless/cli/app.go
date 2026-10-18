@@ -281,7 +281,7 @@ func (a *App) runRender(args []string) int {
 	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, transport, or substring")
 	transport := fs.String("transport", "", "Subscription profile transport: tcp or grpc")
 	outputPath := fs.String("output", "", "Override render.output_path")
-	refresh := fs.Bool("refresh", false, "Fetch subscription before rendering")
+	refresh := fs.Bool("refresh", true, "Fetch subscription before rendering")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -323,6 +323,7 @@ func (a *App) runRender(args []string) int {
 	if selection.Profile != "" {
 		fmt.Fprintf(a.stdout, "config_profile: %s\n", selection.Profile)
 	}
+	printProfileResolution(a.stdout, prepared)
 	fmt.Fprintf(a.stdout, "engine: %s\n", prepared.engine)
 	if prepared.xrayTarget != "" {
 		fmt.Fprintf(a.stdout, "rendered_xray: %s\n", prepared.xrayTarget)
@@ -475,7 +476,15 @@ func parsePositionalSelection(args []string, allowProfile bool) (positionalSelec
 
 	selection := positionalSelection{}
 	if len(args) >= 1 {
-		selection.Server = strings.TrimSpace(args[0])
+		value := strings.TrimSpace(args[0])
+		if allowProfile && len(args) == 1 {
+			if server, profile, ok := strings.Cut(value, "/"); ok && strings.TrimSpace(server) != "" && strings.TrimSpace(profile) != "" && !strings.Contains(profile, "/") {
+				selection.Server = strings.TrimSpace(server)
+				selection.Profile = strings.TrimSpace(profile)
+				return selection, nil
+			}
+		}
+		selection.Server = value
 	}
 	if len(args) >= 2 {
 		selection.Profile = strings.TrimSpace(args[1])

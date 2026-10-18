@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
 	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/subscription"
 )
 
 func TestVPNCoreDiagnosticsPrintRequestSnapshot(t *testing.T) {
@@ -47,4 +49,47 @@ func TestVPNCoreDiagnosticsPrintRequestSnapshot(t *testing.T) {
 			t.Fatalf("vpn core diagnostics missing %q:\n%s", want, stdout.String())
 		}
 	}
+}
+
+// Diagnose warns for an exact lowercase content-hash selector with a country match replacement, while a name selector is the positive no-warning control.
+func TestDiagnoseConfigWarnsOnlyForHashLikeSelector(t *testing.T) {
+	const source = "vless://00000000-0000-0000-0000-000000000003@us.example.com:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=us.example.com&sid=1#USA"
+	profile, err := subscription.ParseVLESSURI(source)
+	if err != nil {
+		t.Fatalf("ParseVLESSURI() error = %v", err)
+	}
+
+	t.Run("hash selector", func(t *testing.T) {
+		path, _ := writeReconnectConfig(t, profile.ID)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile() error = %v", err)
+		}
+		raw = []byte(strings.Replace(string(raw), "#us-east\"", "#USA\"", 1))
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		var stdout, stderr bytes.Buffer
+		exitCode := New(&stdout, &stderr).Run([]string{"diagnose", "config", "--config", path})
+		if exitCode != 0 {
+			t.Fatalf("exitCode = %d, stderr=%q", exitCode, stderr.String())
+		}
+		for _, want := range []string{"warning:", "content-hash id", `"country": "US"`} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+			}
+		}
+	})
+
+	t.Run("name selector", func(t *testing.T) {
+		path, _ := writeReconnectConfig(t, "us-east")
+		var stdout, stderr bytes.Buffer
+		exitCode := New(&stdout, &stderr).Run([]string{"diagnose", "config", "--config", path})
+		if exitCode != 0 {
+			t.Fatalf("exitCode = %d, stderr=%q", exitCode, stderr.String())
+		}
+		if strings.Contains(stdout.String(), "content-hash id") {
+			t.Fatalf("stdout = %q, want no hash warning", stdout.String())
+		}
+	})
 }

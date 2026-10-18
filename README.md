@@ -461,9 +461,10 @@ Updates `current.server` and `current.profile` in `~/.config/vless-tun/config.js
 vless-tun set-current dance
 vless-tun set-current freedom
 vless-tun set-current fortinetz de
+vless-tun set-current phantombot/us
 ```
 
-If the selected server has a `default` profile or exactly one profile, the profile argument may be omitted. If the server has multiple profiles and no `default`, pass the profile explicitly.
+`server/alias` and `server alias` are equivalent; only the local configured names are persisted. If the selected server has a `default` profile or exactly one profile, the profile argument may be omitted. If the server has multiple profiles and no `default`, pass the profile explicitly.
 
 ### `vless-tun init`
 
@@ -485,7 +486,26 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 Refreshes the selected provider subscription cache before rendering, including explicit profile aliases such as `fortinetz nl`, so provider-side endpoint, SNI, fingerprint, and profile changes are picked up at start time. If the fetch fails transiently (network error, HTTP 5xx or 429), `start` and `reconnect` continue from the last cached snapshot and print a warning; a refused (4xx) or unparsable subscription stays a hard error. `--refresh=false` forces the cached snapshot without trying the network (it still fetches once when no cache exists).
 
-If the configured profile alias no longer matches any profile in the refreshed subscription, `start` fails before rendering or starting the tunnel, prints the available profiles, and points at the `servers.<name>.profiles.<alias>.selector` value to update.
+Stable aliases may match refreshed provider entries by country/name/transport instead of pinning a rotating provider name or content-hash id. For example, this alias follows the current US endpoint and probes all matching candidates in parallel with one two-second TCP budget:
+
+```json
+{
+  "servers": {
+    "phantombot": {
+      "profiles": {
+        "us": {
+          "match": {"country": "US"},
+          "pick": "probe"
+        }
+      }
+    }
+  }
+}
+```
+
+Country detection prefers a flag emoji and otherwise recognizes whole Russian or English country names. A `match` may combine `country`, RE2 `name_pattern`, case-insensitive `exclude` substrings, and `transport` (`tcp` or `grpc`). `pick` is `only` by default, `first` follows subscription order, and `probe` selects the fastest successful endpoint. `match` and `selector` are mutually exclusive.
+
+If the configured profile alias no longer matches any profile in the refreshed subscription, `start` fails before rendering or starting the tunnel and prints the available profiles. Successful match resolution is printed as `resolved: <server>/<alias> -> <provider display name> (<id>) via <reason>`, saved in session metadata/logs, and shown by `status`.
 
 Short provider starts work through positional selection overrides:
 
@@ -534,6 +554,7 @@ This is the command to use after changing:
 - `current.server`
 - `current.profile`
 - `servers.<name>.profiles.<profile>.selector`
+- `servers.<name>.profiles.<profile>.match` or `.pick`
 - `routing.bypass_suffixes`
 - `routing.routes`
 - `dns.proxy_resolver`
@@ -569,7 +590,7 @@ Stops the currently recorded `vless-tun` session using `SIGTERM` by default. For
 
 ### `vless-tun render`
 
-Selects a cached profile and writes runtime JSON config with:
+Refreshes and resolves the selected profile by default (with the same transient-error cache fallback as start/reconnect) and writes runtime JSON config with:
 
 - a TUN inbound
 - proxy detour for the rest of the traffic
@@ -755,6 +776,8 @@ Field reference:
 - `servers.<name>.artifacts.xray_config_path`: generated Xray sidecar config path for `engine.type=xray`; if omitted, the path is derived from the sing-box config name
 - `servers.<name>.profiles.<profile>.transport`: optional explicit VLESS transport selector, currently `tcp` or `grpc`. Set this when a provider returns one TCP and one gRPC profile for the same logical server, such as Dance
 - `servers.<name>.profiles.<profile>.selector`: optional selector by exact id, exact name, endpoint, transport name, or substring. If a source resolves to multiple remote profiles and `transport` is unset, startup fails instead of silently following provider order
+- `servers.<name>.profiles.<profile>.match`: stable provider-entry criteria. Every field is optional but at least one is required: `country` is a case-insensitive ISO 3166-1 alpha-2 code derived from a flag or whole country name, `name_pattern` is RE2, `exclude` contains case-insensitive rejected substrings, and `transport` is `tcp` or `grpc`. It cannot coexist with `selector`
+- `servers.<name>.profiles.<profile>.pick`: match disambiguation policy: `only` (default, exactly one), `first` (subscription order), or `probe` (fastest successful parallel TCP connect within a two-second total budget)
 - `servers.<name>.engine.type`: required runtime engine for each configured server in multi-server configs; valid values are `sing-box` and `xray`
 - `engine` may also exist globally or per profile for shared settings and overrides, but every `servers.<name>` block still needs its own explicit `engine.type`
 - `engine.xray.executable`: Xray binary name or absolute path. The binary must be installed and runnable before `start` or `reconnect`

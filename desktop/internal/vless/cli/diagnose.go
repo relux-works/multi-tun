@@ -3,11 +3,13 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/session"
+	"multi-tun/desktop/internal/vless/subscription"
 )
 
 var inspectVPNCoreServiceCLI = vpncore.InspectService
@@ -102,6 +104,33 @@ func (a *App) runDiagnoseConfig(args []string) int {
 		return 1
 	}
 
+	var resolutionLine string
+	var selectorWarning string
+	selectorIsHash := regexp.MustCompile(`^[0-9a-f]{12}$`).MatchString(strings.TrimSpace(selection.Selector))
+	if selection.Match != nil || selectorIsHash {
+		snapshot, _, err := a.loadStartSnapshot(cfg, true)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
+			return 1
+		}
+		resolution, err := resolveProfile(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
+			return 1
+		}
+		if resolution.Matched {
+			resolutionLine = fmt.Sprintf("%s/%s -> %s (%s) via %s", selection.Server, selection.Profile, resolution.Profile.DisplayName(), resolution.Profile.ID, resolution.Reason)
+		}
+		if selectorIsHash {
+			country := subscription.CountryCode(resolution.Profile.DisplayName())
+			if country != "" {
+				selectorWarning = fmt.Sprintf("selector %q looks like a rotating content-hash id; use an equivalent stable match such as {\"match\": {\"country\": %q}}", selection.Selector, country)
+			} else {
+				selectorWarning = fmt.Sprintf("selector %q looks like a rotating content-hash id; use a stable match instead (country could not be detected from %q)", selection.Selector, resolution.Profile.DisplayName())
+			}
+		}
+	}
+
 	fmt.Fprintf(a.stdout, "diagnostic: config\n")
 	fmt.Fprintf(a.stdout, "mode: %s\n", cfg.NetworkMode())
 	if selection.Server != "" {
@@ -115,6 +144,12 @@ func (a *App) runDiagnoseConfig(args []string) int {
 	}
 	if selection.Transport != "" {
 		fmt.Fprintf(a.stdout, "profile_transport: %s\n", selection.Transport)
+	}
+	if resolutionLine != "" {
+		fmt.Fprintf(a.stdout, "resolved: %s\n", resolutionLine)
+	}
+	if selectorWarning != "" {
+		fmt.Fprintf(a.stdout, "warning: %s\n", selectorWarning)
 	}
 	fmt.Fprintf(a.stdout, "source_mode: %s\n", cfg.SourceMode())
 	fmt.Fprintf(a.stdout, "cache_dir: %s\n", cfg.CacheDir)

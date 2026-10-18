@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -14,6 +15,34 @@ import (
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 )
+
+// The session log header records the stable alias mapping, provider identity, reason, and snapshot timestamp.
+func TestWriteLogHeaderIncludesProfileResolution(t *testing.T) {
+	fetchedAt := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	current := CurrentSession{
+		ID:                  "session",
+		StartedAt:           fetchedAt,
+		ResolvedServer:      "phantombot",
+		ResolvedAlias:       "us",
+		ResolvedProfileName: "🇺🇸 США",
+		ResolvedProfileID:   "abc123def456",
+		ResolutionReason:    "match country=US; pick=probe fastest reachable",
+		SnapshotFetchedAt:   &fetchedAt,
+	}
+	profile := model.Profile{ID: "abc123def456", Name: "🇺🇸 США", Host: "203.0.113.1", Port: 443}
+	var output bytes.Buffer
+
+	writeLogHeader(&output, current, profile)
+
+	for _, want := range []string{
+		"resolved: phantombot/us -> 🇺🇸 США (abc123def456) via match country=US; pick=probe fastest reachable",
+		"snapshot_fetched_at: 2026-10-18T12:00:00Z",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("header = %q, want %q", output.String(), want)
+		}
+	}
+}
 
 func TestStartWithVPNCorePropagatesTimeoutSnapshotWithoutPayload(t *testing.T) {
 	// This proves helper startup sends rendered bytes, not a root-readable user path, while preserving redacted timeout context.
