@@ -94,13 +94,19 @@ func FetchWithOptions(ctx context.Context, subscriptionURL string, options Fetch
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		err := fmt.Errorf("subscription request failed with status %s", resp.Status)
-		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		if (resp.StatusCode >= 500 && resp.StatusCode < 600) || resp.StatusCode == http.StatusTooManyRequests {
 			return nil, &TransientFetchError{Err: err}
 		}
 		return nil, err
 	}
 
-	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		// The connection broke mid-body (reset, unexpected EOF): same class as
+		// a failed dial.
+		return nil, &TransientFetchError{Err: fmt.Errorf("subscription response read failed: %w", err)}
+	}
+	return body, nil
 }
 
 func Refresh(ctx context.Context, sourceMode, sourceURL, cacheDir string) (CacheSnapshot, error) {
