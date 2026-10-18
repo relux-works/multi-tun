@@ -146,3 +146,38 @@ func TestSessionAliveLegacyRecordChecksNameOnly(t *testing.T) {
 		t.Fatal("legacy record with another program's name: want not alive")
 	}
 }
+
+// A helper-mode startup kill goes only through the opaque vpn-core handle: a
+// legacy record without a handle is refused with no signal sent, and a record
+// with a handle sends exactly one -KILL to that handle (positive control), even
+// when the recorded PID now belongs to another program.
+func TestKillHelperSessionSignalsOnlyByHandle(t *testing.T) {
+	recorded := time.Now().Add(-time.Minute)
+	type sent struct{ handle, signal string }
+	var signalled []sent
+	previous := vpnCoreSignalSession
+	vpnCoreSignalSession = func(handle, signal string) error {
+		signalled = append(signalled, sent{handle, signal})
+		return nil
+	}
+	t.Cleanup(func() { vpnCoreSignalSession = previous })
+
+	legacy := CurrentSession{PID: 4242, ProcessComm: "sing-box", ProcessStart: recorded, LaunchMode: config.LaunchModeHelper}
+	withProcessIdentity(t, "sing-box", recorded, nil)
+	if err := killHelperSession(legacy); err == nil {
+		t.Fatal("killHelperSession(no handle) error = nil, want refusal")
+	}
+	if len(signalled) != 0 {
+		t.Fatalf("signals sent despite refusal: %v", signalled)
+	}
+
+	withHandle := legacy
+	withHandle.Handle = "h-test-1"
+	withProcessIdentity(t, "zsh", time.Now(), nil)
+	if err := killHelperSession(withHandle); err != nil {
+		t.Fatalf("killHelperSession(handle) = %v, want nil", err)
+	}
+	if len(signalled) != 1 || signalled[0] != (sent{"h-test-1", "-KILL"}) {
+		t.Fatalf("signals = %v, want exactly one -KILL to h-test-1", signalled)
+	}
+}

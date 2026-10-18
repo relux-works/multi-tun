@@ -57,6 +57,10 @@ func stopHelperSession(current CurrentSession, force bool, timeout time.Duration
 	return fmt.Errorf("timeout waiting for sing-box pid %d to stop", current.PID)
 }
 
+// killHelperSession force-stops a helper-mode sing-box after a failed start.
+// It signals through the opaque handle the hardened vpn-core issued for the
+// child it still holds, so a reused PID can never be hit. A legacy session
+// without a handle is refused: there is no safe PID-based fallback.
 func killHelperSession(current CurrentSession) error {
 	if current.Handle == "" {
 		return fmt.Errorf("legacy helper session has no opaque handle; refusing PID-based helper stop because no safe direct fallback exists")
