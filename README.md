@@ -477,7 +477,7 @@ Shows the cached profiles in a compact form. Use `--refresh` if you want it to p
 
 ### `vless-tun start`
 
-Refreshes the selected provider subscription cache before rendering, including explicit profile aliases such as `fortinetz nl`, so provider-side endpoint, SNI, fingerprint, and profile changes are picked up at start time. Use `--refresh=false` only when the subscription endpoint is unavailable and the last cached snapshot is good enough to start from.
+Refreshes the selected provider subscription cache before rendering, including explicit profile aliases such as `fortinetz nl`, so provider-side endpoint, SNI, fingerprint, and profile changes are picked up at start time. If the fetch fails transiently (network error, HTTP 5xx or 429), `start` and `reconnect` continue from the last cached snapshot and print a warning; a refused (4xx) or unparsable subscription stays a hard error. `--refresh=false` forces the cached snapshot without trying the network (it still fetches once when no cache exists).
 
 If the configured profile alias no longer matches any profile in the refreshed subscription, `start` fails before rendering or starting the tunnel, prints the available profiles, and points at the `servers.<name>.profiles.<alias>.selector` value to update.
 
@@ -521,7 +521,7 @@ In `network.mode=tun`, `start` resolves the launch backend automatically. If the
 
 ### `vless-tun reconnect`
 
-Reloads the local config, refreshes the subscription cache by default, rerenders the selected profile, and only then synchronously stops any currently recorded session across all configured VLESS server cache directories and starts a fresh `vless-tun` session with the selected engine. A profile-selection or render failure aborts before anything is stopped. A failed subscription fetch falls back to the cached snapshot with a warning; without a cache it is a hard failure, again before anything is stopped. It is the canonical single-command stop-to-start workflow; do not script separate `stop` and `start` calls for normal reconfiguration.
+Reloads the local config, refreshes the subscription cache by default, rerenders the selected profile, and only then synchronously stops any currently recorded session across all configured VLESS server cache directories and starts a fresh `vless-tun` session with the selected engine. A profile-selection or render failure aborts before anything is stopped. A transient subscription fetch failure falls back to the cached snapshot with a warning; a refused or unparsable subscription, or a transient failure without a cache, is a hard failure, again before anything is stopped. Missing engine executables are also caught before the stop. Failures inside session startup after the stop (launch backend, nested-route guard, sidecar ports) can still leave no tunnel; rerun `reconnect` or `start`. It is the canonical single-command stop-to-start workflow; do not script separate `stop` and `start` calls for normal reconfiguration.
 
 This is the command to use after changing:
 
@@ -871,7 +871,7 @@ go build -o cisco-dump ./desktop/cmd/cisco-dump
 - This version manages the local `sing-box` session lifecycle with `start`, `status`, `stop`, and a configurable privileged TUN backend for macOS.
 - `start` refreshes the selected provider subscription before rendering by default, so configured profile aliases follow provider-side endpoint changes. When a provider exposes multiple remote profiles, configure `transport` or `selector`; vless-tun no longer silently follows provider order. `--refresh=false` is the explicit cached fallback for offline starts.
 - `reconnect` is the "restart with latest config" path: it rereads local config, refreshes the subscription by default, rerenders, and only then stops any recorded VLESS session across configured server cache directories and starts the selected session. Preparation errors leave the running session in place.
-- `start` and `reconnect` fall back to the cached subscription snapshot, with a warning, when the subscription fetch fails. Fetch errors never echo the subscription URL.
+- `start` and `reconnect` fall back to the cached subscription snapshot, with a warning, when the subscription fetch fails transiently (network error, HTTP 5xx or 429); a 4xx refusal or unparsable payload is never masked by the cache. Fetch errors never echo the subscription URL.
 - `connect` and `disconnect` are compatibility aliases for `start` and `stop`, matching `openconnect-tun`.
 - `status` is an introspection view over recorded session state, launch backend, process liveness, interface presence, and cached profile data; it is not a deep traffic verifier.
 - If your public IP does not change, check the latest session log first. The expected control flow is `start` -> `status` -> inspect the session log, not `status` alone.
