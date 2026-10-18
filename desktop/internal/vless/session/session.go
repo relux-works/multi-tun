@@ -276,10 +276,11 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	}
 
 	// Startup error paths below stop the process with stopStartedSession.
-	// That is safe even before identity checks pass: this invocation spawned
-	// the PID and still reserves it (direct and sudo modes hold the unreleased
-	// cmd.Process until the end of Start; helper mode's vpn-core holds its
-	// child), so it cannot belong to an unrelated process yet.
+	// That is safe even before identity checks pass. In direct and sudo modes
+	// this invocation holds the unreaped cmd.Process, so the PID cannot belong
+	// to an unrelated process yet. In helper mode killHelperSession signals by
+	// the opaque handle of the child the hardened vpn-core still holds, never
+	// by PID, and refuses a record without a handle.
 	if err := recordProcessIdentity(&session); err != nil {
 		_ = stopStartedSession(session)
 		if release != nil {
