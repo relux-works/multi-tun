@@ -190,7 +190,8 @@ func printPinnedTools(out io.Writer, tools []vpncore.PinnedTool) {
 		// it so control bytes cannot reach the operator's terminal.
 		fmt.Fprintf(out, "pinned: %s sha256=%s size=%d source=%s\n", tool.Name, hash, tool.Size, strconv.QuoteToASCII(tool.SourcePath))
 	}
-	fmt.Fprintln(out, "note: after a Homebrew upgrade of sing-box (or openconnect, from PR C) rerun vpn-core install-digest / install to pin the new binary")
+	fmt.Fprintln(out, "note: after a Homebrew upgrade of sing-box rerun vpn-core install-digest / install to pin the new binary")
+	fmt.Fprintln(out, "note: openconnect-tun start/stop will ask for your Mac password (sudo, cached about 5 min); vpn-core no longer runs openconnect")
 }
 
 func (a *App) runUninstall(args []string) int {
