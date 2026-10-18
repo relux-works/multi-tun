@@ -120,6 +120,8 @@ type CurrentSession struct {
 	PID                      int              `json:"pid"`
 	Handle                   string           `json:"handle,omitempty"`
 	StartedAt                time.Time        `json:"started_at"`
+	ProcessComm              string           `json:"process_comm,omitempty"`
+	ProcessStart             time.Time        `json:"process_start,omitempty"`
 	Engine                   string           `json:"engine,omitempty"`
 	ConfigPath               string           `json:"config_path"`
 	LogPath                  string           `json:"log_path"`
@@ -273,6 +275,7 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		release = cmd.Process.Release
 	}
 
+	recordProcessIdentity(&session)
 	if err := saveJSON(metadataPath, session); err != nil {
 		_ = stopStartedSession(session)
 		return CurrentSession{}, err
@@ -290,8 +293,9 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		}
 		return CurrentSession{}, fmt.Errorf("sing-box exited during startup; inspect %s", logPath)
 	}
-	if pid > 0 {
+	if pid > 0 && pid != session.PID {
 		session.PID = pid
+		recordProcessIdentity(&session)
 	}
 
 	if err := applySystemDNSHandoff(&session, options); err != nil {
@@ -526,12 +530,18 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 		return false, current.PID, err
 	}
 	if alive {
-		if !sessionProcessMatches(current) {
-			// The PID was reused by an unrelated process: the recorded
-			// session is gone, and nothing may signal or trust that PID.
-			return false, current.PID, nil
+		matches, err := sessionProcessMatches(current)
+		if err != nil {
+			// Unknown identity: refuse to call the process ours or gone, so
+			// callers neither signal a possibly unrelated process nor drop
+			// the record of a possibly genuine one.
+			return false, current.PID, err
 		}
-		return true, current.PID, nil
+		if matches {
+			return true, current.PID, nil
+		}
+		// The recorded PID now belongs to another process. A launchd-managed
+		// session may still be running under a new PID; ask launchd below.
 	}
 
 	if current.LaunchMode != config.LaunchModeLaunchd || current.LaunchLabel == "" {
@@ -548,20 +558,41 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 	return true, pid, nil
 }
 
-// processStartSlack bounds how far a live process's start time may sit from
-// the recorded session start before the PID is treated as reused. The session
-// record is written just before the spawn, so a genuine process starts within
-// seconds of it.
-const processStartSlack = 2 * time.Minute
+// recordProcessIdentity stores the observed command name and start time of
+// the process holding session.PID right after it is known, so later liveness
+// checks compare against the real process, not against an estimate.
+func recordProcessIdentity(session *CurrentSession) {
+	comm, started, err := processIdentitySession(session.PID)
+	if err != nil {
+		session.ProcessComm = ""
+		session.ProcessStart = time.Time{}
+		return
+	}
+	session.ProcessComm = comm
+	session.ProcessStart = started
+}
+
+// processStartTolerance absorbs the kern.proc start-time granularity.
+const processStartTolerance = time.Second
 
 // sessionProcessMatches reports whether the live process holding current.PID
-// is the recorded tunnel process: same command name and a start time close to
-// the recorded StartedAt. Legacy records without StartedAt are checked by name
-// only. If the identity cannot be read, the existing liveness answer stands.
-func sessionProcessMatches(current CurrentSession) bool {
+// is the recorded one. Records carrying ProcessComm/ProcessStart must match
+// both; legacy records are matched by the recorded executable's name only.
+// An identity lookup failure is returned as an error, never guessed.
+func sessionProcessMatches(current CurrentSession) (bool, error) {
 	comm, started, err := processIdentitySession(current.PID)
+	if errors.Is(err, errProcessIdentityUnsupported) {
+		return true, nil
+	}
 	if err != nil {
-		return true
+		return false, fmt.Errorf("verify identity of pid %d: %w", current.PID, err)
+	}
+	if current.ProcessComm != "" {
+		delta := started.Sub(current.ProcessStart)
+		if delta < 0 {
+			delta = -delta
+		}
+		return comm == current.ProcessComm && delta <= processStartTolerance, nil
 	}
 	want := "sing-box"
 	if len(current.Command) > 0 && strings.TrimSpace(current.Command[0]) != "" {
@@ -570,14 +601,7 @@ func sessionProcessMatches(current CurrentSession) bool {
 	if len(want) > 16 {
 		want = want[:16]
 	}
-	if comm != want {
-		return false
-	}
-	if current.StartedAt.IsZero() {
-		return true
-	}
-	delta := started.Sub(current.StartedAt)
-	return delta > -processStartSlack && delta < processStartSlack
+	return comm == want, nil
 }
 
 func SessionsDir(cacheDir string) string {
