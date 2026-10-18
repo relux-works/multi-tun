@@ -49,7 +49,7 @@ func TestInstallServiceRefusesMalformedDigestBeforePrivilege(t *testing.T) {
 }
 
 func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing.T) {
-	// This proves the digest emitted for a binary authorizes the exact staged install and bounded launchd replacement sequence.
+	// This proves a secure helper parent permits the exact staged install and bounded launchd replacement sequence.
 	binary := writeInstallTestBinary(t)
 	digest, err := InstallDigest(binary)
 	if err != nil {
@@ -65,7 +65,7 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 		if name == "launchctl" && len(args) > 0 && args[0] == "print" {
 			printCalls++
 			if printCalls == 2 {
-				return nil, errors.New("service absent")
+				return nil, launchctlTestError(113, nil)
 			}
 		}
 		return nil, nil
@@ -128,7 +128,7 @@ func TestCompatibilityCleanupStillTargetsLegacyService(t *testing.T) {
 	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
 		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
 		if name == "launchctl" && len(args) > 0 && args[0] == "print" {
-			return nil, errors.New("service absent")
+			return nil, launchctlTestError(113, nil)
 		}
 		return nil, nil
 	})
@@ -226,6 +226,89 @@ func withInstallVerification(t *testing.T, owner ownerLookup, checkACL func(stri
 	t.Cleanup(func() { installVerificationDepsVPNCore = previous })
 }
 
+func launchctlTestError(exitCode int, output []byte) error {
+	return &commandError{Name: "launchctl", Args: []string{"print"}, ExitCode: exitCode, Output: output, Err: errors.New("exit status")}
+}
+
+func TestInstallServiceRefusesSymlinkedHelperParentBeforePrivilege(t *testing.T) {
+	// This proves a symlinked intermediate helper parent is refused before any privileged command runs.
+	binary := writeInstallTestBinary(t)
+	digest, err := InstallDigest(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testInstallConfig(t)
+	realParent := filepath.Join(filepath.Dir(cfg.HelperDir), "real-parent")
+	if err := os.Mkdir(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedParent := filepath.Join(filepath.Dir(cfg.HelperDir), "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatal(err)
+	}
+	cfg.HelperDir = filepath.Join(linkedParent, "helper")
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
+	var commands []string
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		return nil, nil
+	})
+	if err := InstallService(cfg, binary, 501, 20, digest); err == nil || !strings.Contains(err.Error(), "without following symlinks") {
+		t.Fatalf("InstallService() error = %v, want symlinked-parent refusal", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("privileged commands = %v, want none", commands)
+	}
+}
+
+func TestUninstallServiceRefusesUnsafeHelperParentBeforePrivilege(t *testing.T) {
+	// These cases prove group-writable and non-root helper parents are refused before any privileged command runs.
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, cfg ServiceConfig) ownerLookup
+		want  string
+	}{
+		{
+			name: "group-writable",
+			setup: func(t *testing.T, cfg ServiceConfig) ownerLookup {
+				if err := os.Chmod(filepath.Dir(cfg.HelperDir), 0o775); err != nil {
+					t.Fatal(err)
+				}
+				return func(string, *unix.Stat_t) (uint32, error) { return 0, nil }
+			},
+			want: "group/world-writable",
+		},
+		{
+			name: "non-root",
+			setup: func(_ *testing.T, cfg ServiceConfig) ownerLookup {
+				return func(path string, _ *unix.Stat_t) (uint32, error) {
+					if path == filepath.Dir(cfg.HelperDir) {
+						return 501, nil
+					}
+					return 0, nil
+				}
+			},
+			want: "want root",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testInstallConfig(t)
+			withInstallVerification(t, test.setup(t, cfg), func(string, int) error { return nil })
+			var commands []string
+			withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+				commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+				return nil, nil
+			})
+			if err := UninstallService(cfg); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("UninstallService() error = %v, want %q", err, test.want)
+			}
+			if len(commands) != 0 {
+				t.Fatalf("privileged commands = %v, want none", commands)
+			}
+		})
+	}
+}
+
 // A staged file swapped between hashing and the privileged copy is caught on
 // the root-owned destination; launchd is never touched and the files are removed.
 func TestInstallServiceRefusesSwappedStagedFiles(t *testing.T) {
@@ -316,7 +399,11 @@ func TestInstallServiceRefusesHelperSymlinkThatSurvivesPrivilegedPreparation(t *
 	if err == nil || !strings.Contains(err.Error(), "without following symlinks") {
 		t.Fatalf("InstallService() error = %v, want symlink refusal", err)
 	}
-	if strings.Contains(strings.Join(commands, "\n"), "launchctl") {
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "rm -rf "+cfg.HelperDir) {
+		t.Fatalf("final helper symlink was refused before intended removal: %v", commands)
+	}
+	if strings.Contains(joined, "launchctl") {
 		t.Fatalf("launchctl was invoked for symlinked helper: %v", commands)
 	}
 }
@@ -388,6 +475,7 @@ func TestUninstallServiceFailsWhenBootoutLeavesServiceLoaded(t *testing.T) {
 	if err := os.WriteFile(cfg.PlistPath, []byte("plist"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
 	withExpiredInstallClock(t)
 	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
 		if name == "launchctl" && args[0] == "bootout" {
@@ -406,14 +494,119 @@ func TestUninstallServiceFailsWhenBootoutLeavesServiceLoaded(t *testing.T) {
 func TestUninstallServiceToleratesVerifiedAbsentState(t *testing.T) {
 	// This proves bootout/removal command failures are tolerated only when launchd and every configured service path are verified absent.
 	cfg := testInstallConfig(t)
-	if err := os.RemoveAll(filepath.Dir(cfg.PlistPath)); err != nil {
-		t.Fatal(err)
-	}
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
 	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		if name == "launchctl" && args[0] == "print" {
+			return nil, launchctlTestError(113, nil)
+		}
 		return nil, errors.New("already absent")
 	})
 	if err := UninstallService(cfg); err != nil {
 		t.Fatalf("UninstallService() error = %v for verified absent state", err)
+	}
+}
+
+func TestForgetLaunchdLabelRecognizesOnlyExplicitAbsence(t *testing.T) {
+	// These cases prove only exit 113 or launchd's service-not-found output is classified as absence.
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "exit-113", err: launchctlTestError(113, []byte("other output"))},
+		{name: "service-not-found-output", err: launchctlTestError(1, []byte("Could not find service \"system/example\""))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+				if name == "launchctl" && args[0] == "print" {
+					return nil, test.err
+				}
+				return nil, nil
+			})
+			if err := forgetLaunchdLabel("works.relux.test"); err != nil {
+				t.Fatalf("forgetLaunchdLabel() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestForgetLaunchdLabelKeepsPollingAfterNonAbsentError(t *testing.T) {
+	// This proves a transient non-absence print error keeps polling and can be followed by confirmed absence.
+	previousNow := installNowVPNCore
+	previousSleep := installSleepVPNCore
+	base := time.Unix(1, 0)
+	installNowVPNCore = func() time.Time { return base }
+	installSleepVPNCore = func(time.Duration) {}
+	t.Cleanup(func() {
+		installNowVPNCore = previousNow
+		installSleepVPNCore = previousSleep
+	})
+	printCalls := 0
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		if name == "launchctl" && args[0] == "print" {
+			printCalls++
+			if printCalls == 1 {
+				return nil, launchctlTestError(1, []byte("Operation not permitted"))
+			}
+			return nil, launchctlTestError(113, nil)
+		}
+		return nil, nil
+	})
+	if err := forgetLaunchdLabel("works.relux.test"); err != nil {
+		t.Fatalf("forgetLaunchdLabel() error = %v", err)
+	}
+	if printCalls != 2 {
+		t.Fatalf("launchctl print calls = %d, want 2", printCalls)
+	}
+}
+
+func TestInstallServicePropagatesLaunchctlPrintPermissionFailure(t *testing.T) {
+	// This proves install fails instead of treating a non-absence launchctl print error as a forgotten service.
+	binary := writeInstallTestBinary(t)
+	digest, err := InstallDigest(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testInstallConfig(t)
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
+	withExpiredInstallClock(t)
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		if name == "launchctl" && args[0] == "print" {
+			return nil, launchctlTestError(1, []byte("Operation not permitted"))
+		}
+		return nil, performFakeInstall(name, args, nil)
+	})
+	err = InstallService(cfg, binary, 501, 20, digest)
+	if err == nil || !strings.Contains(err.Error(), "Operation not permitted") || !strings.Contains(err.Error(), "did not forget") {
+		t.Fatalf("InstallService() error = %v, want bounded permission failure", err)
+	}
+}
+
+func TestUninstallServicePropagatesLaunchctlPrintPermissionFailure(t *testing.T) {
+	// This proves uninstall fails after the bounded poll when launchctl print reports a non-absence error.
+	cfg := testInstallConfig(t)
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
+	withExpiredInstallClock(t)
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		if name == "launchctl" && args[0] == "print" {
+			return nil, launchctlTestError(1, []byte("Operation not permitted"))
+		}
+		return nil, performFakeInstall(name, args, nil)
+	})
+	err := UninstallService(cfg)
+	if err == nil || !strings.Contains(err.Error(), "Operation not permitted") || !strings.Contains(err.Error(), "did not forget") {
+		t.Fatalf("UninstallService() error = %v, want bounded permission failure", err)
+	}
+}
+
+func TestRunCommandPreservesFailureOutputAndExitCode(t *testing.T) {
+	// This proves command failures retain raw output and the process exit code for launchd absence classification.
+	output, err := runCommand("/bin/sh", "-c", "printf 'Could not find service'; exit 113")
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) {
+		t.Fatalf("runCommand() error = %T %v, want *commandError", err, err)
+	}
+	if commandErr.ExitCode != 113 || string(commandErr.Output) != "Could not find service" || string(output) != "Could not find service" {
+		t.Fatalf("runCommand() = (%q, exit=%d, raw=%q), want preserved output and exit 113", output, commandErr.ExitCode, commandErr.Output)
 	}
 }
 

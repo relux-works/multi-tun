@@ -76,6 +76,9 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 	if pkg.digest != expectedDigest {
 		return fmt.Errorf("install digest mismatch: got %s, expected %s", pkg.digest, expectedDigest)
 	}
+	if err := verifyHelperRemovalParent(cfg.HelperDir, installVerificationDepsVPNCore()); err != nil {
+		return fmt.Errorf("verify helper removal parent: %w", err)
+	}
 
 	plistData := RenderServicePlist(cfg, cfg.BinaryPath(), clientUID, clientGID, pkg.binarySHA256, pkg.manifestSHA256)
 	plistPath := filepath.Join(pkg.dir, "service.plist")

@@ -162,12 +162,18 @@ func verifySecureDirectory(path string, deps verificationDependencies, allowStic
 	return err
 }
 
+func verifyHelperRemovalParent(helperDir string, deps verificationDependencies) error {
+	if helperDir == "" {
+		return errors.New("helper directory is required")
+	}
+	return verifySecureDirectory(filepath.Dir(filepath.Clean(helperDir)), deps, false)
+}
+
 func openSecurePath(path string, wantDirectory bool, deps verificationDependencies, allowStickyFinalDirectory bool) (int, *unix.Stat_t, error) {
 	clean := filepath.Clean(path)
-	if !filepath.IsAbs(clean) || clean == string(filepath.Separator) {
-		return -1, nil, fmt.Errorf("path %q must be an absolute non-root path", path)
+	if !filepath.IsAbs(clean) {
+		return -1, nil, fmt.Errorf("path %q must be absolute", path)
 	}
-	parts := strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
 	currentFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, nil, err
@@ -177,7 +183,16 @@ func openSecurePath(path string, wantDirectory bool, deps verificationDependenci
 		_ = unix.Close(currentFD)
 		return -1, nil, err
 	}
+	if clean == string(filepath.Separator) {
+		var stat unix.Stat_t
+		if err := unix.Fstat(currentFD, &stat); err != nil {
+			_ = unix.Close(currentFD)
+			return -1, nil, err
+		}
+		return currentFD, &stat, nil
+	}
 
+	parts := strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
 	for index, part := range parts {
 		final := index == len(parts)-1
 		flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC

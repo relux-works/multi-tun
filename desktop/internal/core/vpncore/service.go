@@ -34,7 +34,22 @@ var (
 var (
 	execCommandVPNCore        = exec.Command
 	execCommandContextVPNCore = exec.CommandContext
+	recvmsgVPNCore            = unix.Recvmsg
 )
+
+type commandError struct {
+	Name     string
+	Args     []string
+	ExitCode int
+	Output   []byte
+	Err      error
+}
+
+func (e *commandError) Error() string {
+	return fmt.Sprintf("%s %s: %v (%s)", e.Name, strings.Join(e.Args, " "), e.Err, strings.TrimSpace(string(e.Output)))
+}
+
+func (e *commandError) Unwrap() error { return e.Err }
 
 func Available(cfg ServiceConfig) bool {
 	// Legacy helpers speak the old path-based logging protocol and are visible
@@ -84,6 +99,11 @@ func inspectExactServiceWithTimeout(cfg ServiceConfig, timeout time.Duration) (S
 }
 
 func UninstallService(cfg ServiceConfig) error {
+	if cfg.HelperDir != "" {
+		if err := verifyHelperRemovalParent(cfg.HelperDir, installVerificationDepsVPNCore()); err != nil {
+			return fmt.Errorf("verify helper removal parent: %w", err)
+		}
+	}
 	if err := ensureSudoCredentialsVPNCore(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
@@ -103,6 +123,11 @@ func cleanupCompatibilityServices(cfg ServiceConfig) error {
 }
 
 func uninstallExactService(cfg ServiceConfig) error {
+	if cfg.HelperDir != "" {
+		if err := verifyHelperRemovalParent(cfg.HelperDir, installVerificationDepsVPNCore()); err != nil {
+			return fmt.Errorf("verify helper removal parent: %w", err)
+		}
+	}
 	forgetErr := forgetLaunchdLabel(cfg.Label)
 	var removalErrs []error
 	if _, err := runPrivilegedCommandVPNCore("rm", "-f", cfg.PlistPath, cfg.SocketPath); err != nil {
@@ -123,15 +148,29 @@ func uninstallExactService(cfg ServiceConfig) error {
 func forgetLaunchdLabel(label string) error {
 	_, bootoutErr := runPrivilegedCommandVPNCore("launchctl", "bootout", launchctlTarget(label))
 	deadline := installNowVPNCore().Add(launchctlForgetTimeout)
+	var lastPrintErr error
 	for {
 		if _, err := runPrivilegedCommandVPNCore("launchctl", "print", launchctlTarget(label)); err != nil {
-			return nil
+			if launchctlServiceAbsent(err) {
+				return nil
+			}
+			lastPrintErr = fmt.Errorf("inspect launchd service %s: %w", label, err)
+		} else {
+			lastPrintErr = nil
 		}
 		if !installNowVPNCore().Before(deadline) {
-			return errors.Join(bootoutErr, fmt.Errorf("launchd did not forget %s within %s", label, launchctlForgetTimeout))
+			return errors.Join(bootoutErr, fmt.Errorf("launchd did not forget %s within %s", label, launchctlForgetTimeout), lastPrintErr)
 		}
 		installSleepVPNCore(launchctlForgetPollDelay)
 	}
+}
+
+func launchctlServiceAbsent(err error) bool {
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	return commandErr.ExitCode == 113 || bytes.Contains(commandErr.Output, []byte("Could not find service"))
 }
 
 func verifyServicePathsAbsent(cfg ServiceConfig) error {
@@ -322,6 +361,10 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 }
 
 func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return Request{}, nil, fmt.Errorf("access vpn core request socket: %w", err)
+	}
 	var payload []byte
 	var receivedFDs []int
 	closeFDs := func() {
@@ -332,32 +375,56 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 	for !bytes.Contains(payload, []byte{'\n'}) {
 		data := make([]byte, 32*1024)
 		oob := make([]byte, unix.CmsgSpace(4*4))
-		n, oobn, flags, _, err := conn.ReadMsgUnix(data, oob)
-		if err != nil {
-			closeFDs()
-			return Request{}, nil, err
-		}
-		if oobn > 0 {
-			messages, err := unix.ParseSocketControlMessage(oob[:oobn])
-			if err != nil {
-				closeFDs()
-				return Request{}, nil, fmt.Errorf("parse passed file descriptor: %w", err)
+		var n, oobn, flags int
+		var recvErr error
+		readErr := rawConn.Read(func(fd uintptr) bool {
+			syscall.ForkLock.RLock()
+			defer syscall.ForkLock.RUnlock()
+
+			n, oobn, flags, _, recvErr = recvmsgVPNCore(int(fd), data, oob, unix.MSG_DONTWAIT)
+			if errors.Is(recvErr, unix.EAGAIN) || errors.Is(recvErr, unix.EWOULDBLOCK) {
+				recvErr = nil
+				return false
+			}
+			if recvErr != nil {
+				return true
+			}
+			if n == 0 && oobn == 0 {
+				recvErr = io.EOF
+				return true
+			}
+			if oobn == 0 {
+				return true
+			}
+			messages, parseErr := unix.ParseSocketControlMessage(oob[:oobn])
+			if parseErr != nil {
+				recvErr = fmt.Errorf("parse passed file descriptor: %w", parseErr)
+				return true
 			}
 			for _, message := range messages {
-				fds, err := unix.ParseUnixRights(&message)
-				if err != nil {
-					closeFDs()
-					return Request{}, nil, fmt.Errorf("parse passed file descriptor: %w", err)
+				fds, parseErr := unix.ParseUnixRights(&message)
+				if parseErr != nil {
+					recvErr = fmt.Errorf("parse passed file descriptor: %w", parseErr)
+					return true
 				}
-				for _, fd := range fds {
-					unix.CloseOnExec(fd)
-					receivedFDs = append(receivedFDs, fd)
-					if len(receivedFDs) > 1 {
-						closeFDs()
-						return Request{}, nil, errors.New("vpn core request received more than one file descriptor")
-					}
+				for _, receivedFD := range fds {
+					unix.CloseOnExec(receivedFD)
+					receivedFDs = append(receivedFDs, receivedFD)
 				}
 			}
+			return true
+		})
+		if readErr != nil {
+			closeFDs()
+			return Request{}, nil, readErr
+		}
+		if recvErr != nil {
+			closeFDs()
+			return Request{}, nil, recvErr
+		}
+		if len(receivedFDs) > 1 {
+			closeFDs()
+			return Request{}, nil, errors.New("vpn core request received more than one file descriptor")
 		}
 		if flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 {
 			closeFDs()
@@ -639,7 +706,18 @@ func runPrivilegedCommand(name string, args ...string) ([]byte, error) {
 func runCommand(name string, args ...string) ([]byte, error) {
 	out, err := execCommandVPNCore(name, args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		return out, &commandError{
+			Name:     name,
+			Args:     append([]string(nil), args...),
+			ExitCode: exitCode,
+			Output:   append([]byte(nil), out...),
+			Err:      err,
+		}
 	}
 	return out, nil
 }

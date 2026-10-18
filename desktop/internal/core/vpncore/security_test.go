@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -111,7 +112,7 @@ func TestReadRequestRefusesNonRegularLogFD(t *testing.T) {
 }
 
 func TestReadRequestAcceptsRegularLogFD(t *testing.T) {
-	// This proves a client-opened regular append file is accepted and delivered without a path on the wire.
+	// This proves a client-opened regular append file is accepted with FD_CLOEXEC set on the received descriptor.
 	server, client := unixSocketPair(t)
 	path := t.TempDir() + "/client.log"
 	logFile, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -135,6 +136,61 @@ func TestReadRequestAcceptsRegularLogFD(t *testing.T) {
 	}
 	if flags&unix.FD_CLOEXEC == 0 {
 		t.Fatal("received log fd is missing close-on-exec")
+	}
+}
+
+func TestReadRequestWaitDoesNotBlockConcurrentCommandStart(t *testing.T) {
+	// This proves an EAGAIN wait releases ForkLock so a concurrent command can start before the slow client sends data.
+	server, client := unixSocketPair(t)
+	if err := server.SetReadDeadline(time.Now().Add(1500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	previousRecvmsg := recvmsgVPNCore
+	firstRecv := true
+	waiting := make(chan struct{})
+	recvmsgVPNCore = func(fd int, p, oob []byte, flags int) (int, int, int, unix.Sockaddr, error) {
+		if firstRecv {
+			firstRecv = false
+			close(waiting)
+			return 0, 0, 0, nil, unix.EAGAIN
+		}
+		return unix.Recvmsg(fd, p, oob, flags)
+	}
+	t.Cleanup(func() { recvmsgVPNCore = previousRecvmsg })
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, _, err := readRequest(server)
+		readDone <- err
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not enter the nonblocking recvmsg callback")
+	}
+
+	cmd := exec.Command("/usr/bin/true")
+	startDone := make(chan error, 1)
+	go func() { startDone <- cmd.Start() }()
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatalf("cmd.Start() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cmd.Start() blocked while readRequest waited for socket readability")
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("cmd.Wait() error = %v", err)
+	}
+	writeUnixPayload(t, client, []byte("{\"action\":\"ping\"}\n"), nil)
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("readRequest() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readRequest() did not finish after the client sent its request")
 	}
 }
 
