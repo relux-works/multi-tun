@@ -40,6 +40,7 @@ var (
 	execLookPath           = exec.LookPath
 	execCommand            = exec.Command
 	launchdPIDSession      = launchdPID
+	processIdentitySession = processIdentity
 	stopLaunchdSessionFunc = stopLaunchdSession
 	routeGetHostSession    = func(host string) ([]byte, error) {
 		return execCommand(routePath, "-n", "get", host).CombinedOutput()
@@ -525,6 +526,11 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 		return false, current.PID, err
 	}
 	if alive {
+		if !sessionProcessMatches(current) {
+			// The PID was reused by an unrelated process: the recorded
+			// session is gone, and nothing may signal or trust that PID.
+			return false, current.PID, nil
+		}
 		return true, current.PID, nil
 	}
 
@@ -540,6 +546,38 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 		return false, current.PID, nil
 	}
 	return true, pid, nil
+}
+
+// processStartSlack bounds how far a live process's start time may sit from
+// the recorded session start before the PID is treated as reused. The session
+// record is written just before the spawn, so a genuine process starts within
+// seconds of it.
+const processStartSlack = 2 * time.Minute
+
+// sessionProcessMatches reports whether the live process holding current.PID
+// is the recorded tunnel process: same command name and a start time close to
+// the recorded StartedAt. Legacy records without StartedAt are checked by name
+// only. If the identity cannot be read, the existing liveness answer stands.
+func sessionProcessMatches(current CurrentSession) bool {
+	comm, started, err := processIdentitySession(current.PID)
+	if err != nil {
+		return true
+	}
+	want := "sing-box"
+	if len(current.Command) > 0 && strings.TrimSpace(current.Command[0]) != "" {
+		want = filepath.Base(current.Command[0])
+	}
+	if len(want) > 16 {
+		want = want[:16]
+	}
+	if comm != want {
+		return false
+	}
+	if current.StartedAt.IsZero() {
+		return true
+	}
+	delta := started.Sub(current.StartedAt)
+	return delta > -processStartSlack && delta < processStartSlack
 }
 
 func SessionsDir(cacheDir string) string {
