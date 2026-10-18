@@ -275,7 +275,18 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		release = cmd.Process.Release
 	}
 
-	recordProcessIdentity(&session)
+	// Startup error paths below stop the process with stopStartedSession.
+	// That is safe even before identity checks pass: this invocation spawned
+	// the PID and still reserves it (direct and sudo modes hold the unreleased
+	// cmd.Process until the end of Start; helper mode's vpn-core holds its
+	// child), so it cannot belong to an unrelated process yet.
+	if err := recordProcessIdentity(&session); err != nil {
+		_ = stopStartedSession(session)
+		if release != nil {
+			_ = release()
+		}
+		return CurrentSession{}, err
+	}
 	if err := saveJSON(metadataPath, session); err != nil {
 		_ = stopStartedSession(session)
 		return CurrentSession{}, err
@@ -295,7 +306,11 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	}
 	if pid > 0 && pid != session.PID {
 		session.PID = pid
-		recordProcessIdentity(&session)
+		if err := recordProcessIdentity(&session); err != nil {
+			_ = stopStartedSession(session)
+			_ = ClearCurrent(cacheDir)
+			return CurrentSession{}, err
+		}
 	}
 
 	if err := applySystemDNSHandoff(&session, options); err != nil {
@@ -560,17 +575,28 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 
 // recordProcessIdentity stores the observed command name and start time of
 // the process holding session.PID right after it is known, so later liveness
-// checks compare against the real process, not against an estimate.
-func recordProcessIdentity(session *CurrentSession) {
+// checks compare against the real process, not against an estimate. It is
+// only called for a process this invocation just spawned, so a lookup that
+// still fails after one retry is a startup failure, never a silent downgrade
+// to the weaker name-only check used for legacy records.
+func recordProcessIdentity(session *CurrentSession) error {
 	comm, started, err := processIdentitySession(session.PID)
+	if err != nil && !errors.Is(err, errProcessIdentityUnsupported) {
+		time.Sleep(identityRetryDelay)
+		comm, started, err = processIdentitySession(session.PID)
+	}
+	if errors.Is(err, errProcessIdentityUnsupported) {
+		return nil
+	}
 	if err != nil {
-		session.ProcessComm = ""
-		session.ProcessStart = time.Time{}
-		return
+		return fmt.Errorf("record identity of sing-box pid %d: %w", session.PID, err)
 	}
 	session.ProcessComm = comm
 	session.ProcessStart = started
+	return nil
 }
+
+var identityRetryDelay = 100 * time.Millisecond
 
 // processStartTolerance absorbs the kern.proc start-time granularity.
 const processStartTolerance = time.Second

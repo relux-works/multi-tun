@@ -77,20 +77,60 @@ func TestSessionAliveFallsBackToLaunchdWhenRecordedPIDIsReused(t *testing.T) {
 	}
 }
 
-// recordProcessIdentity stores what the live process reports, and clears the
-// fields when the lookup fails rather than keeping stale values.
-func TestRecordProcessIdentityStoresObservedValues(t *testing.T) {
+// recordProcessIdentity stores what the live process reports, retries a
+// transient failure once, and returns an error (leaving the record empty)
+// when the identity still cannot be read, so a fresh session is never saved
+// as a weaker legacy record.
+func TestRecordProcessIdentityStoresOrFails(t *testing.T) {
+	previousDelay := identityRetryDelay
+	identityRetryDelay = 0
+	t.Cleanup(func() { identityRetryDelay = previousDelay })
+
 	started := time.Now().Add(-time.Minute)
 	session := CurrentSession{PID: 4242}
 	withProcessIdentity(t, "sudo", started, nil)
-	recordProcessIdentity(&session)
-	if session.ProcessComm != "sudo" || !session.ProcessStart.Equal(started) {
-		t.Fatalf("recorded = (%q, %v), want (sudo, %v)", session.ProcessComm, session.ProcessStart, started)
+	if err := recordProcessIdentity(&session); err != nil || session.ProcessComm != "sudo" || !session.ProcessStart.Equal(started) {
+		t.Fatalf("recorded = (%q, %v, %v), want (sudo, %v, nil)", session.ProcessComm, session.ProcessStart, err, started)
 	}
+
+	calls := 0
+	previous := processIdentitySession
+	processIdentitySession = func(int) (string, time.Time, error) {
+		calls++
+		if calls == 1 {
+			return "", time.Time{}, errors.New("transient")
+		}
+		return "sing-box", started, nil
+	}
+	retried := CurrentSession{PID: 4243}
+	if err := recordProcessIdentity(&retried); err != nil || retried.ProcessComm != "sing-box" || calls != 2 {
+		t.Fatalf("retry = (%q, %v, calls=%d), want (sing-box, nil, 2)", retried.ProcessComm, err, calls)
+	}
+	processIdentitySession = previous
+
 	withProcessIdentity(t, "", time.Time{}, errors.New("gone"))
-	recordProcessIdentity(&session)
-	if session.ProcessComm != "" || !session.ProcessStart.IsZero() {
-		t.Fatalf("after failed lookup = (%q, %v), want cleared", session.ProcessComm, session.ProcessStart)
+	failed := CurrentSession{PID: 4244}
+	if err := recordProcessIdentity(&failed); err == nil || failed.ProcessComm != "" {
+		t.Fatalf("persistent failure = (%q, %v), want (empty, error)", failed.ProcessComm, err)
+	}
+}
+
+// The launchd stop poll keeps the recorded identity: a reused PID held by a
+// different sing-box (later start) is not the stopped service, and with
+// launchd reporting no PID the session counts as stopped.
+func TestLaunchdStopPollKeepsRecordedIdentity(t *testing.T) {
+	recorded := time.Now().Add(-time.Hour)
+	current := CurrentSession{PID: os.Getpid(), ProcessComm: "sing-box", ProcessStart: recorded, LaunchMode: config.LaunchModeLaunchd, LaunchLabel: "works.relux.test", ID: "x", LogPath: "/tmp/x"}
+	poll := launchdStopPollRecord(current)
+	if poll.ProcessComm != "sing-box" || !poll.ProcessStart.Equal(recorded) {
+		t.Fatalf("poll record dropped identity: %+v", poll)
+	}
+	withProcessIdentity(t, "sing-box", recorded.Add(30*time.Minute), nil)
+	previous := launchdPIDSession
+	launchdPIDSession = func(string) (int, error) { return 0, nil }
+	t.Cleanup(func() { launchdPIDSession = previous })
+	if alive, _, err := SessionAlive(poll); err != nil || alive {
+		t.Fatalf("SessionAlive(poll, reused same-name pid, launchd gone) = (%v, %v), want (false, nil)", alive, err)
 	}
 }
 

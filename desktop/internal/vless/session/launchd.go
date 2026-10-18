@@ -81,11 +81,7 @@ func stopLaunchdSession(current CurrentSession, timeout time.Duration) error {
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		alive, _, err := SessionAlive(CurrentSession{
-			PID:         current.PID,
-			LaunchMode:  current.LaunchMode,
-			LaunchLabel: current.LaunchLabel,
-		})
+		alive, _, err := SessionAlive(launchdStopPollRecord(current))
 		if err != nil {
 			return err
 		}
@@ -221,4 +217,18 @@ func runCommand(name string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("%s %s: %w (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+// launchdStopPollRecord is the record polled after bootout. It keeps the
+// recorded process identity, so a reused PID now held by another sing-box is
+// not mistaken for the service that is being stopped.
+func launchdStopPollRecord(current CurrentSession) CurrentSession {
+	return CurrentSession{
+		PID:          current.PID,
+		Command:      current.Command,
+		ProcessComm:  current.ProcessComm,
+		ProcessStart: current.ProcessStart,
+		LaunchMode:   current.LaunchMode,
+		LaunchLabel:  current.LaunchLabel,
+	}
 }
