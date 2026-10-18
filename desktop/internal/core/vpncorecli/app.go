@@ -19,12 +19,19 @@ type App struct {
 	stderr io.Writer
 }
 
+type installPlanVPNCoreCLI interface {
+	Digest() string
+	PinnedTools() []vpncore.PinnedTool
+	Install(vpncore.ServiceConfig, int, int, string) error
+	Close() error
+}
+
 var inspectServiceVPNCoreCLI = vpncore.InspectService
 
 var (
-	installServiceVPNCoreCLI = vpncore.InstallService
-	installDigestVPNCoreCLI  = vpncore.InstallDigest
-	pinnedToolsVPNCoreCLI    = vpncore.PinnedToolsForInstall
+	prepareInstallPlanVPNCoreCLI = func(binaryPath string) (installPlanVPNCoreCLI, error) {
+		return vpncore.PrepareInstallPlan(binaryPath)
+	}
 	toolDriftVPNCoreCLI      = vpncore.ToolDrift
 	installSleepVPNCoreCLI   = time.Sleep
 	installNowVPNCoreCLI     = time.Now
@@ -95,12 +102,13 @@ func (a *App) runInstall(args []string) int {
 		return 1
 	}
 	cfg := vpncore.DefaultServiceConfig()
-	tools, err := pinnedToolsVPNCoreCLI(binaryPath)
+	plan, err := prepareInstallPlanVPNCoreCLI(binaryPath)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
 		return 1
 	}
-	if err := installServiceVPNCoreCLI(cfg, binaryPath, os.Getuid(), os.Getgid(), *expectedDigest); err != nil {
+	defer plan.Close()
+	if err := plan.Install(cfg, os.Getuid(), os.Getgid(), *expectedDigest); err != nil {
 		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
 		return 1
 	}
@@ -133,7 +141,7 @@ func (a *App) runInstall(args []string) int {
 	if status.Compatibility != "" {
 		fmt.Fprintf(a.stdout, "compatibility: %s\n", status.Compatibility)
 	}
-	printPinnedTools(a.stdout, tools)
+	printPinnedTools(a.stdout, plan.PinnedTools())
 	return 0
 }
 
@@ -159,18 +167,14 @@ func (a *App) runInstallDigest(args []string) int {
 		fmt.Fprintf(a.stderr, "install-digest failed: %v\n", err)
 		return 1
 	}
-	digest, err := installDigestVPNCoreCLI(binaryPath)
+	plan, err := prepareInstallPlanVPNCoreCLI(binaryPath)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "install-digest failed: %v\n", err)
 		return 1
 	}
-	tools, err := pinnedToolsVPNCoreCLI(binaryPath)
-	if err != nil {
-		fmt.Fprintf(a.stderr, "install-digest failed: %v\n", err)
-		return 1
-	}
-	fmt.Fprintln(a.stdout, digest)
-	printPinnedTools(a.stderr, tools)
+	defer plan.Close()
+	fmt.Fprintln(a.stdout, plan.Digest())
+	printPinnedTools(a.stderr, plan.PinnedTools())
 	return 0
 }
 

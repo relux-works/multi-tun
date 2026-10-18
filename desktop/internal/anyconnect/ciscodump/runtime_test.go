@@ -47,7 +47,7 @@ func TestBuildTCPDumpCommand_EnablesApplePCAPNGForPktap(t *testing.T) {
 }
 
 func TestVPNCoreTCPDumpUsesTypedFieldsHandleAndRuntimeArtifact(t *testing.T) {
-	// This proves the helper lane sends typed capture fields, signals by opaque handle, and copies only the returned runtime artifact.
+	// This proves the helper lane sends cisco-dump's real pktap,all default as a typed capture scope, signals by opaque handle, and copies only the returned runtime artifact.
 	dir := t.TempDir()
 	source := filepath.Join(dir, "runtime.pcap")
 	destination := filepath.Join(dir, "client.pcap")
@@ -59,7 +59,7 @@ func TestVPNCoreTCPDumpUsesTypedFieldsHandleAndRuntimeArtifact(t *testing.T) {
 	previousAlive := processAliveVPNCoreCiscoDump
 	calledStart := false
 	vpnCoreStartTCPDumpCiscoDump = func(iface string, filter []string, apple, runAsUser bool) (int, string, error) {
-		calledStart = iface == "lo0" && reflect.DeepEqual(filter, []string{"tcp", "and", "port", "443"}) && !apple && runAsUser
+		calledStart = iface == defaultInterface && reflect.DeepEqual(filter, []string{"tcp", "and", "port", "443"}) && apple && runAsUser
 		return 999999, "opaque-handle", nil
 	}
 	vpnCoreSignalCiscoDump = func(handle, signal string) (string, error) {
@@ -74,7 +74,7 @@ func TestVPNCoreTCPDumpUsesTypedFieldsHandleAndRuntimeArtifact(t *testing.T) {
 		vpnCoreSignalCiscoDump = previousSignal
 		processAliveVPNCoreCiscoDump = previousAlive
 	})
-	capture, err := startTCPDump(CurrentSession{TcpdumpBackend: tcpdumpBackendVPNCore}, "/attacker/ignored", "lo0", "tcp and port 443", destination)
+	capture, err := startTCPDump(CurrentSession{TcpdumpBackend: tcpdumpBackendVPNCore}, "/attacker/ignored", defaultInterface, "tcp and port 443", destination)
 	if err != nil {
 		t.Fatal(err)
 	}

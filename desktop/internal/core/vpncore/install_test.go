@@ -1,6 +1,8 @@
 package vpncore
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,6 +14,21 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func TestMain(m *testing.M) {
+	previous := runStagedToolVersionVPNCore
+	runStagedToolVersionVPNCore = func(string) (string, error) { return "sing-box version test-stub", nil }
+	code := m.Run()
+	runStagedToolVersionVPNCore = previous
+	os.Exit(code)
+}
+
+func withRealStagedToolVersion(t *testing.T) {
+	t.Helper()
+	previous := runStagedToolVersionVPNCore
+	runStagedToolVersionVPNCore = stagedToolVersion
+	t.Cleanup(func() { runStagedToolVersionVPNCore = previous })
+}
 
 func TestInstallServiceRefusesDigestMismatchBeforePrivilege(t *testing.T) {
 	// This proves a validly shaped but incorrect digest triggers no sudo check or privileged command.
@@ -162,7 +179,7 @@ func TestInstallPackagePinsResolvedSingBoxInManifestAndDigest(t *testing.T) {
 	dir := t.TempDir()
 	realTool := filepath.Join(dir, "sing-box-real")
 	linkTool := filepath.Join(dir, "sing-box")
-	if err := os.WriteFile(realTool, []byte("sing-box-v1\n"), 0o755); err != nil {
+	if err := os.WriteFile(realTool, []byte("#!/bin/sh\nprintf 'sing-box version v1\\n'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(realTool, linkTool); err != nil {
@@ -203,7 +220,7 @@ func TestInstallPackagePinsResolvedSingBoxInManifestAndDigest(t *testing.T) {
 	if !found || first.tools[0].SourcePath != resolvedTool {
 		t.Fatalf("package tools=%#v manifest=%#v", first.tools, manifest)
 	}
-	if err := os.WriteFile(realTool, []byte("sing-box-v2\n"), 0o755); err != nil {
+	if err := os.WriteFile(realTool, []byte("#!/bin/sh\nprintf 'sing-box version v2\\n'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	second, err := prepareInstallPackage(binary)
@@ -213,6 +230,78 @@ func TestInstallPackagePinsResolvedSingBoxInManifestAndDigest(t *testing.T) {
 	defer os.RemoveAll(second.dir)
 	if first.digest == second.digest {
 		t.Fatal("install digest did not change with sing-box bytes")
+	}
+}
+
+func TestInstallPlanMetadataAndDigestUseBytesStagedBeforePATHSourceSwap(t *testing.T) {
+	// This race seam proves a PATH tool replacement after the one staging copy cannot change the plan's version, SHA, manifest, or digest metadata.
+	withRealStagedToolVersion(t)
+	t.Setenv("VPNCORE_VERSION_SECRET", "must-not-reach-staged-command")
+	dir := t.TempDir()
+	pathTool := filepath.Join(dir, "sing-box")
+	v1 := []byte("#!/bin/sh\nif [ \"${VPNCORE_VERSION_SECRET+x}\" = x ]; then printf 'leaked environment\\n'; else printf 'sing-box version staged-v1\\n'; fi\n")
+	v2 := []byte("#!/bin/sh\nprintf 'sing-box version swapped-v2\\n'\n")
+	if err := os.WriteFile(pathTool, v1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolvedTool, err := filepath.EvalSymlinks(pathTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousLookup := lookPathInstallVPNCore
+	previousAfterStage := afterStageInstallToolVPNCore
+	lookPathInstallVPNCore = func(string) (string, error) { return pathTool, nil }
+	var swapErr error
+	afterStageInstallToolVPNCore = func(source, staged string) {
+		if source != resolvedTool || filepath.Base(staged) != "sing-box" {
+			t.Fatalf("stage seam source=%q staged=%q", source, staged)
+		}
+		swapErr = os.WriteFile(source, v2, 0o755)
+	}
+	t.Cleanup(func() {
+		lookPathInstallVPNCore = previousLookup
+		afterStageInstallToolVPNCore = previousAfterStage
+	})
+
+	plan, err := PrepareInstallPlan(writeInstallTestBinary(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plan.Close()
+	if swapErr != nil {
+		t.Fatal(swapErr)
+	}
+	tools := plan.PinnedTools()
+	if len(tools) != 1 || tools[0].Version != "sing-box version staged-v1" {
+		t.Fatalf("plan tools = %#v", tools)
+	}
+	staged, err := os.ReadFile(tools[0].Path)
+	if err != nil || !reflect.DeepEqual(staged, v1) {
+		t.Fatalf("staged bytes = %q, error = %v", staged, err)
+	}
+	stagedSHA, err := hashFile(tools[0].Path)
+	if err != nil || stagedSHA != tools[0].SHA256 {
+		t.Fatalf("staged sha = %q, metadata = %q, error = %v", stagedSHA, tools[0].SHA256, err)
+	}
+	manifestData, err := os.ReadFile(plan.pkg.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := decodeManifest(manifestData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 2 || manifest.Files[1].SHA256 != tools[0].SHA256 {
+		t.Fatalf("manifest = %#v, tools = %#v", manifest, tools)
+	}
+	binaryData, err := os.ReadFile(plan.pkg.binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digestBytes := append(append([]byte(nil), binaryData...), manifestData...)
+	wantDigest := sha256.Sum256(digestBytes)
+	if plan.Digest() != hex.EncodeToString(wantDigest[:]) {
+		t.Fatalf("plan digest = %q, want digest of staged bytes %x", plan.Digest(), wantDigest)
 	}
 }
 

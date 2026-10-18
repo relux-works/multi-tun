@@ -36,9 +36,121 @@ var (
 	chownVPNCore       = os.Chown
 )
 
-var forbiddenSingBoxKeys = map[string]struct{}{
-	"path": {}, "output": {}, "cache_file": {}, "external_controller": {},
-	"external_ui": {}, "download_detour": {}, "store_rdrc": {},
+type singBoxSchemaKind uint8
+
+const (
+	singBoxObject singBoxSchemaKind = iota
+	singBoxArray
+	singBoxString
+	singBoxBool
+	singBoxNumber
+)
+
+type singBoxSchemaNode struct {
+	kind          singBoxSchemaKind
+	fields        map[string]string
+	required      []string
+	element       string
+	discriminator string
+	variants      map[string]string
+	validate      func(any) error
+}
+
+// singBoxSchemas is the complete privileged sing-box input language. It is
+// intentionally derived from desktop/internal/vless/singbox/render.go rather
+// than from sing-box's much larger configuration language.
+var singBoxSchemas = map[string]singBoxSchemaNode{
+	"root": {kind: singBoxObject, fields: map[string]string{
+		"log": "log", "dns": "dns", "inbounds": "inbounds", "outbounds": "outbounds", "route": "route",
+	}},
+	"log": {kind: singBoxObject, fields: map[string]string{"level": "string"}},
+	"dns": {kind: singBoxObject, fields: map[string]string{
+		"servers": "dns_servers", "rules": "dns_rules", "final": "string", "strategy": "string", "reverse_mapping": "bool",
+	}},
+	"dns_servers": {kind: singBoxArray, element: "dns_server"},
+	"dns_server": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
+		"local": "dns_server_local", "tls": "dns_server_tls", "udp": "dns_server_udp",
+	}},
+	"dns_server_local": {kind: singBoxObject, fields: map[string]string{
+		"type": "string", "tag": "string", "detour": "string",
+	}},
+	"dns_server_tls": {kind: singBoxObject, fields: map[string]string{
+		"type": "string", "tag": "string", "server": "string", "server_port": "number", "detour": "string", "tls": "dns_tls",
+	}},
+	"dns_server_udp": {kind: singBoxObject, fields: map[string]string{
+		"type": "string", "tag": "string", "server": "string", "server_port": "number", "detour": "string",
+	}},
+	"dns_tls": {kind: singBoxObject, fields: map[string]string{
+		"enabled": "bool", "server_name": "string",
+	}},
+	"dns_rules": {kind: singBoxArray, element: "dns_rule"},
+	"dns_rule": {kind: singBoxObject, fields: map[string]string{
+		"domain_suffix": "strings", "rule_set": "strings", "action": "string", "server": "string",
+	}},
+	"inbounds": {kind: singBoxArray, element: "inbound"},
+	"inbound":  {kind: singBoxObject, discriminator: "type", variants: map[string]string{"tun": "inbound_tun"}},
+	"inbound_tun": {kind: singBoxObject, fields: map[string]string{
+		"type": "string", "tag": "string", "interface_name": "string", "address": "strings", "auto_route": "bool",
+		"strict_route": "bool", "mtu": "number", "route_exclude_address": "strings",
+	}},
+	"outbounds": {kind: singBoxArray, element: "outbound"},
+	"outbound": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
+		"vless": "outbound_vless", "direct": "outbound_direct", "block": "outbound_block", "socks": "outbound_socks",
+	}},
+	"outbound_vless": {kind: singBoxObject, fields: map[string]string{
+		"type": "string", "tag": "string", "server": "string", "server_port": "number", "uuid": "string", "flow": "string",
+		"tls": "outbound_tls", "transport": "transport", "domain_resolver": "string",
+	}},
+	"outbound_direct": {kind: singBoxObject, fields: map[string]string{
+		"type": "string", "tag": "string", "domain_resolver": "string",
+	}},
+	"outbound_block": {kind: singBoxObject, fields: map[string]string{"type": "string", "tag": "string"}},
+	"outbound_socks": {kind: singBoxObject, required: []string{"server"}, fields: map[string]string{
+		"type": "string", "tag": "string", "server": "loopback_string", "server_port": "number", "version": "string",
+	}},
+	"outbound_tls": {kind: singBoxObject, fields: map[string]string{
+		"enabled": "bool", "server_name": "string", "utls": "utls", "reality": "reality", "fragment": "bool",
+		"fragment_fallback_delay": "string", "record_fragment": "bool", "curve_preferences": "strings",
+	}},
+	"utls": {kind: singBoxObject, fields: map[string]string{"enabled": "bool", "fingerprint": "string"}},
+	"reality": {kind: singBoxObject, fields: map[string]string{
+		"enabled": "bool", "public_key": "string", "short_id": "string",
+	}},
+	"transport": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
+		"tcp": "transport_tcp", "grpc": "transport_grpc",
+	}},
+	"transport_tcp":  {kind: singBoxObject, fields: map[string]string{"type": "string"}},
+	"transport_grpc": {kind: singBoxObject, fields: map[string]string{"type": "string", "service_name": "string"}},
+	"route": {kind: singBoxObject, fields: map[string]string{
+		"auto_detect_interface": "bool", "default_domain_resolver": "default_domain_resolver", "rule_set": "rule_sets",
+		"rules": "route_rules", "final": "string",
+	}},
+	"default_domain_resolver": {kind: singBoxObject, fields: map[string]string{"server": "string", "strategy": "string"}},
+	"rule_sets":               {kind: singBoxArray, element: "rule_set"},
+	"rule_set":                {kind: singBoxObject, discriminator: "type", variants: map[string]string{"inline": "rule_set_inline"}},
+	"rule_set_inline": {kind: singBoxObject, fields: map[string]string{
+		"type": "string", "tag": "string", "rules": "inline_rules",
+	}},
+	"inline_rules": {kind: singBoxArray, element: "inline_rule"},
+	"inline_rule": {kind: singBoxObject, fields: map[string]string{
+		"domain_suffix": "strings", "ip_cidr": "strings",
+	}},
+	"route_rules": {kind: singBoxArray, element: "route_rule"},
+	"route_rule": {kind: singBoxObject, fields: map[string]string{
+		"process_name": "strings", "protocol": "string", "ip_is_private": "bool", "rule_set": "strings", "sniffer": "strings",
+		"timeout": "string", "action": "string", "outbound": "string",
+	}},
+	"strings": {kind: singBoxArray, element: "string"},
+	"string":  {kind: singBoxString},
+	"bool":    {kind: singBoxBool},
+	"number":  {kind: singBoxNumber},
+	"loopback_string": {kind: singBoxString, validate: func(value any) error {
+		address, err := netip.ParseAddr(value.(string))
+		if err != nil || !address.IsLoopback() {
+			return errors.New("must be a loopback IP address")
+		}
+		return nil
+	}},
 }
 
 // validateSingBoxConfig checks a client-supplied sing-box config and returns
@@ -60,57 +172,11 @@ func validateSingBoxConfig(data []byte) ([]byte, error) {
 	if err := requireJSONEOF(decoder); err != nil {
 		return nil, fmt.Errorf("decode sing-box config: %w", err)
 	}
-	if err := rejectSingBoxKeys(root, "$"); err != nil {
+	if root == nil {
+		return nil, errors.New("sing-box $ must be an object")
+	}
+	if err := walkSingBoxSchema(root, "root", "$"); err != nil {
 		return nil, err
-	}
-	allowed := map[string]struct{}{"log": {}, "dns": {}, "inbounds": {}, "outbounds": {}, "route": {}}
-	for key := range root {
-		if _, ok := allowed[strings.ToLower(key)]; !ok {
-			return nil, fmt.Errorf("sing-box top-level key %q is not allowed", key)
-		}
-	}
-	if logValue, ok := lookupFold(root, "log").(map[string]any); ok {
-		if lookupFold(logValue, "output") != nil {
-			return nil, errors.New("sing-box log.output is not allowed")
-		}
-	}
-	if route, ok := lookupFold(root, "route").(map[string]any); ok {
-		if values := lookupFold(route, "rule_set"); values != nil {
-			entries, ok := values.([]any)
-			if !ok {
-				return nil, errors.New("sing-box route.rule_set must be an array")
-			}
-			for _, entry := range entries {
-				object, ok := entry.(map[string]any)
-				if !ok || lookupFold(object, "type") != "inline" {
-					return nil, errors.New("sing-box rule_set entries must have type inline")
-				}
-			}
-		}
-	}
-	if values := lookupFold(root, "inbounds"); values != nil {
-		inbounds, ok := values.([]any)
-		if !ok {
-			return nil, errors.New("sing-box inbounds must be an array")
-		}
-		for _, value := range inbounds {
-			inbound, ok := value.(map[string]any)
-			if !ok {
-				return nil, errors.New("sing-box inbound must be an object")
-			}
-			typeName, _ := lookupFold(inbound, "type").(string)
-			switch typeName {
-			case "tun":
-			case "mixed", "socks", "http":
-				listen, _ := lookupFold(inbound, "listen").(string)
-				addr, err := netip.ParseAddr(listen)
-				if err != nil || !addr.IsLoopback() {
-					return nil, fmt.Errorf("sing-box %s inbound listen must be a loopback IP", typeName)
-				}
-			default:
-				return nil, fmt.Errorf("sing-box inbound type %q is not allowed", typeName)
-			}
-		}
 	}
 	canonical, err := json.Marshal(root)
 	if err != nil {
@@ -119,39 +185,85 @@ func validateSingBoxConfig(data []byte) ([]byte, error) {
 	return canonical, nil
 }
 
-// lookupFold returns the value of key in object ignoring case. Callers rely on
-// rejectSingBoxKeys having refused case-colliding keys, so at most one matches.
-func lookupFold(object map[string]any, key string) any {
-	for name, value := range object {
-		if strings.EqualFold(name, key) {
-			return value
-		}
+func walkSingBoxSchema(value any, schemaName, location string) error {
+	schema, ok := singBoxSchemas[schemaName]
+	if !ok {
+		return fmt.Errorf("internal sing-box schema %q is missing", schemaName)
 	}
-	return nil
-}
-
-func rejectSingBoxKeys(value any, location string) error {
-	switch typed := value.(type) {
-	case map[string]any:
-		seen := make(map[string]string, len(typed))
-		for key, child := range typed {
-			folded := strings.ToLower(key)
-			if previous, dup := seen[folded]; dup {
+	schemaError := func(want string) error {
+		return fmt.Errorf("sing-box %s must be %s", location, want)
+	}
+	switch schema.kind {
+	case singBoxObject:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return schemaError("an object")
+		}
+		folded := make(map[string]string, len(object))
+		for key := range object {
+			canonical := strings.ToLower(key)
+			if previous, exists := folded[canonical]; exists {
 				return fmt.Errorf("sing-box keys %s.%s and %s.%s collide ignoring case", location, previous, location, key)
 			}
-			seen[folded] = key
-			if _, forbidden := forbiddenSingBoxKeys[folded]; forbidden {
-				return fmt.Errorf("sing-box key %s.%s is not allowed", location, key)
+			folded[canonical] = key
+		}
+		if schema.discriminator != "" {
+			actualKey, exists := folded[schema.discriminator]
+			if !exists {
+				return fmt.Errorf("sing-box %s.%s is required", location, schema.discriminator)
 			}
-			if err := rejectSingBoxKeys(child, location+"."+key); err != nil {
+			variantName, ok := object[actualKey].(string)
+			if !ok {
+				return fmt.Errorf("sing-box %s.%s must be a string", location, actualKey)
+			}
+			variant, allowed := schema.variants[variantName]
+			if !allowed {
+				return fmt.Errorf("sing-box %s.%s value %q is not allowed", location, actualKey, variantName)
+			}
+			return walkSingBoxSchema(value, variant, location)
+		}
+		for _, required := range schema.required {
+			if _, exists := folded[required]; !exists {
+				return fmt.Errorf("sing-box %s.%s is required", location, required)
+			}
+		}
+		for canonical, actual := range folded {
+			childSchema, allowed := schema.fields[canonical]
+			if !allowed {
+				return fmt.Errorf("sing-box key %s.%s is not allowed", location, actual)
+			}
+			if err := walkSingBoxSchema(object[actual], childSchema, location+"."+actual); err != nil {
 				return err
 			}
 		}
-	case []any:
-		for index, child := range typed {
-			if err := rejectSingBoxKeys(child, fmt.Sprintf("%s[%d]", location, index)); err != nil {
+	case singBoxArray:
+		array, ok := value.([]any)
+		if !ok {
+			return schemaError("an array")
+		}
+		for index, child := range array {
+			if err := walkSingBoxSchema(child, schema.element, fmt.Sprintf("%s[%d]", location, index)); err != nil {
 				return err
 			}
+		}
+	case singBoxString:
+		if _, ok := value.(string); !ok {
+			return schemaError("a string")
+		}
+	case singBoxBool:
+		if _, ok := value.(bool); !ok {
+			return schemaError("a boolean")
+		}
+	case singBoxNumber:
+		if _, ok := value.(json.Number); !ok {
+			return schemaError("a number")
+		}
+	default:
+		return fmt.Errorf("internal sing-box schema %q has invalid kind", schemaName)
+	}
+	if schema.validate != nil {
+		if err := schema.validate(value); err != nil {
+			return fmt.Errorf("sing-box %s %w", location, err)
 		}
 	}
 	return nil
@@ -424,8 +536,8 @@ func (d *serviceDaemon) handleResolverCleanup() error {
 }
 
 func buildTCPDumpCommand(interfaceName string, filter []string, applePCAPNG bool, username, outputPath string) ([]string, error) {
-	if !interfacePatternVPNCore.MatchString(interfaceName) {
-		return nil, errors.New("tcpdump interface must match [a-z0-9]{1,15}")
+	if interfaceName != "pktap,all" && !interfacePatternVPNCore.MatchString(interfaceName) {
+		return nil, errors.New("tcpdump interface must match [a-z0-9]{1,15} or equal pktap,all")
 	}
 	if len(filter) == 0 || len(filter) > 128 {
 		return nil, errors.New("tcpdump filter must contain 1..128 words")

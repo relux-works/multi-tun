@@ -2,6 +2,7 @@ package vpncore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ const (
 	manifestVersion          = 1
 	launchctlForgetTimeout   = 10 * time.Second
 	launchctlForgetPollDelay = 100 * time.Millisecond
+	stagedToolVersionTimeout = 5 * time.Second
 )
 
 var lowercaseSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -46,6 +48,12 @@ type installPackage struct {
 	tools          []PinnedTool
 }
 
+// InstallPlan is an immutable snapshot of every byte and display field used by
+// one install-digest or install invocation.
+type InstallPlan struct {
+	pkg installPackage
+}
+
 type PinnedTool struct {
 	Name       string
 	Version    string
@@ -61,15 +69,17 @@ var (
 	installNowVPNCore              = time.Now
 	installVerificationDepsVPNCore = productionVerificationDependencies
 	lookPathInstallVPNCore         = exec.LookPath
+	afterStageInstallToolVPNCore   = func(string, string) {}
+	runStagedToolVersionVPNCore    = stagedToolVersion
 )
 
 func InstallDigest(binaryPath string) (string, error) {
-	pkg, err := prepareInstallPackage(binaryPath)
+	plan, err := PrepareInstallPlan(binaryPath)
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(pkg.dir)
-	return pkg.digest, nil
+	defer plan.Close()
+	return plan.Digest(), nil
 }
 
 func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, expectedDigest string) error {
@@ -79,12 +89,58 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 	if cfg.HelperDir == "" {
 		return errors.New("helper directory is required")
 	}
-
-	pkg, err := prepareInstallPackage(binaryPath)
+	plan, err := PrepareInstallPlan(binaryPath)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(pkg.dir)
+	defer plan.Close()
+	return plan.Install(cfg, clientUID, clientGID, expectedDigest)
+}
+
+func PrepareInstallPlan(binaryPath string) (*InstallPlan, error) {
+	pkg, err := prepareInstallPackage(binaryPath)
+	if err != nil {
+		return nil, err
+	}
+	return &InstallPlan{pkg: pkg}, nil
+}
+
+func (p *InstallPlan) Digest() string {
+	if p == nil {
+		return ""
+	}
+	return p.pkg.digest
+}
+
+func (p *InstallPlan) PinnedTools() []PinnedTool {
+	if p == nil {
+		return nil
+	}
+	tools := make([]PinnedTool, len(p.pkg.tools))
+	copy(tools, p.pkg.tools)
+	return tools
+}
+
+func (p *InstallPlan) Close() error {
+	if p == nil || p.pkg.dir == "" {
+		return nil
+	}
+	dir := p.pkg.dir
+	p.pkg.dir = ""
+	return os.RemoveAll(dir)
+}
+
+func (p *InstallPlan) Install(cfg ServiceConfig, clientUID, clientGID int, expectedDigest string) error {
+	if err := validateSHA256("expected install digest", expectedDigest); err != nil {
+		return err
+	}
+	if cfg.HelperDir == "" {
+		return errors.New("helper directory is required")
+	}
+	if p == nil || p.pkg.dir == "" {
+		return errors.New("install plan is closed or missing")
+	}
+	pkg := p.pkg
 	if pkg.digest != expectedDigest {
 		return fmt.Errorf("install digest mismatch: got %s, expected %s", pkg.digest, expectedDigest)
 	}
@@ -222,11 +278,16 @@ func prepareInstallPackage(binaryPath string) (installPackage, error) {
 	if err := copyRegularFile(singBoxPath, stagedSingBox, 0o700); err != nil {
 		return fail(fmt.Errorf("stage sing-box: %w", err))
 	}
+	afterStageInstallToolVPNCore(singBoxPath, stagedSingBox)
 	singBoxSHA, err := hashFile(stagedSingBox)
 	if err != nil {
 		return fail(err)
 	}
-	tools := []PinnedTool{{Name: "sing-box", Version: pinnedToolVersion(singBoxPath, singBoxSHA), SourcePath: singBoxPath, Path: stagedSingBox, SHA256: singBoxSHA}}
+	singBoxVersion, err := runStagedToolVersionVPNCore(stagedSingBox)
+	if err != nil {
+		return fail(err)
+	}
+	tools := []PinnedTool{{Name: "sing-box", Version: singBoxVersion, SourcePath: singBoxPath, Path: stagedSingBox, SHA256: singBoxSHA}}
 	manifest := Manifest{
 		Version: manifestVersion,
 		Files: []ManifestFile{
@@ -268,14 +329,12 @@ func prepareInstallPackage(binaryPath string) (installPackage, error) {
 }
 
 func PinnedToolsForInstall(binaryPath string) ([]PinnedTool, error) {
-	pkg, err := prepareInstallPackage(binaryPath)
+	plan, err := PrepareInstallPlan(binaryPath)
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(pkg.dir)
-	result := make([]PinnedTool, len(pkg.tools))
-	copy(result, pkg.tools)
-	return result, nil
+	defer plan.Close()
+	return plan.PinnedTools(), nil
 }
 
 func ToolDrift(cfg ServiceConfig) ([]string, error) {
@@ -323,14 +382,23 @@ func shortSHA(value string) string {
 	return value[:12]
 }
 
-func pinnedToolVersion(path, sha string) string {
-	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
-	for index := 0; index+2 < len(parts); index++ {
-		if parts[index] == "Cellar" && parts[index+1] != "" && parts[index+2] != "" {
-			return parts[index+2]
-		}
+func stagedToolVersion(path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), stagedToolVersionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "version")
+	cmd.Env = []string{}
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("run staged sing-box version: %w", ctx.Err())
 	}
-	return "sha256:" + shortSHA(sha)
+	if err != nil {
+		return "", fmt.Errorf("run staged sing-box version: %w", err)
+	}
+	version := strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
+	if version == "" {
+		return "", errors.New("run staged sing-box version: empty output")
+	}
+	return version, nil
 }
 
 func copyRegularFile(source, destination string, mode os.FileMode) error {

@@ -10,27 +10,43 @@ import (
 	"testing"
 
 	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/singbox"
-	"multi-tun/desktop/internal/vless/subscription"
 )
 
-func TestSingBoxConfigValidationRejectsFilesystemControllersAndUnsafeInbounds(t *testing.T) {
-	// This negative table proves each forbidden filesystem/control-plane key, remote rule set, and non-loopback proxy inbound is rejected.
+func TestSingBoxConfigValidationRejectsOutsideRendererSchema(t *testing.T) {
+	// This negative table proves executable/file primitives, non-rendered types, non-loopback SOCKS, collisions, and an unknown key at every object position are refused.
 	cases := map[string]string{
-		"experimental":       `{"experimental":{}}`,
-		"log output":         `{"log":{"output":"/tmp/x"}}`,
-		"cache file":         `{"route":{"cache_file":"/tmp/x"}}`,
-		"nested path":        `{"outbounds":[{"type":"direct","nested":{"path":"/tmp/x"}}]}`,
-		"remote rule set":    `{"route":{"rule_set":[{"type":"remote","url":"https://example.test/rules"}]}}`,
-		"non-loopback mixed": `{"inbounds":[{"type":"mixed","listen":"0.0.0.0"}]}`,
-		// sing-box matches keys case-insensitively, so case variants must be refused too.
-		"case log output":     `{"log":{"Output":"/tmp/x"}}`,
-		"case top-level":      `{"Experimental":{}}`,
-		"case nested path":    `{"outbounds":[{"type":"direct","nested":{"PATH":"/tmp/x"}}]}`,
-		"case rule set type":  `{"route":{"rule_set":[{"Type":"remote","url":"https://example.test/r"}]}}`,
-		"case colliding keys": `{"route":{"rule_set":[{"type":"inline","Type":"remote"}]}}`,
-		"case inbound listen": `{"inbounds":[{"type":"mixed","Listen":"0.0.0.0"}]}`,
-		"case top-level dup":  `{"log":{},"LOG":{"output":"/tmp/x"}}`,
+		"tor executable and args": `{"outbounds":[{"type":"tor","executable_path":"/tmp/run-me","extra_args":["--anything"]}]}`,
+		"ssh private key":         `{"outbounds":[{"type":"ssh","private_key_path":"/private/key"}]}`,
+		"tls certificate path":    `{"outbounds":[{"type":"vless","tls":{"certificate_path":"/private/cert"}}]}`,
+		"tls key path":            `{"outbounds":[{"type":"vless","tls":{"key_path":"/private/key"}}]}`,
+		"tls ech config path":     `{"outbounds":[{"type":"vless","tls":{"ech":{"config_path":"/private/ech"}}}]}`,
+		"tls acme data directory": `{"outbounds":[{"type":"vless","tls":{"acme":{"data_directory":"/private/acme"}}}]}`,
+		"non-loopback socks":      `{"outbounds":[{"type":"socks","server":"192.0.2.1"}]}`,
+		"missing socks server":    `{"outbounds":[{"type":"socks"}]}`,
+		"unknown top level":       `{"unknown":true}`,
+		"unknown log":             `{"log":{"unknown":true}}`,
+		"unknown dns":             `{"dns":{"unknown":true}}`,
+		"unknown dns server":      `{"dns":{"servers":[{"type":"local","unknown":true}]}}`,
+		"unknown dns tls":         `{"dns":{"servers":[{"type":"tls","tls":{"unknown":true}}]}}`,
+		"unknown dns rule":        `{"dns":{"rules":[{"unknown":true}]}}`,
+		"unknown inbound":         `{"inbounds":[{"type":"tun","unknown":true}]}`,
+		"unknown outbound":        `{"outbounds":[{"type":"direct","unknown":true}]}`,
+		"unknown vless tls":       `{"outbounds":[{"type":"vless","tls":{"unknown":true}}]}`,
+		"unknown reality":         `{"outbounds":[{"type":"vless","tls":{"reality":{"unknown":true}}}]}`,
+		"unknown utls":            `{"outbounds":[{"type":"vless","tls":{"utls":{"unknown":true}}}]}`,
+		"unknown transport":       `{"outbounds":[{"type":"vless","transport":{"type":"grpc","unknown":true}}]}`,
+		"unknown route":           `{"route":{"unknown":true}}`,
+		"unknown resolver":        `{"route":{"default_domain_resolver":{"unknown":true}}}`,
+		"unknown route rule":      `{"route":{"rules":[{"unknown":true}]}}`,
+		"unknown rule set":        `{"route":{"rule_set":[{"type":"inline","unknown":true}]}}`,
+		"unknown inline rule":     `{"route":{"rule_set":[{"type":"inline","rules":[{"unknown":true}]}]}}`,
+		"remote rule set":         `{"route":{"rule_set":[{"type":"remote","url":"https://example.test/rules"}]}}`,
+		"non-tun inbound":         `{"inbounds":[{"type":"mixed","listen":"127.0.0.1"}]}`,
+		"case unknown":            `{"log":{"Output":"/tmp/x"}}`,
+		"case colliding keys":     `{"route":{"rule_set":[{"type":"inline","Type":"inline"}]}}`,
+		"case top-level dup":      `{"log":{},"LOG":{}}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -41,22 +57,72 @@ func TestSingBoxConfigValidationRejectsFilesystemControllersAndUnsafeInbounds(t 
 	}
 }
 
-func TestSingBoxConfigValidationAcceptsCurrentVLESSRenderer(t *testing.T) {
-	// This positive control proves the current vless-tun renderer fixture remains inside the strict PR B schema.
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "fixtures", "dancevpn.subscription.plain.txt"))
-	if err != nil {
-		t.Fatal(err)
+func TestSingBoxConfigValidationAcceptsEveryRendererVariant(t *testing.T) {
+	// These real-renderer controls prove the positive schema covers both engines, TUN/overlay/routing helpers, tcp/gRPC, TLS/Reality, flow, and process rules.
+	realityTCP := model.Profile{
+		UUID: "00000000-0000-0000-0000-000000000001", Host: "203.0.113.77", Port: 443, Network: "tcp",
+		Security: "reality", SNI: "example.com", Fingerprint: "chrome", PublicKey: "public-key", ShortID: "abcd",
 	}
-	profiles, err := subscription.ParseProfiles(string(raw))
-	if err != nil || len(profiles) == 0 {
-		t.Fatalf("ParseProfiles() profiles=%d error=%v", len(profiles), err)
+	grpcTLS := model.Profile{
+		UUID: "00000000-0000-0000-0000-000000000002", Host: "vpn.example.com", Port: 443, Network: "grpc",
+		ServiceName: "service", Security: "tls", SNI: "vpn.example.com", Fingerprint: "chrome",
 	}
-	data, err := singbox.Render(config.Default(), profiles[0])
-	if err != nil {
-		t.Fatal(err)
+	withFlow := realityTCP
+	withFlow.Flow = "xtls-rprx-vision"
+
+	overlayConfig := config.Default()
+	overlayConfig.Routing.BypassSuffixes = []string{".ru"}
+	overlayConfig.Routing.BypassExcludes = []string{"t.me"}
+	overlayConfig.Routing.Routes = []string{"10.0.0.0/8"}
+	fragment := true
+	overlayConfig.Singbox = &config.SingboxConfig{
+		Sniff: &config.SniffConfig{Enabled: &fragment, Sniffers: []string{"tls"}, Timeout: "1s"},
+		TLS: config.TLSClientConfig{
+			Fragment: &fragment, FragmentFallbackDelay: "250ms", RecordFragment: &fragment, CurvePreferences: []string{"X25519"},
+		},
 	}
-	if _, err := validateSingBoxConfig(data); err != nil {
-		t.Fatalf("validate current rendered config: %v", err)
+	xrayConfig := config.Default()
+	xrayConfig.Engine = &config.EngineConfig{Type: config.EngineXray, Xray: &config.XrayEngineConfig{
+		SocksListen: "127.0.0.1", SocksPort: 21808, ProcessNames: []string{"xray"},
+	}}
+
+	cases := map[string]func() ([]byte, error){
+		"vless tcp reality": func() ([]byte, error) { return singbox.Render(config.Default(), realityTCP) },
+		"vless grpc tls":    func() ([]byte, error) { return singbox.Render(config.Default(), grpcTLS) },
+		"vless flow":        func() ([]byte, error) { return singbox.Render(config.Default(), withFlow) },
+		"overlay and routes": func() ([]byte, error) {
+			return singbox.RenderWithOptions(overlayConfig, realityTCP, singbox.RenderOptions{OverlayDNS: &singbox.OverlayDNS{
+				Domains: []string{"corp.example"}, Nameservers: []string{"10.0.0.53"}, RouteExcludes: []string{"10.0.0.0/8"},
+			}})
+		},
+		"xray frontend": func() ([]byte, error) {
+			return singbox.RenderXrayFrontendWithOptions(xrayConfig, grpcTLS, singbox.RenderOptions{})
+		},
+	}
+	for name, render := range cases {
+		t.Run(name, func(t *testing.T) {
+			data, err := render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := validateSingBoxConfig(data); err != nil {
+				t.Fatalf("validate rendered config: %v\n%s", err, data)
+			}
+		})
+	}
+}
+
+func TestSingBoxSchemaContainsNoFilesystemOrControlPlaneKeys(t *testing.T) {
+	// This schema guard proves future allowed-key additions cannot silently introduce path/file/exec/control-plane primitives.
+	for schemaName, schema := range singBoxSchemas {
+		for key := range schema.fields {
+			lower := strings.ToLower(key)
+			for _, forbidden := range []string{"path", "dir", "file", "executable", "args", "api", "controller", "cache", "output"} {
+				if strings.Contains(lower, forbidden) {
+					t.Fatalf("schema %q allows key %q containing forbidden fragment %q", schemaName, key, forbidden)
+				}
+			}
+		}
 	}
 }
 
@@ -148,11 +214,14 @@ func TestResolverCleanupRemovesOnlyMarkedRegularFiles(t *testing.T) {
 }
 
 func TestTCPDumpCommandValidationAndExactPositiveCommand(t *testing.T) {
-	// This proves shell-bearing interface/filter values and option injection are refused, while the valid argv is fixed and exact.
+	// This proves plain and cisco-dump's pktap,all interfaces are accepted while shell-bearing interface/filter values and option injection are refused.
 	want := []string{"/usr/sbin/tcpdump", "-i", "lo0", "-s", "0", "-U", "--apple-pcapng", "-Z", "alexis", "-w", "/runtime/capture.pcap", "tcp", "and", "host", "127.0.0.1"}
 	got, err := buildTCPDumpCommand("lo0", []string{"tcp", "and", "host", "127.0.0.1"}, true, "alexis", "/runtime/capture.pcap")
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("command=%v error=%v want=%v", got, err, want)
+	}
+	if _, err := buildTCPDumpCommand("pktap,all", []string{"tcp"}, true, "alexis", "/runtime/capture.pcap"); err != nil {
+		t.Fatalf("cisco-dump default interface rejected: %v", err)
 	}
 	for _, tc := range []struct {
 		iface  string

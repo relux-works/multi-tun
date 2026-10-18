@@ -10,15 +10,34 @@ import (
 	"multi-tun/desktop/internal/core/vpncore"
 )
 
-func TestInstallRequiresExpectedDigestAndNoPositionalArguments(t *testing.T) {
-	// This proves missing, malformed, uppercase, and stray install inputs are refused before the install API is called.
-	previous := installServiceVPNCoreCLI
-	called := false
-	installServiceVPNCoreCLI = func(vpncore.ServiceConfig, string, int, int, string) error {
-		called = true
+type fakeInstallPlan struct {
+	digest    string
+	tools     []vpncore.PinnedTool
+	install   func(vpncore.ServiceConfig, int, int, string) error
+	closeCall bool
+}
+
+func (p *fakeInstallPlan) Digest() string { return p.digest }
+func (p *fakeInstallPlan) PinnedTools() []vpncore.PinnedTool {
+	return append([]vpncore.PinnedTool(nil), p.tools...)
+}
+func (p *fakeInstallPlan) Install(cfg vpncore.ServiceConfig, uid, gid int, digest string) error {
+	if p.install == nil {
 		return nil
 	}
-	t.Cleanup(func() { installServiceVPNCoreCLI = previous })
+	return p.install(cfg, uid, gid, digest)
+}
+func (p *fakeInstallPlan) Close() error { p.closeCall = true; return nil }
+
+func TestInstallRequiresExpectedDigestAndNoPositionalArguments(t *testing.T) {
+	// This proves missing, malformed, uppercase, and stray install inputs are refused before an immutable install plan is prepared.
+	previous := prepareInstallPlanVPNCoreCLI
+	called := false
+	prepareInstallPlanVPNCoreCLI = func(string) (installPlanVPNCoreCLI, error) {
+		called = true
+		return &fakeInstallPlan{}, nil
+	}
+	t.Cleanup(func() { prepareInstallPlanVPNCoreCLI = previous })
 
 	cases := [][]string{
 		{"install"},
@@ -33,21 +52,25 @@ func TestInstallRequiresExpectedDigestAndNoPositionalArguments(t *testing.T) {
 		}
 	}
 	if called {
-		t.Fatal("invalid install arguments reached InstallService")
+		t.Fatal("invalid install arguments prepared an install plan")
 	}
 }
 
 func TestInstallDigestPrintsComputedDigest(t *testing.T) {
-	// This proves install-digest emits one lowercase digest and rejects positional ambiguity.
-	previous := installDigestVPNCoreCLI
-	installDigestVPNCoreCLI = func(string) (string, error) { return strings.Repeat("b", 64), nil }
-	t.Cleanup(func() { installDigestVPNCoreCLI = previous })
+	// This proves install-digest emits digest and metadata from one plan, closes it, and rejects positional ambiguity.
+	previous := prepareInstallPlanVPNCoreCLI
+	plan := &fakeInstallPlan{digest: strings.Repeat("b", 64), tools: []vpncore.PinnedTool{{Name: "sing-box", Version: "sing-box version staged", SHA256: strings.Repeat("c", 64), SourcePath: "/path/sing-box"}}}
+	prepareInstallPlanVPNCoreCLI = func(string) (installPlanVPNCoreCLI, error) { return plan, nil }
+	t.Cleanup(func() { prepareInstallPlanVPNCoreCLI = previous })
 	var stdout, stderr bytes.Buffer
 	if code := New(&stdout, &stderr).Run([]string{"install-digest"}); code != 0 {
 		t.Fatalf("install-digest code = %d, stderr=%q", code, stderr.String())
 	}
 	if got := strings.Split(strings.TrimSpace(stdout.String()), "\n")[0]; got != strings.Repeat("b", 64) {
 		t.Fatalf("install-digest first line = %q", got)
+	}
+	if !strings.Contains(stderr.String(), "version=sing-box version staged") || !plan.closeCall {
+		t.Fatalf("install-digest metadata=%q close=%t", stderr.String(), plan.closeCall)
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -57,10 +80,10 @@ func TestInstallDigestPrintsComputedDigest(t *testing.T) {
 }
 
 func TestInstallDigestFailureIsReported(t *testing.T) {
-	// This proves digest computation failures cannot fall through to installation.
-	previous := installDigestVPNCoreCLI
-	installDigestVPNCoreCLI = func(string) (string, error) { return "", errors.New("hash failed") }
-	t.Cleanup(func() { installDigestVPNCoreCLI = previous })
+	// This proves install-plan preparation failures cannot fall through to output or installation.
+	previous := prepareInstallPlanVPNCoreCLI
+	prepareInstallPlanVPNCoreCLI = func(string) (installPlanVPNCoreCLI, error) { return nil, errors.New("hash failed") }
+	t.Cleanup(func() { prepareInstallPlanVPNCoreCLI = previous })
 	var stdout, stderr bytes.Buffer
 	if code := New(&stdout, &stderr).Run([]string{"install-digest"}); code != 1 {
 		t.Fatalf("install-digest code = %d, want 1", code)
@@ -69,12 +92,12 @@ func TestInstallDigestFailureIsReported(t *testing.T) {
 
 func TestInstallRefusesSuccessWhenDaemonRemainsUnreachable(t *testing.T) {
 	// This proves a completed bootstrap is not reported as success when bounded status polling never reaches the daemon, and diagnostics identify its socket and launchd tail.
-	previousInstall := installServiceVPNCoreCLI
+	previousPlan := prepareInstallPlanVPNCoreCLI
 	previousInspect := inspectServiceVPNCoreCLI
 	previousNow := installNowVPNCoreCLI
 	previousSleep := installSleepVPNCoreCLI
 	previousPrint := launchctlPrintVPNCoreCLI
-	installServiceVPNCoreCLI = func(vpncore.ServiceConfig, string, int, int, string) error { return nil }
+	prepareInstallPlanVPNCoreCLI = func(string) (installPlanVPNCoreCLI, error) { return &fakeInstallPlan{}, nil }
 	inspectServiceVPNCoreCLI = func(cfg vpncore.ServiceConfig) (vpncore.ServiceStatus, error) {
 		return vpncore.ServiceStatus{Label: cfg.Label, SocketPath: cfg.SocketPath, PlistPath: cfg.PlistPath}, nil
 	}
@@ -90,7 +113,7 @@ func TestInstallRefusesSuccessWhenDaemonRemainsUnreachable(t *testing.T) {
 	installSleepVPNCoreCLI = func(time.Duration) {}
 	launchctlPrintVPNCoreCLI = func(string) ([]byte, error) { return []byte("line one\nself-verification failed\n"), nil }
 	t.Cleanup(func() {
-		installServiceVPNCoreCLI = previousInstall
+		prepareInstallPlanVPNCoreCLI = previousPlan
 		inspectServiceVPNCoreCLI = previousInspect
 		installNowVPNCoreCLI = previousNow
 		installSleepVPNCoreCLI = previousSleep
@@ -113,22 +136,30 @@ func TestInstallRefusesSuccessWhenDaemonRemainsUnreachable(t *testing.T) {
 }
 
 func TestInstallPrintsSuccessAfterReachableStatus(t *testing.T) {
-	// This positive control proves install still succeeds once bounded polling observes the hardened daemon as reachable.
-	previousInstall := installServiceVPNCoreCLI
+	// This positive control proves install and its success metadata use the same plan once bounded polling observes the hardened daemon as reachable.
+	previousPlan := prepareInstallPlanVPNCoreCLI
 	previousInspect := inspectServiceVPNCoreCLI
-	installServiceVPNCoreCLI = func(vpncore.ServiceConfig, string, int, int, string) error { return nil }
+	installed := false
+	plan := &fakeInstallPlan{
+		tools: []vpncore.PinnedTool{{Name: "sing-box", Version: "same-plan-version", SHA256: strings.Repeat("d", 64), SourcePath: "/same/plan"}},
+		install: func(_ vpncore.ServiceConfig, _, _ int, digest string) error {
+			installed = digest == strings.Repeat("a", 64)
+			return nil
+		},
+	}
+	prepareInstallPlanVPNCoreCLI = func(string) (installPlanVPNCoreCLI, error) { return plan, nil }
 	inspectServiceVPNCoreCLI = func(cfg vpncore.ServiceConfig) (vpncore.ServiceStatus, error) {
 		return vpncore.ServiceStatus{Label: cfg.Label, SocketPath: cfg.SocketPath, PlistPath: cfg.PlistPath, Reachable: true}, nil
 	}
 	t.Cleanup(func() {
-		installServiceVPNCoreCLI = previousInstall
+		prepareInstallPlanVPNCoreCLI = previousPlan
 		inspectServiceVPNCoreCLI = previousInspect
 	})
 	var stdout, stderr bytes.Buffer
 	if code := New(&stdout, &stderr).Run([]string{"install", "--expect-sha256", strings.Repeat("a", 64)}); code != 0 {
 		t.Fatalf("install code = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "installed vpn core") {
+	if !strings.Contains(stdout.String(), "installed vpn core") || !strings.Contains(stdout.String(), "version=same-plan-version") || !installed || !plan.closeCall {
 		t.Fatalf("success output = %q", stdout.String())
 	}
 }
