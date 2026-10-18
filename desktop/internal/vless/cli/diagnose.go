@@ -8,6 +8,7 @@ import (
 
 	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/session"
 	"multi-tun/desktop/internal/vless/subscription"
 )
@@ -106,15 +107,29 @@ func (a *App) runDiagnoseConfig(args []string) int {
 
 	var resolutionLine string
 	var selectorWarning string
-	selectorIsHash := regexp.MustCompile(`^[0-9a-f]{12}$`).MatchString(strings.TrimSpace(selection.Selector))
+	selectorIsHash := regexp.MustCompile(`(?i)^[0-9a-f]{12}$`).MatchString(strings.TrimSpace(selection.Selector))
+	if selectorIsHash {
+		selectorWarning = hashSelectorMigrationWarning(selection.Selector, "")
+	}
 	if selection.Match != nil || selectorIsHash {
 		snapshot, _, err := a.loadStartSnapshot(cfg, true)
 		if err != nil {
+			printSelectorWarning(a.stdout, selectorWarning)
 			fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
 			return 1
 		}
-		resolution, err := resolveProfile(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick)
+		policy, err := probeSelectionPolicy(*configPath, selection.Server, selection.Profile, selection.Match, selection.Pick)
 		if err != nil {
+			printSelectorWarning(a.stdout, selectorWarning)
+			fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
+			return 1
+		}
+		resolution, err := resolveProfileWithPolicy(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick, policy)
+		if err != nil {
+			if selectorIsHash {
+				selectorWarning = hashSelectorMigrationWarning(selection.Selector, commonCandidateCountry(snapshot.Profiles))
+			}
+			printSelectorWarning(a.stdout, selectorWarning)
 			fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
 			return 1
 		}
@@ -123,11 +138,7 @@ func (a *App) runDiagnoseConfig(args []string) int {
 		}
 		if selectorIsHash {
 			country := subscription.CountryCode(resolution.Profile.DisplayName())
-			if country != "" {
-				selectorWarning = fmt.Sprintf("selector %q looks like a rotating content-hash id; use an equivalent stable match such as {\"match\": {\"country\": %q}}", selection.Selector, country)
-			} else {
-				selectorWarning = fmt.Sprintf("selector %q looks like a rotating content-hash id; use a stable match instead (country could not be detected from %q)", selection.Selector, resolution.Profile.DisplayName())
-			}
+			selectorWarning = hashSelectorMigrationWarning(selection.Selector, country)
 		}
 	}
 
@@ -165,6 +176,34 @@ func (a *App) runDiagnoseConfig(args []string) int {
 	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.BypassSuffixes()))
 	printConfiguredLaunch(a.stdout, cfg.LaunchOrDefault())
 	return 0
+}
+
+func hashSelectorMigrationWarning(selector, country string) string {
+	if country != "" {
+		return fmt.Sprintf("selector %q looks like a rotating content-hash id; replace the selector with a stable match block such as {\"match\": {\"country\": %q}}", selector, country)
+	}
+	return fmt.Sprintf("selector %q looks like a rotating content-hash id; replace the selector with a stable match block, for example {\"match\": {\"name_pattern\": \"<stable provider name pattern>\"}}", selector)
+}
+
+func commonCandidateCountry(profiles []model.Profile) string {
+	var common string
+	for _, profile := range profiles {
+		country := subscription.CountryCode(profile.DisplayName())
+		if country == "" {
+			return ""
+		}
+		if common != "" && common != country {
+			return ""
+		}
+		common = country
+	}
+	return common
+}
+
+func printSelectorWarning(out interface{ Write([]byte) (int, error) }, warning string) {
+	if warning != "" {
+		fmt.Fprintf(out, "warning: %s\n", warning)
+	}
 }
 
 func printConfiguredLaunch(out interface{ Write([]byte) (int, error) }, launchCfg config.PrivilegedLaunchConfig) {

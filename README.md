@@ -503,7 +503,7 @@ Stable aliases may match refreshed provider entries by country/name/transport in
 }
 ```
 
-Country detection prefers a flag emoji and otherwise recognizes whole Russian or English country names. A `match` may combine `country`, RE2 `name_pattern`, case-insensitive `exclude` substrings, and `transport` (`tcp` or `grpc`). `pick` is `only` by default, `first` follows subscription order, and `probe` selects the fastest successful endpoint. `match` and `selector` are mutually exclusive.
+Country detection prefers a flag emoji and otherwise recognizes whole Russian or English country names. A `match` may combine `country`, RE2 `name_pattern`, case-insensitive `exclude` substrings, and `transport` (`tcp` or `grpc`). `pick` is `only` by default, `first` follows subscription order, and `probe` selects the fastest successful endpoint with subscription order breaking equal-duration ties. While any configured VLESS session is running, probing is skipped: the persisted resolution for the same server/alias stays sticky when it is still a match, otherwise the first match is used. `match` and `selector` are mutually exclusive.
 
 If the configured profile alias no longer matches any profile in the refreshed subscription, `start` fails before rendering or starting the tunnel and prints the available profiles. Successful match resolution is printed as `resolved: <server>/<alias> -> <provider display name> (<id>) via <reason>`, saved in session metadata/logs, and shown by `status`.
 
@@ -578,6 +578,8 @@ Shows the current local view of the tunnel state:
 
 This is a heuristic runtime status, not a control plane.
 
+By default, `status` reads only persisted session metadata and the cached subscription snapshot; it does not fetch or probe. Use `--refresh` to fetch explicitly. Candidate probing then runs only when no configured VLESS session is active.
+
 ### `vless-tun diagnose`
 
 `vless-tun diagnose` is a tunnel/runtime diagnostic. It scans configured session cache directories and reports recorded session state plus launch backend readiness. When the effective launch backend resolves to `helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket, daemon PID, redacted active/queued request metadata, and the last-completed request summary.
@@ -590,7 +592,7 @@ Stops the currently recorded `vless-tun` session using `SIGTERM` by default. For
 
 ### `vless-tun render`
 
-Refreshes and resolves the selected profile by default (with the same transient-error cache fallback as start/reconnect) and writes runtime JSON config with:
+Resolves the selected profile from the cached subscription by default and writes runtime JSON config with the following content. Use `--refresh` to fetch explicitly before rendering.
 
 - a TUN inbound
 - proxy detour for the rest of the traffic

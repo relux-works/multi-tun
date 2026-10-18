@@ -16,6 +16,7 @@ import (
 )
 
 var currentSessionStateStatus = currentSessionState
+var interfaceStateStatus = interfaceState
 
 func (a *App) runStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
@@ -53,21 +54,21 @@ func (a *App) runStatus(args []string) int {
 		return 1
 	}
 
+	launchCfg := cfg.LaunchOrDefault()
+	current, currentState, sessionAlive, sessionErr := currentSessionStateStatus(cfg.CacheDir, launchCfg)
 	var snapshot subscription.CacheSnapshot
 	var snapshotErr error
-	if selection.Match != nil {
+	if *refresh {
 		snapshot, _, snapshotErr = a.loadStartSnapshot(cfg, true)
 	} else {
-		snapshot, snapshotErr = a.loadSnapshot(cfg, *refresh)
+		snapshot, snapshotErr = subscription.LoadCache(cfg.CacheDir)
 	}
-	launchCfg := cfg.LaunchOrDefault()
-	current, currentState, sessionAlive, sessionErr := currentSessionState(cfg.CacheDir, launchCfg)
 	mode := cfg.NetworkMode()
 	interfacePresent := false
 	var interfaceAddrs []string
 	var interfaceErr error
 	if mode == config.RenderModeTun {
-		interfacePresent, interfaceAddrs, interfaceErr = interfaceState(cfg.TunInterfaceName())
+		interfacePresent, interfaceAddrs, interfaceErr = interfaceStateStatus(cfg.TunInterfaceName())
 	}
 
 	connection := deriveConnectionStatus(sessionAlive, interfacePresent)
@@ -166,7 +167,16 @@ func (a *App) runStatus(args []string) int {
 		return 0
 	}
 
-	resolution, err := resolveProfile(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick)
+	policy, policyErr := probeSelectionPolicy(*configPath, selection.Server, selection.Profile, selection.Match, selection.Pick)
+	if policyErr != nil {
+		fmt.Fprintf(a.stdout, "selected_profile: unresolved (%v)\n", policyErr)
+		return 0
+	}
+	if !*refresh && selection.Match != nil && strings.EqualFold(strings.TrimSpace(selection.Pick), "probe") && !policy.skipProbe {
+		policy.skipProbe = true
+		policy.skipReason = "probe skipped without --refresh"
+	}
+	resolution, err := resolveProfileWithPolicy(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick, policy)
 	if err != nil {
 		fmt.Fprintf(a.stdout, "selected_profile: unresolved (%v)\n", err)
 	} else {

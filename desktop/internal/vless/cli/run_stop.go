@@ -50,6 +50,7 @@ var stopCurrentSessionFunc = stopCurrentSession
 var startSessionFunc = session.Start
 var lookPathFunc = exec.LookPath
 var profileProbeDialContext = (&net.Dialer{}).DialContext
+var currentSessionStateForSelection = currentSessionState
 
 // preflightReplacement checks what session start needs and can be verified
 // without touching the network or the running tunnel, so reconnect fails
@@ -386,7 +387,11 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		return preparedStart{}, err
 	}
 
-	resolution, err := resolveProfile(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options.match, options.pick)
+	policy, err := probeSelectionPolicy(options.configPath, options.serverName, options.configProfile, options.match, options.pick)
+	if err != nil {
+		return preparedStart{}, err
+	}
+	resolution, err := resolveProfileWithPolicy(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options.match, options.pick, policy)
 	if err != nil {
 		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options, refreshed)
 	}
@@ -487,16 +492,52 @@ func subscriptionMatch(match *config.ProfileMatch) *subscription.ProfileMatch {
 	}
 }
 
-func resolveProfile(profiles []model.Profile, selector, transport string, match *config.ProfileMatch, pick string) (subscription.ProfileResolution, error) {
+type profileSelectionPolicy struct {
+	skipProbe  bool
+	stickyID   string
+	skipReason string
+}
+
+func resolveProfileWithPolicy(profiles []model.Profile, selector, transport string, match *config.ProfileMatch, pick string, policy profileSelectionPolicy) (subscription.ProfileResolution, error) {
 	return subscription.ResolveProfileWithOptions(profiles, subscription.SelectOptions{
-		Selector:  selector,
-		Transport: transport,
-		Match:     subscriptionMatch(match),
-		Pick:      pick,
+		Selector:   selector,
+		Transport:  transport,
+		Match:      subscriptionMatch(match),
+		Pick:       pick,
+		SkipProbe:  policy.skipProbe,
+		StickyID:   policy.stickyID,
+		SkipReason: policy.skipReason,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return profileProbeDialContext(ctx, network, address)
 		},
 	})
+}
+
+func probeSelectionPolicy(configPath, serverName, alias string, match *config.ProfileMatch, pick string) (profileSelectionPolicy, error) {
+	if match == nil || !strings.EqualFold(strings.TrimSpace(pick), "probe") {
+		return profileSelectionPolicy{}, nil
+	}
+	targets, err := sessionTargetsForConfig(configPath, "")
+	if err != nil {
+		return profileSelectionPolicy{}, err
+	}
+
+	policy := profileSelectionPolicy{}
+	for _, target := range targets {
+		current, _, alive, err := currentSessionStateForSelection(target.cacheDir, target.launch)
+		if err != nil {
+			return profileSelectionPolicy{}, fmt.Errorf("inspect running vless-tun session in %s: %w", target.cacheDir, err)
+		}
+		if !alive {
+			continue
+		}
+		policy.skipProbe = true
+		policy.skipReason = "probe skipped while a tunnel is up"
+		if current != nil && current.ResolvedServer == serverName && current.ResolvedAlias == alias {
+			policy.stickyID = current.ResolvedProfileID
+		}
+	}
+	return policy, nil
 }
 
 func printProfileResolution(out io.Writer, prepared preparedStart) {

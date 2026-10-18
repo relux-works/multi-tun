@@ -281,7 +281,7 @@ func (a *App) runRender(args []string) int {
 	profileSelector := fs.String("selector", "", "Subscription profile selector by id, name, endpoint, transport, or substring")
 	transport := fs.String("transport", "", "Subscription profile transport: tcp or grpc")
 	outputPath := fs.String("output", "", "Override render.output_path")
-	refresh := fs.Bool("refresh", true, "Fetch subscription before rendering")
+	refresh := fs.Bool("refresh", false, "Fetch subscription before rendering")
 
 	if err := fs.Parse(args); err != nil {
 		return 2

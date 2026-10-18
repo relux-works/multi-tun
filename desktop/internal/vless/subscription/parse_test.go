@@ -106,6 +106,32 @@ func TestResolveProfileMatchProbeChoosesFastestReachable(t *testing.T) {
 	}
 }
 
+// Equal probe durations choose the earlier subscription entry deterministically across repeated concurrent runs.
+func TestResolveProfileMatchProbeBreaksDurationTiesBySubscriptionOrder(t *testing.T) {
+	profiles := []model.Profile{
+		{ID: "first", Name: "🇺🇸 USA first", Host: "203.0.113.1", Port: 443},
+		{ID: "second", Name: "🇺🇸 USA second", Host: "203.0.113.2", Port: 443},
+	}
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}
+	fixedNow := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
+	for run := 0; run < 200; run++ {
+		resolution, err := ResolveProfileWithOptions(profiles, SelectOptions{
+			Match:       &ProfileMatch{Country: "US"},
+			Pick:        "probe",
+			DialContext: dial,
+			ProbeNow:    func() time.Time { return fixedNow },
+		})
+		if err != nil || resolution.Profile.ID != "first" {
+			t.Fatalf("run %d resolution = %+v, error = %v, want first", run, resolution, err)
+		}
+	}
+}
+
 // pick=probe reports every matched candidate when all injected dials are unreachable.
 func TestResolveProfileMatchProbeRejectsAllUnreachable(t *testing.T) {
 	profiles := []model.Profile{

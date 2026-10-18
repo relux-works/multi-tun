@@ -147,6 +147,10 @@ type SelectOptions struct {
 	Pick        string
 	DialContext func(context.Context, string, string) (net.Conn, error)
 	ProbeBudget time.Duration
+	ProbeNow    func() time.Time
+	SkipProbe   bool
+	StickyID    string
+	SkipReason  string
 }
 
 type ProfileMatch struct {
@@ -234,6 +238,20 @@ func resolveMatchedProfile(profiles []model.Profile, options SelectOptions) (Pro
 	case "first":
 		return ProfileResolution{Profile: candidates[0], Reason: "match " + criteria + "; pick=first", Matched: true}, nil
 	case "probe":
+		if options.SkipProbe {
+			if stickyID := strings.TrimSpace(options.StickyID); stickyID != "" {
+				for _, candidate := range candidates {
+					if candidate.ID == stickyID {
+						return ProfileResolution{Profile: candidate, Reason: "match " + criteria + "; pick reason: sticky, tunnel up", Matched: true}, nil
+					}
+				}
+			}
+			reason := strings.TrimSpace(options.SkipReason)
+			if reason == "" {
+				reason = "probe skipped"
+			}
+			return ProfileResolution{Profile: candidates[0], Reason: "match " + criteria + "; pick reason: first, " + reason, Matched: true}, nil
+		}
 		profile, err := probeProfiles(candidates, options)
 		if err != nil {
 			return ProfileResolution{}, fmt.Errorf("match %s; pick=probe: %w; candidates: %s", criteria, err, describeCandidates(candidates))
@@ -286,34 +304,50 @@ func probeProfiles(candidates []model.Profile, options SelectOptions) (model.Pro
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
+	now := options.ProbeNow
+	if now == nil {
+		now = time.Now
+	}
 
 	type result struct {
-		profile model.Profile
-		err     error
+		index    int
+		profile  model.Profile
+		duration time.Duration
+		err      error
 	}
 	results := make(chan result, len(candidates))
-	for _, candidate := range candidates {
+	for index, candidate := range candidates {
+		index := index
 		candidate := candidate
 		go func() {
 			address := net.JoinHostPort(candidate.Host, strconv.Itoa(candidate.Port))
+			startedAt := now()
 			connection, err := dial(ctx, "tcp", address)
+			duration := now().Sub(startedAt)
 			if connection != nil {
 				_ = connection.Close()
 			}
-			results <- result{profile: candidate, err: err}
+			results <- result{index: index, profile: candidate, duration: duration, err: err}
 		}()
 	}
 
-	for range candidates {
+	var best *result
+	for completed := 0; completed < len(candidates); completed++ {
 		select {
-		case result := <-results:
-			if result.err == nil {
-				cancel()
-				return result.profile, nil
+		case candidateResult := <-results:
+			if candidateResult.err == nil && (best == nil || candidateResult.duration < best.duration || (candidateResult.duration == best.duration && candidateResult.index < best.index)) {
+				selected := candidateResult
+				best = &selected
 			}
 		case <-ctx.Done():
+			if best != nil {
+				return best.profile, nil
+			}
 			return model.Profile{}, errors.New("no candidate was reachable within 2s total budget")
 		}
+	}
+	if best != nil {
+		return best.profile, nil
 	}
 	return model.Profile{}, errors.New("no candidate was reachable within 2s total budget")
 }

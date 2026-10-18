@@ -10,6 +10,7 @@ import (
 
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/session"
+	"multi-tun/desktop/internal/vless/subscription"
 )
 
 func TestStartAlias_UsesStartFailurePrefix(t *testing.T) {
@@ -26,6 +27,28 @@ func TestStartAlias_UsesStartFailurePrefix(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "start failed:") {
 		t.Fatalf("stderr = %q, want start failure prefix", stderr.String())
+	}
+}
+
+// Render uses an existing subscription cache by default and fetches only when --refresh is explicit.
+func TestRenderDefaultsToCachedSnapshot(t *testing.T) {
+	configPath, cacheDir := writeReconnectConfig(t, "us-east")
+	seedReconnectCache(t, cacheDir)
+	previousRefresh := refreshSourceFunc
+	fetches := 0
+	refreshSourceFunc = func(config.ProjectConfig) (subscription.CacheSnapshot, error) {
+		fetches++
+		return subscription.CacheSnapshot{}, os.ErrPermission
+	}
+	t.Cleanup(func() { refreshSourceFunc = previousRefresh })
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"render", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if fetches != 0 {
+		t.Fatalf("fetches = %d, want zero", fetches)
 	}
 }
 

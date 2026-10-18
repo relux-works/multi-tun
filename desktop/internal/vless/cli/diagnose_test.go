@@ -51,7 +51,7 @@ func TestVPNCoreDiagnosticsPrintRequestSnapshot(t *testing.T) {
 	}
 }
 
-// Diagnose warns for an exact lowercase content-hash selector with a country match replacement, while a name selector is the positive no-warning control.
+// Diagnose warns for case-insensitive hash selectors even when stale, while a name selector remains the no-warning control.
 func TestDiagnoseConfigWarnsOnlyForHashLikeSelector(t *testing.T) {
 	const source = "vless://00000000-0000-0000-0000-000000000003@us.example.com:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=us.example.com&sid=1#USA"
 	profile, err := subscription.ParseVLESSURI(source)
@@ -78,6 +78,31 @@ func TestDiagnoseConfigWarnsOnlyForHashLikeSelector(t *testing.T) {
 			if !strings.Contains(stdout.String(), want) {
 				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 			}
+		}
+	})
+
+	t.Run("stale uppercase hash selector", func(t *testing.T) {
+		path, _ := writeReconnectConfig(t, "ABCDEF123456")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile() error = %v", err)
+		}
+		raw = []byte(strings.Replace(string(raw), "#us-east\"", "#USA\"", 1))
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		var stdout, stderr bytes.Buffer
+		exitCode := New(&stdout, &stderr).Run([]string{"diagnose", "config", "--config", path})
+		if exitCode != 1 {
+			t.Fatalf("exitCode = %d, want 1; stderr=%q", exitCode, stderr.String())
+		}
+		for _, want := range []string{"warning:", "stable match block", `"country": "US"`} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+			}
+		}
+		if !strings.Contains(stderr.String(), "did not match") {
+			t.Fatalf("stderr = %q, want stale selector failure", stderr.String())
 		}
 	})
 

@@ -1,12 +1,18 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/session"
+	"multi-tun/desktop/internal/vless/subscription"
 )
 
 func TestDeriveConnectionStatus(t *testing.T) {
@@ -167,4 +173,72 @@ func TestFormatSessionResolutionShowsStableAliasMapping(t *testing.T) {
 	if got := formatSessionResolution(current); got != want {
 		t.Fatalf("formatSessionResolution() = %q, want %q", got, want)
 	}
+}
+
+// Default status reads cached selection and persisted state without fetching or dialing any candidate.
+func TestStatusDefaultUsesCacheWithoutFetchOrProbe(t *testing.T) {
+	configPath, cacheDir, _, _ := writeProbeSelectionConfig(t)
+	var fetches atomic.Int32
+	var dials atomic.Int32
+	installStatusNetworkSeams(t, cacheDir, &fetches, &dials)
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"status", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if fetches.Load() != 0 || dials.Load() != 0 {
+		t.Fatalf("fetches=%d dials=%d, want zero network calls", fetches.Load(), dials.Load())
+	}
+	if !strings.Contains(stdout.String(), "selected_profile:") {
+		t.Fatalf("stdout = %q, want cached selected profile", stdout.String())
+	}
+}
+
+// Explicit --refresh fetches once and permits probing when no tunnel is active.
+func TestStatusRefreshFetchesAndProbesWithoutRunningTunnel(t *testing.T) {
+	configPath, cacheDir, _, _ := writeProbeSelectionConfig(t)
+	var fetches atomic.Int32
+	var dials atomic.Int32
+	installStatusNetworkSeams(t, cacheDir, &fetches, &dials)
+
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run([]string{"status", "--config", configPath, "--refresh"})
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if fetches.Load() != 1 || dials.Load() != 2 {
+		t.Fatalf("fetches=%d dials=%d, want one fetch and two candidate probes", fetches.Load(), dials.Load())
+	}
+}
+
+func installStatusNetworkSeams(t *testing.T, cacheDir string, fetches, dials *atomic.Int32) {
+	t.Helper()
+	previousRefresh := refreshSourceFunc
+	previousDial := profileProbeDialContext
+	previousState := currentSessionStateStatus
+	previousSelectionState := currentSessionStateForSelection
+	previousInterface := interfaceStateStatus
+	refreshSourceFunc = func(config.ProjectConfig) (subscription.CacheSnapshot, error) {
+		fetches.Add(1)
+		return subscription.LoadCache(cacheDir)
+	}
+	profileProbeDialContext = func(context.Context, string, string) (net.Conn, error) {
+		dials.Add(1)
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}
+	currentSessionStateStatus = func(string, config.PrivilegedLaunchConfig) (*session.CurrentSession, string, bool, error) {
+		return nil, "none", false, nil
+	}
+	currentSessionStateForSelection = currentSessionStateStatus
+	interfaceStateStatus = func(string) (bool, []string, error) { return false, nil, nil }
+	t.Cleanup(func() {
+		refreshSourceFunc = previousRefresh
+		profileProbeDialContext = previousDial
+		currentSessionStateStatus = previousState
+		currentSessionStateForSelection = previousSelectionState
+		interfaceStateStatus = previousInterface
+	})
 }
