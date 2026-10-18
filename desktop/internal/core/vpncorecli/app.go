@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,7 +185,9 @@ func printPinnedTools(out io.Writer, tools []vpncore.PinnedTool) {
 		if len(hash) > 12 {
 			hash = hash[:12]
 		}
-		fmt.Fprintf(out, "pinned: %s sha256=%s size=%d source=%s\n", tool.Name, hash, tool.Size, tool.SourcePath)
+		// SourcePath comes from PATH resolution, which the user controls; quote
+		// it so control bytes cannot reach the operator's terminal.
+		fmt.Fprintf(out, "pinned: %s sha256=%s size=%d source=%s\n", tool.Name, hash, tool.Size, strconv.QuoteToASCII(tool.SourcePath))
 	}
 	fmt.Fprintln(out, "note: after a Homebrew upgrade of sing-box (or openconnect, from PR C) rerun vpn-core install-digest / install to pin the new binary")
 }
@@ -241,7 +244,7 @@ func (a *App) runStatus(args []string) int {
 	}
 	drift, err := toolDriftVPNCoreCLI(vpncore.DefaultServiceConfig())
 	if err != nil {
-		fmt.Fprintf(a.stderr, "status drift check failed: %v\n", err)
+		fmt.Fprintf(a.stderr, "status drift check failed: %s\n", strconv.QuoteToASCII(err.Error()))
 		return 1
 	}
 	for _, line := range drift {

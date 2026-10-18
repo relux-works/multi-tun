@@ -163,3 +163,24 @@ func TestInstallPrintsSuccessAfterReachableStatus(t *testing.T) {
 		t.Fatalf("success output = %q", stdout.String())
 	}
 }
+
+// A PATH-resolved source path carrying terminal control bytes is printed
+// escaped, so install-digest output cannot clear or rewrite the operator's
+// screen; the path itself stays identifiable.
+func TestInstallDigestEscapesControlBytesInSourcePath(t *testing.T) {
+	previous := prepareInstallPlanVPNCoreCLI
+	plan := &fakeInstallPlan{digest: strings.Repeat("b", 64), tools: []vpncore.PinnedTool{{Name: "sing-box", Size: 1, SHA256: strings.Repeat("c", 64), SourcePath: "/tmp/evil\x1b[2J/sing-box"}}}
+	prepareInstallPlanVPNCoreCLI = func(string) (installPlanVPNCoreCLI, error) { return plan, nil }
+	t.Cleanup(func() { prepareInstallPlanVPNCoreCLI = previous })
+	var stdout, stderr bytes.Buffer
+	if code := New(&stdout, &stderr).Run([]string{"install-digest"}); code != 0 {
+		t.Fatalf("install-digest code = %d, stderr=%q", code, stderr.String())
+	}
+	all := stdout.String() + stderr.String()
+	if strings.ContainsRune(all, '\x1b') {
+		t.Fatalf("output contains a raw ESC byte: %q", all)
+	}
+	if !strings.Contains(all, `evil\x1b[2J`) {
+		t.Fatalf("output = %q, want the escaped source path", all)
+	}
+}
