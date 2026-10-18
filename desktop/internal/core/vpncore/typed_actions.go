@@ -117,9 +117,8 @@ var singBoxSchemas = map[string]singBoxSchemaNode{
 		"enabled": "bool", "public_key": "string", "short_id": "string",
 	}},
 	"transport": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
-		"tcp": "transport_tcp", "grpc": "transport_grpc",
+		"grpc": "transport_grpc",
 	}},
-	"transport_tcp":  {kind: singBoxObject, fields: map[string]string{"type": "string"}},
 	"transport_grpc": {kind: singBoxObject, fields: map[string]string{"type": "string", "service_name": "string"}},
 	"route": {kind: singBoxObject, fields: map[string]string{
 		"auto_detect_interface": "bool", "default_domain_resolver": "default_domain_resolver", "rule_set": "rule_sets",

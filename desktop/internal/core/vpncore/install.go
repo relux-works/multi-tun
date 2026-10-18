@@ -2,7 +2,6 @@ package vpncore
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,7 +20,6 @@ const (
 	manifestVersion          = 1
 	launchctlForgetTimeout   = 10 * time.Second
 	launchctlForgetPollDelay = 100 * time.Millisecond
-	stagedToolVersionTimeout = 5 * time.Second
 )
 
 var lowercaseSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -56,7 +54,7 @@ type InstallPlan struct {
 
 type PinnedTool struct {
 	Name       string
-	Version    string
+	Size       int64
 	SourcePath string
 	Path       string
 	SHA256     string
@@ -70,7 +68,6 @@ var (
 	installVerificationDepsVPNCore = productionVerificationDependencies
 	lookPathInstallVPNCore         = exec.LookPath
 	afterStageInstallToolVPNCore   = func(string, string) {}
-	runStagedToolVersionVPNCore    = stagedToolVersion
 )
 
 func InstallDigest(binaryPath string) (string, error) {
@@ -283,11 +280,14 @@ func prepareInstallPackage(binaryPath string) (installPackage, error) {
 	if err != nil {
 		return fail(err)
 	}
-	singBoxVersion, err := runStagedToolVersionVPNCore(stagedSingBox)
+	// The staged tool is identified by content hash and size only: it is
+	// never executed here, because PATH-selected bytes must not run before
+	// the operator has approved their digest.
+	singBoxInfo, err := os.Stat(stagedSingBox)
 	if err != nil {
 		return fail(err)
 	}
-	tools := []PinnedTool{{Name: "sing-box", Version: singBoxVersion, SourcePath: singBoxPath, Path: stagedSingBox, SHA256: singBoxSHA}}
+	tools := []PinnedTool{{Name: "sing-box", Size: singBoxInfo.Size(), SourcePath: singBoxPath, Path: stagedSingBox, SHA256: singBoxSHA}}
 	manifest := Manifest{
 		Version: manifestVersion,
 		Files: []ManifestFile{
@@ -380,25 +380,6 @@ func shortSHA(value string) string {
 		return value
 	}
 	return value[:12]
-}
-
-func stagedToolVersion(path string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), stagedToolVersionTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "version")
-	cmd.Env = []string{}
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		return "", fmt.Errorf("run staged sing-box version: %w", ctx.Err())
-	}
-	if err != nil {
-		return "", fmt.Errorf("run staged sing-box version: %w", err)
-	}
-	version := strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
-	if version == "" {
-		return "", errors.New("run staged sing-box version: empty output")
-	}
-	return version, nil
 }
 
 func copyRegularFile(source, destination string, mode os.FileMode) error {

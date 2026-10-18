@@ -272,3 +272,18 @@ func TestSingBoxConfigValidationWritesCanonicalTree(t *testing.T) {
 		t.Fatalf("canonical config = %s, lost the effective value", canonical)
 	}
 }
+
+// The renderer expresses TCP by omitting transport, so an explicit tcp
+// transport object is outside the renderer-derived schema and is refused,
+// while the grpc transport the renderer emits stays accepted.
+func TestSingBoxSchemaRefusesUnrenderedTCPTransport(t *testing.T) {
+	base := func(transport string) []byte {
+		return []byte(`{"outbounds":[{"type":"vless","tag":"proxy","server":"203.0.113.1","server_port":443,"uuid":"00000000-0000-0000-0000-000000000001","transport":` + transport + `}]}`)
+	}
+	if _, err := validateSingBoxConfig(base(`{"type":"tcp"}`)); err == nil {
+		t.Fatal("validateSingBoxConfig(tcp transport) error = nil, want refusal")
+	}
+	if _, err := validateSingBoxConfig(base(`{"type":"grpc","service_name":"svc"}`)); err != nil {
+		t.Fatalf("validateSingBoxConfig(grpc transport) error = %v, want accepted", err)
+	}
+}

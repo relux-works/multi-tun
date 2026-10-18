@@ -184,7 +184,7 @@ func printPinnedTools(out io.Writer, tools []vpncore.PinnedTool) {
 		if len(hash) > 12 {
 			hash = hash[:12]
 		}
-		fmt.Fprintf(out, "pinned: %s version=%s sha256=%s source=%s\n", tool.Name, tool.Version, hash, tool.SourcePath)
+		fmt.Fprintf(out, "pinned: %s sha256=%s size=%d source=%s\n", tool.Name, hash, tool.Size, tool.SourcePath)
 	}
 	fmt.Fprintln(out, "note: after a Homebrew upgrade of sing-box (or openconnect, from PR C) rerun vpn-core install-digest / install to pin the new binary")
 }

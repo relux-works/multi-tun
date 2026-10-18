@@ -59,7 +59,7 @@ func TestInstallRequiresExpectedDigestAndNoPositionalArguments(t *testing.T) {
 func TestInstallDigestPrintsComputedDigest(t *testing.T) {
 	// This proves install-digest emits digest and metadata from one plan, closes it, and rejects positional ambiguity.
 	previous := prepareInstallPlanVPNCoreCLI
-	plan := &fakeInstallPlan{digest: strings.Repeat("b", 64), tools: []vpncore.PinnedTool{{Name: "sing-box", Version: "sing-box version staged", SHA256: strings.Repeat("c", 64), SourcePath: "/path/sing-box"}}}
+	plan := &fakeInstallPlan{digest: strings.Repeat("b", 64), tools: []vpncore.PinnedTool{{Name: "sing-box", Size: 4242, SHA256: strings.Repeat("c", 64), SourcePath: "/path/sing-box"}}}
 	prepareInstallPlanVPNCoreCLI = func(string) (installPlanVPNCoreCLI, error) { return plan, nil }
 	t.Cleanup(func() { prepareInstallPlanVPNCoreCLI = previous })
 	var stdout, stderr bytes.Buffer
@@ -69,7 +69,7 @@ func TestInstallDigestPrintsComputedDigest(t *testing.T) {
 	if got := strings.Split(strings.TrimSpace(stdout.String()), "\n")[0]; got != strings.Repeat("b", 64) {
 		t.Fatalf("install-digest first line = %q", got)
 	}
-	if !strings.Contains(stderr.String(), "version=sing-box version staged") || !plan.closeCall {
+	if !strings.Contains(stderr.String(), "size=4242") || !plan.closeCall {
 		t.Fatalf("install-digest metadata=%q close=%t", stderr.String(), plan.closeCall)
 	}
 	stdout.Reset()
@@ -141,7 +141,7 @@ func TestInstallPrintsSuccessAfterReachableStatus(t *testing.T) {
 	previousInspect := inspectServiceVPNCoreCLI
 	installed := false
 	plan := &fakeInstallPlan{
-		tools: []vpncore.PinnedTool{{Name: "sing-box", Version: "same-plan-version", SHA256: strings.Repeat("d", 64), SourcePath: "/same/plan"}},
+		tools: []vpncore.PinnedTool{{Name: "sing-box", Size: 777, SHA256: strings.Repeat("d", 64), SourcePath: "/same/plan"}},
 		install: func(_ vpncore.ServiceConfig, _, _ int, digest string) error {
 			installed = digest == strings.Repeat("a", 64)
 			return nil
@@ -159,7 +159,7 @@ func TestInstallPrintsSuccessAfterReachableStatus(t *testing.T) {
 	if code := New(&stdout, &stderr).Run([]string{"install", "--expect-sha256", strings.Repeat("a", 64)}); code != 0 {
 		t.Fatalf("install code = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "installed vpn core") || !strings.Contains(stdout.String(), "version=same-plan-version") || !installed || !plan.closeCall {
+	if !strings.Contains(stdout.String(), "installed vpn core") || !strings.Contains(stdout.String(), "size=777") || !installed || !plan.closeCall {
 		t.Fatalf("success output = %q", stdout.String())
 	}
 }
