@@ -1,6 +1,7 @@
 package vpncore
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,11 +9,14 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
 	rpcDialTimeoutVPNCore            = 2 * time.Second
 	rpcTimeoutSnapshotTimeoutVPNCore = 750 * time.Millisecond
+	maxRequestBytesVPNCore           = 1 << 20
 )
 
 var rpcResponseTimeoutVPNCore = 5 * time.Second
@@ -21,7 +25,6 @@ type Request struct {
 	Action      string   `json:"action"`
 	Command     []string `json:"command,omitempty"`
 	Stdin       string   `json:"stdin,omitempty"`
-	LogPath     string   `json:"log_path,omitempty"`
 	LogMaxLines int      `json:"log_max_lines,omitempty"`
 	PID         int      `json:"pid,omitempty"`
 	Signal      string   `json:"signal,omitempty"`
@@ -38,25 +41,55 @@ type Response struct {
 }
 
 func call(cfg ServiceConfig, request Request) (Response, error) {
-	return callWithTimeout(cfg, request, rpcResponseTimeoutVPNCore)
+	return callWithTimeoutAndLog(cfg, request, rpcResponseTimeoutVPNCore, nil)
 }
 
 func callWithTimeout(cfg ServiceConfig, request Request, timeout time.Duration) (Response, error) {
+	return callWithTimeoutAndLog(cfg, request, timeout, nil)
+}
+
+func callWithTimeoutAndLog(cfg ServiceConfig, request Request, timeout time.Duration, logFile *os.File) (Response, error) {
 	if timeout <= 0 {
 		timeout = rpcResponseTimeoutVPNCore
 	}
 	dialTimeout := minDuration(rpcDialTimeoutVPNCore, timeout)
-	conn, err := net.DialTimeout("unix", cfg.SocketPath, dialTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", cfg.SocketPath)
 	if err != nil {
 		return Response{}, err
 	}
 	defer conn.Close()
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return Response{}, errors.New("vpn core socket is not a unix connection")
+	}
 
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return Response{}, err
 	}
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
+	payload, err := json.Marshal(request)
+	if err != nil {
 		return Response{}, err
+	}
+	payload = append(payload, '\n')
+	if len(payload) > maxRequestBytesVPNCore {
+		return Response{}, fmt.Errorf("vpn core request exceeds %d bytes", maxRequestBytesVPNCore)
+	}
+	var rights []byte
+	if logFile != nil {
+		rights = unix.UnixRights(int(logFile.Fd()))
+	}
+	written, _, err := unixConn.WriteMsgUnix(payload, rights, nil)
+	if err != nil {
+		return Response{}, err
+	}
+	for written < len(payload) {
+		n, err := unixConn.Write(payload[written:])
+		if err != nil {
+			return Response{}, err
+		}
+		written += n
 	}
 
 	var response Response

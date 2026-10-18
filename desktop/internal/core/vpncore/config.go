@@ -1,9 +1,12 @@
 package vpncore
 
+import "path/filepath"
+
 const (
 	defaultServiceLabel      = "works.relux.vpn-core"
 	defaultServicePlistPath  = "/Library/LaunchDaemons/works.relux.vpn-core.plist"
-	defaultServiceSocketPath = "/var/run/works.relux.vpn-core.sock"
+	defaultServiceSocketPath = "/private/var/run/works.relux.vpn-core.sock"
+	defaultServiceHelperDir  = "/Library/PrivilegedHelperTools/works.relux.vpn-core"
 
 	legacyOpenConnectHelperLabel      = "works.relux.openconnect-tun-helper"
 	legacyOpenConnectHelperPlistPath  = "/Library/LaunchDaemons/works.relux.openconnect-tun-helper.plist"
@@ -16,6 +19,7 @@ type ServiceConfig struct {
 	Label      string
 	PlistPath  string
 	SocketPath string
+	HelperDir  string
 }
 
 type ServiceStatus struct {
@@ -58,6 +62,7 @@ func DefaultServiceConfig() ServiceConfig {
 		Label:      defaultServiceLabel,
 		PlistPath:  defaultServicePlistPath,
 		SocketPath: defaultServiceSocketPath,
+		HelperDir:  defaultServiceHelperDir,
 	}
 }
 
@@ -89,5 +94,14 @@ var compatibilityServiceConfigsVPNCore = func(cfg ServiceConfig) []compatibility
 func sameServiceConfig(left, right ServiceConfig) bool {
 	return left.Label == right.Label &&
 		left.PlistPath == right.PlistPath &&
-		left.SocketPath == right.SocketPath
+		left.SocketPath == right.SocketPath &&
+		left.HelperDir == right.HelperDir
+}
+
+func (c ServiceConfig) BinaryPath() string {
+	return filepath.Join(c.HelperDir, "vpn-core")
+}
+
+func (c ServiceConfig) ManifestPath() string {
+	return filepath.Join(c.HelperDir, "manifest.json")
 }

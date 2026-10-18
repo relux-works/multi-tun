@@ -2,6 +2,7 @@ package vpncore
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 )
 
 func TestRenderPlist(t *testing.T) {
+	// This proves the LaunchDaemon uses the configured paths and carries both self-verification digests.
 	t.Parallel()
 
 	cfg := ServiceConfig{
@@ -18,7 +20,7 @@ func TestRenderPlist(t *testing.T) {
 		PlistPath:  "/Library/LaunchDaemons/works.relux.test-vpn-core.plist",
 		SocketPath: "/var/run/works.relux.test-vpn-core.sock",
 	}
-	plist := string(RenderServicePlist(cfg, "/tmp/vpn-core", 501, 20))
+	plist := string(RenderServicePlist(cfg, "/tmp/vpn-core", 501, 20, strings.Repeat("a", 64), strings.Repeat("b", 64)))
 	for _, want := range []string{
 		"<string>works.relux.test-vpn-core</string>",
 		"<string>/tmp/vpn-core</string>",
@@ -26,6 +28,8 @@ func TestRenderPlist(t *testing.T) {
 		"<string>/var/run/works.relux.test-vpn-core.sock</string>",
 		"<string>501</string>",
 		"<string>20</string>",
+		"<string>" + strings.Repeat("a", 64) + "</string>",
+		"<string>" + strings.Repeat("b", 64) + "</string>",
 	} {
 		if !strings.Contains(plist, want) {
 			t.Fatalf("plist missing %q", want)
@@ -34,6 +38,7 @@ func TestRenderPlist(t *testing.T) {
 }
 
 func TestDaemonRunSpawnAndSignal(t *testing.T) {
+	// This proves an authorized small run and daemon-owned spawn/signal lifecycle work end to end over the RPC protocol.
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-%d.sock", time.Now().UnixNano()))
 	_ = os.Remove(socketPath)
 	defer os.Remove(socketPath)
@@ -45,7 +50,7 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+		errCh <- runTestDaemon(cfg, uint32(os.Getuid()))
 	}()
 	waitForSocket(t, cfg, errCh)
 
@@ -58,7 +63,7 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 		t.Fatalf("WriteFile(run script) error = %v", err)
 	}
 
-	if err := Run(cfg, []string{runScriptPath}, "RUN_STDIN\n", runLogPath); err != nil {
+	if err := Run(cfg, []string{"/bin/sh", runScriptPath}, "RUN_STDIN\n", runLogPath); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	rawRunStdin, err := os.ReadFile(runStdinPath)
@@ -77,7 +82,7 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 		t.Fatalf("WriteFile(spawn script) error = %v", err)
 	}
 
-	pid, err := SpawnDetached(cfg, []string{spawnScriptPath}, "", spawnLogPath, true)
+	pid, err := SpawnDetached(cfg, []string{"/bin/sh", spawnScriptPath}, "", spawnLogPath, true)
 	if err != nil {
 		t.Fatalf("SpawnDetached() error = %v", err)
 	}
@@ -109,6 +114,7 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 }
 
 func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
+	// This proves fd-passed daemon output retains the requested last-line bound.
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-tail-%d.sock", time.Now().UnixNano()))
 	_ = os.Remove(socketPath)
 	defer os.Remove(socketPath)
@@ -120,7 +126,7 @@ func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+		errCh <- runTestDaemon(cfg, uint32(os.Getuid()))
 	}()
 	waitForSocket(t, cfg, errCh)
 
@@ -132,7 +138,7 @@ func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
 		t.Fatalf("WriteFile(run script) error = %v", err)
 	}
 
-	if err := RunWithLogOptions(cfg, []string{runScriptPath}, "", runLogPath, LogOptions{MaxLines: 2}); err != nil {
+	if err := RunWithLogOptions(cfg, []string{"/bin/sh", runScriptPath}, "", runLogPath, LogOptions{MaxLines: 2}); err != nil {
 		t.Fatalf("RunWithLogOptions() error = %v", err)
 	}
 	raw, err := os.ReadFile(runLogPath)
@@ -144,7 +150,8 @@ func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
 	}
 }
 
-func TestCompatibilityFallbackUsesLegacyService(t *testing.T) {
+func TestCompatibilityStatusFindsLegacyServiceWithoutSelectingItForRPC(t *testing.T) {
+	// This proves status still finds the legacy service while hardened availability refuses its incompatible wire protocol.
 	primarySocketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-primary-%d.sock", time.Now().UnixNano()))
 	legacySocketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-legacy-%d.sock", time.Now().UnixNano()))
 	_ = os.Remove(primarySocketPath)
@@ -179,7 +186,7 @@ func TestCompatibilityFallbackUsesLegacyService(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(legacyCfg, os.Getuid(), os.Getgid())
+		errCh <- runTestDaemon(legacyCfg, uint32(os.Getuid()))
 	}()
 	waitForSocket(t, legacyCfg, errCh)
 
@@ -196,28 +203,8 @@ func TestCompatibilityFallbackUsesLegacyService(t *testing.T) {
 	if status.Compatibility != CompatibilityLegacyOpenConnectHelper {
 		t.Fatalf("InspectService() compatibility = %q, want %q", status.Compatibility, CompatibilityLegacyOpenConnectHelper)
 	}
-	if !Available(primaryCfg) {
-		t.Fatalf("Available() = false, want true")
-	}
-
-	dir := t.TempDir()
-	runStdinPath := filepath.Join(dir, "legacy-stdin.txt")
-	runLogPath := filepath.Join(dir, "legacy.log")
-	runScriptPath := filepath.Join(dir, "legacy.sh")
-	runScript := "#!/bin/sh\nset -eu\ncat >" + testShellQuote(runStdinPath) + "\necho compat-ok\n"
-	if err := os.WriteFile(runScriptPath, []byte(runScript), 0o755); err != nil {
-		t.Fatalf("WriteFile(legacy script) error = %v", err)
-	}
-
-	if err := Run(primaryCfg, []string{runScriptPath}, "LEGACY_STDIN\n", runLogPath); err != nil {
-		t.Fatalf("Run() fallback error = %v", err)
-	}
-	rawStdin, err := os.ReadFile(runStdinPath)
-	if err != nil {
-		t.Fatalf("ReadFile(legacy stdin) error = %v", err)
-	}
-	if got := strings.TrimSpace(string(rawStdin)); got != "LEGACY_STDIN" {
-		t.Fatalf("legacy stdin = %q, want %q", got, "LEGACY_STDIN")
+	if Available(primaryCfg) {
+		t.Fatal("Available() = true for legacy-only service")
 	}
 }
 
@@ -247,4 +234,11 @@ func testShellQuote(value string) string {
 func syscallKill(pid int, signal int) error {
 	cmd := exec.Command("kill", fmt.Sprintf("-%d", signal), fmt.Sprintf("%d", pid))
 	return cmd.Run()
+}
+
+func runTestDaemon(cfg ServiceConfig, peerUID uint32) error {
+	daemon := newServiceDaemon(cfg, int(peerUID), os.Getgid())
+	daemon.verify = func() error { return nil }
+	daemon.peerUID = func(*net.UnixConn) (uint32, error) { return peerUID, nil }
+	return daemon.serve()
 }

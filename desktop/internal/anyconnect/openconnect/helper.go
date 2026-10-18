@@ -16,7 +16,10 @@ type HelperSnapshot = vpncore.HelperSnapshot
 type RequestSnapshot = vpncore.RequestSnapshot
 type CompletedRequestSnapshot = vpncore.CompletedRequestSnapshot
 
-var vpnCoreRunOpenConnect = vpncore.Run
+var (
+	vpnCoreRunOpenConnect    = vpncore.Run
+	vpnCoreSignalOpenConnect = vpncore.Signal
+)
 
 func DefaultPrivilegedHelperConfig() PrivilegedHelperConfig {
 	return vpncore.DefaultServiceConfig()
@@ -47,7 +50,7 @@ func resolvePrivilegedMode(mode string) (string, PrivilegedHelperConfig, error) 
 		return PrivilegedModeDirect, cfg, nil
 	case PrivilegedModeHelper:
 		if !helperAvailable(cfg) {
-			return "", cfg, fmt.Errorf("vpn core is not reachable; run `vpn-core install` once")
+			return "", cfg, fmt.Errorf("vpn core is not reachable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
 		}
 		return PrivilegedModeHelper, cfg, nil
 	default:
@@ -59,20 +62,16 @@ func InspectPrivilegedHelper(cfg PrivilegedHelperConfig) (PrivilegedHelperStatus
 	return vpncore.InspectService(cfg)
 }
 
-func InstallPrivilegedHelper(binaryPath string, clientUID, clientGID int) error {
-	return vpncore.InstallService(DefaultPrivilegedHelperConfig(), binaryPath, clientUID, clientGID)
+func InstallPrivilegedHelper(string, int, int) error {
+	return errors.New("legacy helper install is disabled; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX`")
 }
 
 func UninstallPrivilegedHelper() error {
 	return vpncore.UninstallService(DefaultPrivilegedHelperConfig())
 }
 
-func RunPrivilegedHelperDaemon(socketPath string, clientUID, clientGID int) error {
-	cfg := DefaultPrivilegedHelperConfig()
-	if strings.TrimSpace(socketPath) != "" {
-		cfg.SocketPath = socketPath
-	}
-	return vpncore.RunDaemon(cfg, clientUID, clientGID)
+func RunPrivilegedHelperDaemon(string, int, int) error {
+	return errors.New("legacy helper daemon entrypoint is disabled; launch the installed vpn-core daemon")
 }
 
 func helperConnect(cfg PrivilegedHelperConfig, command []string, cookie, logPath string) error {
@@ -89,7 +88,7 @@ func isHelperRPCTimeout(err error) bool {
 }
 
 func helperSignal(cfg PrivilegedHelperConfig, pid int, signal string) error {
-	return vpncore.Signal(cfg, pid, signal, false)
+	return vpnCoreSignalOpenConnect(cfg, pid, signal, false)
 }
 
 func shouldUseHelperSignal(mode string, helperSocketPath string) bool {
@@ -123,6 +122,6 @@ func helperAvailable(cfg PrivilegedHelperConfig) bool {
 	return vpncore.Available(cfg)
 }
 
-func renderPrivilegedHelperPlist(cfg PrivilegedHelperConfig, binaryPath string, clientUID, clientGID int) []byte {
-	return vpncore.RenderServicePlist(cfg, binaryPath, clientUID, clientGID)
+func renderPrivilegedHelperPlist(cfg PrivilegedHelperConfig, binaryPath string, clientUID, clientGID int, binarySHA256, manifestSHA256 string) []byte {
+	return vpncore.RenderServicePlist(cfg, binaryPath, clientUID, clientGID, binarySHA256, manifestSHA256)
 }

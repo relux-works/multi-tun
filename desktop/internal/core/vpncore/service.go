@@ -1,10 +1,12 @@
 package vpncore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -12,13 +14,22 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"multi-tun/desktop/internal/core/logtail"
+	"golang.org/x/sys/unix"
 )
 
-const runTimeout = 20 * time.Second
+const (
+	runTimeout               = 20 * time.Second
+	maxConcurrentConnections = 16
+)
+
+var (
+	serverReadDeadlineVPNCore  = 5 * time.Second
+	serverWriteDeadlineVPNCore = 5 * time.Second
+)
 
 var (
 	execCommandVPNCore        = exec.Command
@@ -26,7 +37,9 @@ var (
 )
 
 func Available(cfg ServiceConfig) bool {
-	status, err := InspectService(cfg)
+	// Legacy helpers speak the old path-based logging protocol and are visible
+	// to status/cleanup only; they are never selected for hardened RPC work.
+	status, err := inspectExactService(cfg)
 	return err == nil && status.Reachable
 }
 
@@ -38,7 +51,6 @@ func InspectService(cfg ServiceConfig) (ServiceStatus, error) {
 	if status.Reachable {
 		return status, nil
 	}
-
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
 		status, err := inspectExactService(compat.ServiceConfig)
 		if err != nil {
@@ -49,7 +61,6 @@ func InspectService(cfg ServiceConfig) (ServiceStatus, error) {
 			return status, nil
 		}
 	}
-
 	return status, nil
 }
 
@@ -58,11 +69,7 @@ func inspectExactService(cfg ServiceConfig) (ServiceStatus, error) {
 }
 
 func inspectExactServiceWithTimeout(cfg ServiceConfig, timeout time.Duration) (ServiceStatus, error) {
-	status := ServiceStatus{
-		Label:      cfg.Label,
-		PlistPath:  cfg.PlistPath,
-		SocketPath: cfg.SocketPath,
-	}
+	status := ServiceStatus{Label: cfg.Label, PlistPath: cfg.PlistPath, SocketPath: cfg.SocketPath}
 	resp, err := callWithTimeout(cfg, Request{Action: "ping"}, timeout)
 	if err != nil {
 		if isUnavailable(err) {
@@ -76,52 +83,8 @@ func inspectExactServiceWithTimeout(cfg ServiceConfig, timeout time.Duration) (S
 	return status, nil
 }
 
-func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int) error {
-	if err := ensureSudoCredentials(); err != nil {
-		return fmt.Errorf("sudo authentication: %w", err)
-	}
-	cleanupCompatibilityServices(cfg)
-
-	plistData := RenderServicePlist(cfg, binaryPath, clientUID, clientGID)
-	tmpFile, err := os.CreateTemp("", "vpn-core-*.plist")
-	if err != nil {
-		return fmt.Errorf("create temp vpn core plist: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmpFile.Write(plistData); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("write temp vpn core plist: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("close temp vpn core plist: %w", err)
-	}
-
-	if _, err := runPrivilegedCommand("install", "-o", "root", "-g", "wheel", "-m", "0644", tmpPath, cfg.PlistPath); err != nil {
-		return fmt.Errorf("install vpn core plist: %w", err)
-	}
-	_, _ = runPrivilegedCommand("launchctl", "bootout", launchctlTarget(cfg.Label))
-	if _, err := runPrivilegedCommand("launchctl", "bootstrap", "system", cfg.PlistPath); err != nil {
-		return fmt.Errorf("bootstrap vpn core service: %w", err)
-	}
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := InspectService(cfg)
-		if err != nil {
-			return err
-		}
-		if status.Reachable {
-			return nil
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return fmt.Errorf("vpn core did not become reachable at %s", cfg.SocketPath)
-}
-
 func UninstallService(cfg ServiceConfig) error {
-	if err := ensureSudoCredentials(); err != nil {
+	if err := ensureSudoCredentialsVPNCore(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
 	cleanupCompatibilityServices(cfg)
@@ -136,34 +99,65 @@ func cleanupCompatibilityServices(cfg ServiceConfig) {
 }
 
 func uninstallExactService(cfg ServiceConfig) {
-	_, _ = runPrivilegedCommand("launchctl", "bootout", launchctlTarget(cfg.Label))
-	_, _ = runPrivilegedCommand("rm", "-f", cfg.PlistPath, cfg.SocketPath)
+	_, _ = runPrivilegedCommandVPNCore("launchctl", "bootout", launchctlTarget(cfg.Label))
+	_, _ = runPrivilegedCommandVPNCore("rm", "-f", cfg.PlistPath, cfg.SocketPath)
+	if cfg.HelperDir != "" {
+		_, _ = runPrivilegedCommandVPNCore("rm", "-rf", cfg.HelperDir)
+	}
 }
 
-func RunDaemon(cfg ServiceConfig, clientUID, clientGID int) error {
-	daemon := serviceDaemon{
-		cfg:       cfg,
-		clientUID: clientUID,
-		clientGID: clientGID,
-		requests:  newRequestTracker(),
+func RunDaemon(cfg ServiceConfig, clientUID, clientGID int, binarySHA256, manifestSHA256 string) error {
+	deps := productionVerificationDependencies()
+	daemon := newServiceDaemon(cfg, clientUID, clientGID)
+	daemon.verify = func() error {
+		return verifyDaemonInstallation(cfg, binarySHA256, manifestSHA256, deps)
 	}
+	daemon.peerUID = localPeerUID
 	return daemon.serve()
 }
+
+type peerUIDLookup func(*net.UnixConn) (uint32, error)
 
 type serviceDaemon struct {
 	cfg       ServiceConfig
 	clientUID int
 	clientGID int
 	requests  *requestTracker
+	verify    func() error
+	peerUID   peerUIDLookup
+
+	connections chan struct{}
+	mutation    sync.Mutex
+	children    *childRegistry
 }
 
-func (d serviceDaemon) serve() error {
+func newServiceDaemon(cfg ServiceConfig, clientUID, clientGID int) *serviceDaemon {
+	return &serviceDaemon{
+		cfg:         cfg,
+		clientUID:   clientUID,
+		clientGID:   clientGID,
+		requests:    newRequestTracker(),
+		connections: make(chan struct{}, maxConcurrentConnections),
+		children:    newChildRegistry(),
+	}
+}
+
+func (d *serviceDaemon) serve() error {
+	if d.verify == nil {
+		return errors.New("daemon verification is not configured")
+	}
+	if err := d.verify(); err != nil {
+		return fmt.Errorf("daemon self-verification failed: %w", err)
+	}
+	if d.peerUID == nil {
+		return errors.New("peer credential verification is not configured")
+	}
 	if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
 		return fmt.Errorf("create vpn core socket dir: %w", err)
 	}
 	_ = os.Remove(d.cfg.SocketPath)
 
-	listener, err := net.Listen("unix", d.cfg.SocketPath)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: d.cfg.SocketPath, Net: "unix"})
 	if err != nil {
 		return fmt.Errorf("listen on vpn core socket: %w", err)
 	}
@@ -171,7 +165,6 @@ func (d serviceDaemon) serve() error {
 		_ = listener.Close()
 		_ = os.Remove(d.cfg.SocketPath)
 	}()
-
 	if err := os.Chmod(d.cfg.SocketPath, 0o600); err != nil {
 		return fmt.Errorf("chmod vpn core socket: %w", err)
 	}
@@ -184,17 +177,15 @@ func (d serviceDaemon) serve() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
-
 	errCh := make(chan error, 1)
 	go func() {
 		for {
-			conn, err := listener.Accept()
+			conn, err := listener.AcceptUnix()
 			if err != nil {
 				errCh <- err
 				return
 			}
-			requestID := d.requests.enqueue()
-			go d.handleConn(conn, requestID)
+			d.acceptConnection(conn)
 		}
 	}()
 
@@ -209,36 +200,73 @@ func (d serviceDaemon) serve() error {
 	}
 }
 
-func (d serviceDaemon) handleConn(conn net.Conn, requestID uint64) {
-	defer conn.Close()
-
-	var request Request
-	if err := json.NewDecoder(conn).Decode(&request); err != nil {
-		d.requests.abandon(requestID)
-		_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
+func (d *serviceDaemon) acceptConnection(conn *net.UnixConn) {
+	uid, err := d.peerUID(conn)
+	if err != nil {
+		_ = writeResponse(conn, Response{Error: fmt.Sprintf("read peer credentials: %v", err)})
+		_ = conn.Close()
 		return
 	}
-	d.requests.begin(requestID, request.Action)
+	if uid != 0 && uid != uint32(d.clientUID) {
+		_ = writeResponse(conn, Response{Error: fmt.Sprintf("peer uid %d is not authorized", uid)})
+		_ = conn.Close()
+		return
+	}
+	select {
+	case d.connections <- struct{}{}:
+		requestID := d.requests.enqueue()
+		go func() {
+			defer func() { <-d.connections }()
+			d.handleConn(conn, requestID)
+		}()
+	default:
+		_ = writeResponse(conn, Response{Error: "vpn core connection limit reached"})
+		_ = conn.Close()
+	}
+}
 
+func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(serverReadDeadlineVPNCore)); err != nil {
+		d.requests.abandon(requestID)
+		return
+	}
+	request, logFile, err := readRequest(conn)
+	if err != nil {
+		d.requests.abandon(requestID)
+		_ = writeResponse(conn, Response{Error: err.Error()})
+		return
+	}
+	if logFile != nil && request.Action != "spawn" {
+		defer logFile.Close()
+	}
+
+	mutating := request.Action == "run" || request.Action == "spawn" || request.Action == "signal"
+	if mutating {
+		d.mutation.Lock()
+		defer d.mutation.Unlock()
+	}
+	d.requests.begin(requestID, request.Action)
 	response := Response{OK: true, DaemonPID: os.Getpid()}
 	switch request.Action {
 	case "ping":
 		response.HelperSnapshot = d.requests.snapshot()
 	case "run":
-		if err := handleRun(request); err != nil {
+		if err := d.handleRun(request, logFile); err != nil {
 			response.OK = false
 			response.Error = err.Error()
 		}
 	case "spawn":
-		pid, err := handleSpawn(request)
+		pid, err := d.handleSpawn(request, logFile)
 		if err != nil {
 			response.OK = false
 			response.Error = err.Error()
+			_ = logFile.Close()
 		} else {
 			response.PID = pid
 		}
 	case "signal":
-		if err := handleSignal(request); err != nil {
+		if err := d.handleSignal(request); err != nil {
 			response.OK = false
 			response.Error = err.Error()
 		}
@@ -247,31 +275,127 @@ func (d serviceDaemon) handleConn(conn net.Conn, requestID uint64) {
 		response.Error = fmt.Sprintf("unsupported vpn core action %q", request.Action)
 	}
 	d.requests.complete(requestID, response.OK)
-
-	_ = json.NewEncoder(conn).Encode(response)
+	_ = writeResponse(conn, response)
 }
 
-func handleRun(request Request) error {
-	if len(request.Command) == 0 {
-		return errors.New("missing command")
+func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
+	var payload []byte
+	var receivedFDs []int
+	closeFDs := func() {
+		for _, fd := range receivedFDs {
+			_ = unix.Close(fd)
+		}
 	}
-	if request.LogPath == "" {
-		return errors.New("missing log path")
+	for !bytes.Contains(payload, []byte{'\n'}) {
+		data := make([]byte, 32*1024)
+		oob := make([]byte, unix.CmsgSpace(4*4))
+		n, oobn, flags, _, err := conn.ReadMsgUnix(data, oob)
+		if err != nil {
+			closeFDs()
+			return Request{}, nil, err
+		}
+		if oobn > 0 {
+			messages, err := unix.ParseSocketControlMessage(oob[:oobn])
+			if err != nil {
+				closeFDs()
+				return Request{}, nil, fmt.Errorf("parse passed file descriptor: %w", err)
+			}
+			for _, message := range messages {
+				fds, err := unix.ParseUnixRights(&message)
+				if err != nil {
+					closeFDs()
+					return Request{}, nil, fmt.Errorf("parse passed file descriptor: %w", err)
+				}
+				receivedFDs = append(receivedFDs, fds...)
+			}
+		}
+		if flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 {
+			closeFDs()
+			return Request{}, nil, errors.New("truncated vpn core request")
+		}
+		payload = append(payload, data[:n]...)
+		if len(payload) > maxRequestBytesVPNCore {
+			closeFDs()
+			return Request{}, nil, fmt.Errorf("vpn core request exceeds %d bytes", maxRequestBytesVPNCore)
+		}
+	}
+	lineEnd := bytes.IndexByte(payload, '\n')
+	if len(bytes.TrimSpace(payload[lineEnd+1:])) != 0 {
+		closeFDs()
+		return Request{}, nil, errors.New("vpn core request contains trailing data")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload[:lineEnd]))
+	decoder.DisallowUnknownFields()
+	var request Request
+	if err := decoder.Decode(&request); err != nil {
+		closeFDs()
+		return Request{}, nil, err
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		closeFDs()
+		return Request{}, nil, err
 	}
 
-	logFile, err := logtail.Open(request.LogPath, logtail.Options{MaxLines: request.LogMaxLines})
-	if err != nil {
-		return fmt.Errorf("open vpn core log: %w", err)
+	wantsLog := request.Action == "run" || request.Action == "spawn"
+	if wantsLog && len(receivedFDs) != 1 {
+		closeFDs()
+		return Request{}, nil, errors.New("run/spawn requires exactly one log file descriptor")
 	}
-	defer logFile.Close()
+	if !wantsLog && len(receivedFDs) != 0 {
+		closeFDs()
+		return Request{}, nil, errors.New("request does not accept a file descriptor")
+	}
+	if !wantsLog {
+		return request, nil, nil
+	}
+	fd := receivedFDs[0]
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		closeFDs()
+		return Request{}, nil, fmt.Errorf("stat passed log file descriptor: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		closeFDs()
+		return Request{}, nil, errors.New("passed log file descriptor is not a regular file")
+	}
+	file := os.NewFile(uintptr(fd), "vpn-core-client-log")
+	if file == nil {
+		closeFDs()
+		return Request{}, nil, errors.New("wrap passed log file descriptor")
+	}
+	return request, file, nil
+}
 
+func requireJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeResponse(conn net.Conn, response Response) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(serverWriteDeadlineVPNCore)); err != nil {
+		return err
+	}
+	return json.NewEncoder(conn).Encode(response)
+}
+
+func (d *serviceDaemon) handleRun(request Request, logFile *os.File) error {
+	if err := validateInterimCommand(request.Command); err != nil {
+		return err
+	}
+	logWriter := newPassedLogWriter(logFile, request.LogMaxLines)
+	defer logWriter.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
 	defer cancel()
-
 	cmd := execCommandContextVPNCore(ctx, request.Command[0], request.Command[1:]...)
 	cmd.Stdin = strings.NewReader(request.Stdin)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("timed out after %s", runTimeout)
@@ -281,57 +405,106 @@ func handleRun(request Request) error {
 	return nil
 }
 
-func handleSpawn(request Request) (int, error) {
-	if len(request.Command) == 0 {
-		return 0, errors.New("missing command")
+func (d *serviceDaemon) handleSpawn(request Request, logFile *os.File) (int, error) {
+	if err := validateInterimCommand(request.Command); err != nil {
+		return 0, err
 	}
-	if request.LogPath == "" {
-		return 0, errors.New("missing log path")
-	}
-
-	logFile, err := logtail.Open(request.LogPath, logtail.Options{MaxLines: request.LogMaxLines})
-	if err != nil {
-		return 0, fmt.Errorf("open vpn core log: %w", err)
-	}
-
+	logWriter := newPassedLogWriter(logFile, request.LogMaxLines)
 	cmd := execCommandVPNCore(request.Command[0], request.Command[1:]...)
 	if request.Stdin != "" {
 		cmd.Stdin = strings.NewReader(request.Stdin)
 	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
 	if request.SetPGID {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
+		_ = logWriter.Close()
 		return 0, err
 	}
-
 	pid := cmd.Process.Pid
+	d.children.add(pid, request.SetPGID)
 	go func() {
 		_ = cmd.Wait()
-		_ = logFile.Close()
+		d.children.remove(pid)
+		_ = logWriter.Close()
 	}()
 	return pid, nil
 }
 
-func handleSignal(request Request) error {
+func (d *serviceDaemon) handleSignal(request Request) error {
 	if request.PID <= 0 {
 		return errors.New("missing pid")
 	}
 	if request.Signal == "" {
 		return errors.New("missing signal")
 	}
-	target := request.PID
-	if request.Group {
-		target = -request.PID
+	child, ok := d.children.get(request.PID)
+	if !ok {
+		return fmt.Errorf("pid %d was not spawned by this vpn core daemon or is no longer its child", request.PID)
+	}
+	if request.Group && !child.setPGID {
+		return fmt.Errorf("pid %d was not spawned in its own process group", request.PID)
 	}
 	sig, err := parseSignal(request.Signal)
 	if err != nil {
 		return err
 	}
+	target := request.PID
+	if request.Group {
+		target = -request.PID
+	}
 	return syscall.Kill(target, sig)
+}
+
+type childRecord struct{ setPGID bool }
+
+type childRegistry struct {
+	mu       sync.Mutex
+	children map[int]childRecord
+}
+
+func newChildRegistry() *childRegistry { return &childRegistry{children: make(map[int]childRecord)} }
+func (r *childRegistry) add(pid int, setPGID bool) {
+	r.mu.Lock()
+	r.children[pid] = childRecord{setPGID: setPGID}
+	r.mu.Unlock()
+}
+func (r *childRegistry) remove(pid int) {
+	r.mu.Lock()
+	delete(r.children, pid)
+	r.mu.Unlock()
+}
+func (r *childRegistry) get(pid int) (childRecord, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	child, ok := r.children[pid]
+	return child, ok
+}
+
+// validateInterimCommand is a deliberately narrow PR A compatibility shim.
+// It reduces generic root execution but does not close H03b: PR B/C replace
+// run/spawn with typed actions and root-owned executable snapshots.
+func validateInterimCommand(command []string) error {
+	if len(command) == 0 {
+		return errors.New("missing command")
+	}
+	executable := command[0]
+	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return fmt.Errorf("command executable %q must be a clean absolute path", executable)
+	}
+	// TODO(PR B): remove /bin/sh after resolver cleanup becomes a typed Go action.
+	switch executable {
+	case "/usr/sbin/scutil", "/usr/sbin/networksetup", "/usr/sbin/tcpdump", "/bin/sh":
+		return nil
+	}
+	switch filepath.Base(executable) {
+	case "sing-box", "xray", "openconnect":
+		return nil
+	default:
+		return fmt.Errorf("command executable %q is not in the PR A interim allowlist", executable)
+	}
 }
 
 func parseSignal(value string) (syscall.Signal, error) {
@@ -347,35 +520,21 @@ func parseSignal(value string) (syscall.Signal, error) {
 	}
 }
 
-func RenderServicePlist(cfg ServiceConfig, binaryPath string, clientUID, clientGID int) []byte {
+func RenderServicePlist(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, binarySHA256, manifestSHA256 string) []byte {
 	var builder strings.Builder
 	builder.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	builder.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	builder.WriteString(`<plist version="1.0">` + "\n")
-	builder.WriteString(`<dict>` + "\n")
-	builder.WriteString(`  <key>Label</key>` + "\n")
-	builder.WriteString(`  <string>` + plistEscape(cfg.Label) + `</string>` + "\n")
-	builder.WriteString(`  <key>ProgramArguments</key>` + "\n")
-	builder.WriteString(`  <array>` + "\n")
+	builder.WriteString(`<plist version="1.0">` + "\n<dict>\n")
+	builder.WriteString(`  <key>Label</key>` + "\n  <string>" + plistEscape(cfg.Label) + "</string>\n")
+	builder.WriteString(`  <key>ProgramArguments</key>` + "\n  <array>\n")
 	for _, value := range []string{
-		binaryPath,
-		"_daemon",
-		"--socket",
-		cfg.SocketPath,
-		"--client-uid",
-		strconv.Itoa(clientUID),
-		"--client-gid",
-		strconv.Itoa(clientGID),
+		binaryPath, "_daemon", "--socket", cfg.SocketPath,
+		"--client-uid", strconv.Itoa(clientUID), "--client-gid", strconv.Itoa(clientGID),
+		"--binary-sha256", binarySHA256, "--manifest-sha256", manifestSHA256,
 	} {
 		builder.WriteString(`    <string>` + plistEscape(value) + `</string>` + "\n")
 	}
-	builder.WriteString(`  </array>` + "\n")
-	builder.WriteString(`  <key>RunAtLoad</key>` + "\n")
-	builder.WriteString(`  <true/>` + "\n")
-	builder.WriteString(`  <key>KeepAlive</key>` + "\n")
-	builder.WriteString(`  <true/>` + "\n")
-	builder.WriteString(`</dict>` + "\n")
-	builder.WriteString(`</plist>` + "\n")
+	builder.WriteString("  </array>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n</dict>\n</plist>\n")
 	return []byte(builder.String())
 }
 
@@ -383,16 +542,13 @@ func ensureSudoCredentials() error {
 	if os.Geteuid() == 0 {
 		return nil
 	}
-
 	cmd := execCommandVPNCore("sudo", "-n", "true")
 	if err := cmd.Run(); err == nil {
 		return nil
 	}
-
 	if !stdinSupportsPrompt() {
 		return fmt.Errorf("sudo credentials are not cached; run `sudo -v` in an interactive shell and retry")
 	}
-
 	cmd = execCommandVPNCore("sudo", "-v")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -402,10 +558,7 @@ func ensureSudoCredentials() error {
 
 func stdinSupportsPrompt() bool {
 	stat, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
+	return err == nil && stat.Mode()&os.ModeCharDevice != 0
 }
 
 func runPrivilegedCommand(name string, args ...string) ([]byte, error) {
@@ -423,17 +576,8 @@ func runCommand(name string, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-func launchctlTarget(label string) string {
-	return "system/" + label
-}
+func launchctlTarget(label string) string { return "system/" + label }
 
 func plistEscape(value string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&apos;",
-	)
-	return replacer.Replace(value)
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;").Replace(value)
 }

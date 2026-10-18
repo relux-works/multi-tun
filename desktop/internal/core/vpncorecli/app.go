@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"multi-tun/desktop/internal/core/vpncore"
 )
@@ -16,6 +17,13 @@ type App struct {
 }
 
 var inspectServiceVPNCoreCLI = vpncore.InspectService
+
+var (
+	installServiceVPNCoreCLI = vpncore.InstallService
+	installDigestVPNCoreCLI  = vpncore.InstallDigest
+)
+
+var lowercaseSHA256CLI = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func New(stdout, stderr io.Writer) *App {
 	return &App{stdout: stdout, stderr: stderr}
@@ -28,6 +36,8 @@ func (a *App) Run(args []string) int {
 	}
 
 	switch args[0] {
+	case "install-digest":
+		return a.runInstallDigest(args[1:])
 	case "install":
 		return a.runInstall(args[1:])
 	case "uninstall":
@@ -51,7 +61,16 @@ func (a *App) Run(args []string) int {
 func (a *App) runInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
+	expectedDigest := fs.String("expect-sha256", "", "Expected vpn-core install digest")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(a.stderr, "install refuses positional arguments")
+		return 2
+	}
+	if !lowercaseSHA256CLI.MatchString(*expectedDigest) {
+		fmt.Fprintln(a.stderr, "install requires --expect-sha256 with exactly 64 lowercase hexadecimal characters")
 		return 2
 	}
 
@@ -61,7 +80,7 @@ func (a *App) runInstall(args []string) int {
 		return 1
 	}
 	cfg := vpncore.DefaultServiceConfig()
-	if err := vpncore.InstallService(cfg, binaryPath, os.Getuid(), os.Getgid()); err != nil {
+	if err := installServiceVPNCoreCLI(cfg, binaryPath, os.Getuid(), os.Getgid(), *expectedDigest); err != nil {
 		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
 		return 1
 	}
@@ -79,6 +98,30 @@ func (a *App) runInstall(args []string) int {
 	if status.Compatibility != "" {
 		fmt.Fprintf(a.stdout, "compatibility: %s\n", status.Compatibility)
 	}
+	return 0
+}
+
+func (a *App) runInstallDigest(args []string) int {
+	fs := flag.NewFlagSet("install-digest", flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(a.stderr, "install-digest refuses positional arguments")
+		return 2
+	}
+	binaryPath, err := resolveExecutablePath()
+	if err != nil {
+		fmt.Fprintf(a.stderr, "install-digest failed: %v\n", err)
+		return 1
+	}
+	digest, err := installDigestVPNCoreCLI(binaryPath)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "install-digest failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(a.stdout, digest)
 	return 0
 }
 
@@ -142,11 +185,17 @@ func (a *App) runDaemon(args []string) int {
 	socketPath := fs.String("socket", cfg.SocketPath, "VPN core socket path")
 	clientUID := fs.Int("client-uid", os.Getuid(), "Client uid")
 	clientGID := fs.Int("client-gid", os.Getgid(), "Client gid")
+	binarySHA256 := fs.String("binary-sha256", "", "Installed vpn-core binary sha256")
+	manifestSHA256 := fs.String("manifest-sha256", "", "Installed manifest sha256")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if fs.NArg() != 0 || !lowercaseSHA256CLI.MatchString(*binarySHA256) || !lowercaseSHA256CLI.MatchString(*manifestSHA256) {
+		fmt.Fprintln(a.stderr, "daemon requires valid --binary-sha256 and --manifest-sha256 values and no positional arguments")
+		return 2
+	}
 	cfg.SocketPath = *socketPath
-	if err := vpncore.RunDaemon(cfg, *clientUID, *clientGID); err != nil {
+	if err := vpncore.RunDaemon(cfg, *clientUID, *clientGID, *binarySHA256, *manifestSHA256); err != nil {
 		fmt.Fprintf(a.stderr, "daemon failed: %v\n", err)
 		return 1
 	}
@@ -157,7 +206,8 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "vpn-core manages the shared privileged VPN daemon used by openconnect-tun and vless-tun.")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
-	fmt.Fprintln(a.stdout, "  vpn-core install")
+	fmt.Fprintln(a.stdout, "  vpn-core install-digest")
+	fmt.Fprintln(a.stdout, "  vpn-core install --expect-sha256 HEX")
 	fmt.Fprintln(a.stdout, "  vpn-core uninstall")
 	fmt.Fprintln(a.stdout, "  vpn-core status")
 	fmt.Fprintln(a.stdout, "  vpn-core inspect-vless-url [--source-mode proxy|direct] [--insecure] [--host name] [--tls-server-name name] URL")

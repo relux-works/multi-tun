@@ -144,7 +144,7 @@ Generated artifacts:
 | `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered runtime JSON |
 | `ssh-proxy` | Local SSH dynamic SOCKS5 proxy lifecycle management | `ssh-proxy setup --host ssh-alias --force`, `ssh-proxy start`, `ssh-proxy status`, `ssh-proxy stop` | `~/.config/ssh-proxy/`, `~/.cache/ssh-proxy/`, per-session SSH logs |
 | `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
-| `vpn-core` | Privileged helper backend for tunnel startup and packet capture support; also includes a user-space VLESS subscription metadata probe | `vpn-core install`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | LaunchDaemon state, redacted request-health snapshot, helper logs under runtime cache paths |
+| `vpn-core` | Privileged helper backend for tunnel startup and packet capture support; also includes a user-space VLESS subscription metadata probe | `DIGEST="$(vpn-core install-digest)" && vpn-core install --expect-sha256 "$DIGEST"`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | Root-owned helper package under `/Library/PrivilegedHelperTools/works.relux.vpn-core/`, LaunchDaemon state, redacted request-health snapshot, client-owned logs under runtime cache paths |
 | `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
 | `xray` | Optional VLESS engine sidecar for profiles that require Xray-only VLESS fields such as `encryption=mlkem...` | `xray run -c <xray-config.json>` through `vless-tun start` when `engine.type=xray` | Sidecar config and sidecar logs under the selected `vless-tun` cache/artifact paths |
 | `Docker` / `Colima` | Linux container labs and controlled SNI-gate experiments | `artifacts/fortinetz-cascade-whitelist/lab/run-macmini-sni-lab.sh nl` | `.temp/fortinetz-cascade/sni-lab-remote/`; remote scratch under `/Users/administrator/.cache/multi-tun/fortinetz-sni-lab` |
@@ -217,10 +217,11 @@ The corporate hostnames, domains, profile labels, and IPs shown in the examples 
 
 ```bash
 vpn-core status
-vpn-core install
+DIGEST="$(vpn-core install-digest)"
+vpn-core install --expect-sha256 "$DIGEST"
 openconnect-tun status
 openconnect-tun helper status
-openconnect-tun helper install
+openconnect-tun helper status
 openconnect-tun profiles
 openconnect-tun inspect-profiles
 openconnect-tun inspect-profiles --dir ~/Downloads/cisco-anyconnect-profiles/profiles
@@ -250,15 +251,17 @@ dump inspect --session-id 20260326T144914Z
 Operational notes:
 
 - `openconnect-tun` keeps its own runtime state under `~/.cache/openconnect-tun`, with session logs in `~/.cache/openconnect-tun/sessions` and the current session pointer in `~/.cache/openconnect-tun/runtime/current-session.json`. This is intentionally separate from `~/.cache/vless-tun`.
-- `vpn-core install` performs the one-time privileged setup for autonomous runs. It installs a shared root LaunchDaemon that exposes a user-owned unix socket, so later `openconnect-tun` and `vless-tun` commands can reuse the same trusted backend without repeated `sudo`.
+- `vpn-core install-digest` hashes the current `vpn-core` bytes followed by its deterministic `manifest.json`; `vpn-core install --expect-sha256 HEX` validates that package before authentication or privileged commands. Installation creates `/Library/PrivilegedHelperTools/works.relux.vpn-core/` as root:wheel 0755, installs `vpn-core` 0755 and `manifest.json` 0644, then replaces and enables the LaunchDaemon. The manifest schema is ready for PR B `bin/` snapshots, but PR A lists only `vpn-core`.
+- At startup, the daemon verifies its executable, manifest, every listed file, root ownership, non-writable modes, path components without following symlinks, and macOS ACLs before opening the socket. Non-cgo builds fail closed. RPC peers are checked with `LOCAL_PEERCRED`; requests are size/time/concurrency bounded, log files are opened by the client and passed with `SCM_RIGHTS`, and only daemon-spawned live children can be signalled. With `logging.max_lines`, the helper keeps a bounded tail through the passed fd and rewrites only that fd; it never resolves a log path. Because that fd is intentionally write-only, the first helper output replaces any earlier content in that same file instead of merging an old path-based tail.
+- PR A deliberately does **not** close H03b. The temporary `run`/`spawn` shim accepts only absolute `scutil`, `networksetup`, `tcpdump`, `/bin/sh` (resolver cleanup TODO PR B), and absolute paths whose basename is `sing-box`, `xray`, or `openconnect`. Those Homebrew binaries and user-written configs/scripts are not root-owned snapshots yet; PR B/C replace the shim with typed actions and pinned helper files. Consequently, Homebrew upgrades will stop taking effect automatically once the PR B snapshots land and will require rerunning the digest/install flow.
 - `vpn-core status` and its `openconnect-tun helper status` compatibility wrapper extend the existing `ping` status response with `active_requests`, `queued_requests`, and `last_completed_request`. Entries contain only an allow-listed action plus age/duration and `ok`/`error` outcome metadata. Commands, stdin/cookies, log paths, tunnel endpoints, credentials, target PIDs, and signal values are never copied into the snapshot.
 - If a `run`, `spawn`, or `signal` RPC misses the existing five-second response deadline, `openconnect-tun` and `vless-tun` preserve the timeout and append a snapshot obtained through a short read-only `ping` on the same resolved helper socket. The probe does not start, stop, reconnect, or restart a tunnel or service. An older daemon remains compatible and reports request diagnostics as unavailable because the extension only adds optional fields to the existing `ping` response.
 - Every OpenConnect launch now uses a collision-resistant attempt ID and matching `--pid-file` under `~/.cache/openconnect-tun/runtime`. If helper startup times out after OpenConnect has backgrounded, the client recovers that exact PID, performs bounded PID-scoped `INT`/`TERM`/`KILL` cleanup, and removes only that attempt's PID file after exit. It never uses `pkill` or process-name-wide cleanup. If exit cannot be confirmed, the exact PID and PID-file path remain in current-session metadata so the session is still recoverable instead of becoming untracked.
 - Non-dry-run starts hold a cross-process, cache-scoped startup lock from session preflight through the final current-session handoff. A concurrent start for the same cache is refused with `another openconnect startup is already in progress`; starts using independent cache directories remain independent.
 - `openconnect-tun start` performs a read-only process scan before authentication and repeats it immediately before launch. A running OpenConnect command whose final server host matches the selected server but has no live current-session record causes start to fail with the exact PID; unrelated OpenConnect processes are not signalled or blocked. Inspect the reported process with `ps -p <pid> -o pid=,ppid=,user=,etime=,command=` and stop only that PID before retrying; do not use `pkill openconnect`.
 - on macOS `vless-tun start` in `network.mode=tun` now refuses to start if the upstream VLESS server itself already routes through another VPN interface such as `utun*`, `tun*`, `ppp*`, or `ipsec*`. That avoids accidental nested-tunnel startup where `vless-tun` silently builds on top of `v2RayTun`, AnyConnect, or another active VPN and drags the whole network into an undefined state.
-- Existing installs of the legacy `works.relux.openconnect-tun-helper` daemon are auto-detected for compatibility. A fresh `vpn-core install` replaces that legacy helper with the shared core service.
-- `openconnect-tun helper install|status|uninstall` remain as compatibility wrappers around the shared `vpn-core` service.
+- Existing installs of the legacy `works.relux.openconnect-tun-helper` daemon remain visible to compatibility status checks. A fresh `vpn-core install --expect-sha256 HEX` removes that legacy helper while installing the hardened shared core service.
+- `openconnect-tun helper status|uninstall` remain compatibility wrappers around the shared `vpn-core` service. The legacy helper `install`/daemon entrypoints fail closed and direct users to the digest-checked `vpn-core` install flow.
 - `--profile` resolves against local AnyConnect XML `HostEntry` values and automatically deduplicates the same server repeated across `/opt/cisco/...` and `~/Downloads/...`.
 - the canonical lifecycle commands are now `start`, `reconnect`, `status`, and `stop`; `run`, `connect`, and `disconnect` remain as compatibility aliases.
 - `openconnect-tun set-current [server [profile]]` updates `default.server_url` and `default.profile` in `~/.config/openconnect-tun/config.json`. If the selected configured server has the current default profile or exactly one configured profile, the profile argument may be omitted; otherwise pass it explicitly.
@@ -850,7 +853,8 @@ Example config fragment for a real TUN session managed by the shared `vpn-core` 
 Then run:
 
 ```bash
-vpn-core install
+DIGEST="$(vpn-core install-digest)"
+vpn-core install --expect-sha256 "$DIGEST"
 vless-tun reconnect --refresh
 vless-tun status
 ```

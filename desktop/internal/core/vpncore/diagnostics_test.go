@@ -225,7 +225,7 @@ func startDiagnosticsTestDaemon(t *testing.T, name string) ServiceConfig {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+		errCh <- runTestDaemon(cfg, uint32(os.Getuid()))
 	}()
 	waitForSocket(t, cfg, errCh)
 	return cfg
