@@ -38,6 +38,7 @@ func TestRenderPlist(t *testing.T) {
 }
 
 func TestDaemonRunSpawnAndSignal(t *testing.T) {
+	t.Skip("generic run/spawn actions were removed by PR B; typed-action coverage replaces this PR A test")
 	// This proves an authorized small run and daemon-owned spawn/signal lifecycle work end to end over the RPC protocol.
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-%d.sock", time.Now().UnixNano()))
 	_ = os.Remove(socketPath)
@@ -56,14 +57,13 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 
 	dir := t.TempDir()
 	runStdinPath := filepath.Join(dir, "run-stdin.txt")
-	runLogPath := filepath.Join(dir, "run.log")
 	runScriptPath := filepath.Join(dir, "run.sh")
 	runScript := "#!/bin/sh\nset -eu\ncat >" + testShellQuote(runStdinPath) + "\necho vpn-core-run-ok\n"
 	if err := os.WriteFile(runScriptPath, []byte(runScript), 0o755); err != nil {
 		t.Fatalf("WriteFile(run script) error = %v", err)
 	}
 
-	if err := Run(cfg, []string{"/bin/sh", runScriptPath}, "RUN_STDIN\n", runLogPath); err != nil {
+	if _, err := call(cfg, Request{Action: "run"}); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	rawRunStdin, err := os.ReadFile(runStdinPath)
@@ -74,7 +74,6 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 		t.Fatalf("run stdin = %q, want %q", got, "RUN_STDIN")
 	}
 
-	spawnLogPath := filepath.Join(dir, "spawn.log")
 	spawnPidFile := filepath.Join(dir, "spawn.pid")
 	spawnScriptPath := filepath.Join(dir, "spawn.sh")
 	spawnScript := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$$\" >" + testShellQuote(spawnPidFile) + "\nsleep 30\n"
@@ -82,7 +81,8 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 		t.Fatalf("WriteFile(spawn script) error = %v", err)
 	}
 
-	pid, err := SpawnDetached(cfg, []string{"/bin/sh", spawnScriptPath}, "", spawnLogPath, true)
+	spawnResponse, err := call(cfg, Request{Action: "spawn"})
+	pid := spawnResponse.PID
 	if err != nil {
 		t.Fatalf("SpawnDetached() error = %v", err)
 	}
@@ -99,7 +99,7 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if err := Signal(cfg, pid, "-TERM", true); err != nil {
+	if _, err := Signal(cfg, fmt.Sprintf("legacy-pid-%d", pid), "-TERM"); err != nil {
 		t.Fatalf("Signal() error = %v", err)
 	}
 	deadline = time.Now().Add(2 * time.Second)
@@ -114,6 +114,7 @@ func TestDaemonRunSpawnAndSignal(t *testing.T) {
 }
 
 func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
+	t.Skip("generic run action was removed by PR B; passed-log behavior remains covered at the writer and singbox.start layers")
 	// This proves fd-passed daemon output retains the requested last-line bound.
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-tail-%d.sock", time.Now().UnixNano()))
 	_ = os.Remove(socketPath)
@@ -138,7 +139,7 @@ func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
 		t.Fatalf("WriteFile(run script) error = %v", err)
 	}
 
-	if err := RunWithLogOptions(cfg, []string{"/bin/sh", runScriptPath}, "", runLogPath, LogOptions{MaxLines: 2}); err != nil {
+	if _, err := call(cfg, Request{Action: "run"}); err != nil {
 		t.Fatalf("RunWithLogOptions() error = %v", err)
 	}
 	raw, err := os.ReadFile(runLogPath)

@@ -65,7 +65,7 @@ func TestHelperStatusPrintsVPNCoreRequestSnapshot(t *testing.T) {
 			Reachable:  true,
 			DaemonPID:  42,
 			HelperSnapshot: &openconnect.HelperSnapshot{
-				ActiveRequests: []openconnect.RequestSnapshot{{Action: "run", AgeMillis: 5100}},
+				ActiveRequests: []openconnect.RequestSnapshot{{Action: "resolver.cleanup", AgeMillis: 5100}},
 				QueuedRequests: []openconnect.RequestSnapshot{},
 				LastCompletedRequest: &openconnect.CompletedRequestSnapshot{
 					Action:         "signal",
@@ -86,7 +86,7 @@ func TestHelperStatusPrintsVPNCoreRequestSnapshot(t *testing.T) {
 		t.Fatalf("helper status exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 	for _, want := range []string{
-		"active_requests: run(age=5100ms)",
+		"active_requests: resolver.cleanup(age=5100ms)",
 		"queued_requests: none",
 		"last_completed_request: signal(outcome=ok,duration=1ms,age=9ms)",
 	} {

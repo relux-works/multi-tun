@@ -1,6 +1,7 @@
 package openconnect
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -55,5 +56,19 @@ func TestLegacyHelperEntrypointsFailClosed(t *testing.T) {
 	}
 	if err := RunPrivilegedHelperDaemon("/tmp/vpn-core.sock", 501, 20); err == nil {
 		t.Fatal("RunPrivilegedHelperDaemon() error = nil")
+	}
+}
+
+func TestExplicitHelperLaunchUsesDocumentedSudoTransition(t *testing.T) {
+	// This proves PR B does not call a generic daemon launch: an available helper selection resolves to the unchanged sudo lane until PR C.
+	if os.Geteuid() == 0 {
+		t.Skip("root resolves privileged launch directly")
+	}
+	previous := vpnCoreAvailableOpenConnect
+	vpnCoreAvailableOpenConnect = func(vpncore.ServiceConfig) bool { return true }
+	t.Cleanup(func() { vpnCoreAvailableOpenConnect = previous })
+	mode, _, err := resolvePrivilegedMode(PrivilegedModeHelper)
+	if err != nil || mode != PrivilegedModeSudo {
+		t.Fatalf("mode=%q err=%v, want sudo transition", mode, err)
 	}
 }

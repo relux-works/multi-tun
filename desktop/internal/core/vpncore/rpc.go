@@ -23,13 +23,18 @@ var rpcResponseTimeoutVPNCore = 5 * time.Second
 
 type Request struct {
 	Action      string   `json:"action"`
-	Command     []string `json:"command,omitempty"`
+	ConfigJSON  []byte   `json:"config_json,omitempty"`
 	Stdin       string   `json:"stdin,omitempty"`
 	LogMaxLines int      `json:"log_max_lines,omitempty"`
-	PID         int      `json:"pid,omitempty"`
+	Handle      string   `json:"handle,omitempty"`
 	Signal      string   `json:"signal,omitempty"`
-	Group       bool     `json:"group,omitempty"`
 	SetPGID     bool     `json:"setpgid,omitempty"`
+	Service     string   `json:"service,omitempty"`
+	Servers     []string `json:"servers,omitempty"`
+	Interface   string   `json:"interface,omitempty"`
+	Filter      []string `json:"filter,omitempty"`
+	ApplePCAPNG bool     `json:"apple_pcapng,omitempty"`
+	RunAsUser   bool     `json:"run_as_user,omitempty"`
 }
 
 type Response struct {
@@ -37,6 +42,8 @@ type Response struct {
 	Error          string          `json:"error,omitempty"`
 	DaemonPID      int             `json:"daemon_pid,omitempty"`
 	PID            int             `json:"pid,omitempty"`
+	Handle         string          `json:"handle,omitempty"`
+	Path           string          `json:"path,omitempty"`
 	HelperSnapshot *HelperSnapshot `json:"helper_snapshot,omitempty"`
 }
 

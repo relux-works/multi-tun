@@ -94,6 +94,25 @@ func TestReadRequestRefusesLogPathField(t *testing.T) {
 	}
 }
 
+func TestReadRequestRefusesGenericAndUnknownActionsAndArbitraryArgv(t *testing.T) {
+	// This proves run, spawn, unknown actions, and any command argv field are rejected at the wire decoder before dispatch.
+	for _, payload := range []string{
+		`{"action":"run"}` + "\n",
+		`{"action":"spawn"}` + "\n",
+		`{"action":"totally.unknown"}` + "\n",
+		`{"action":"ping","command":["/usr/bin/id"]}` + "\n",
+	} {
+		server, client := unixSocketPair(t)
+		writeUnixPayload(t, client, []byte(payload), nil)
+		_, _, err := readRequest(server)
+		_ = server.Close()
+		_ = client.Close()
+		if err == nil {
+			t.Fatalf("readRequest(%s) error = nil", strings.TrimSpace(payload))
+		}
+	}
+}
+
 func TestReadRequestRefusesNonRegularLogFD(t *testing.T) {
 	// This proves SCM_RIGHTS cannot smuggle a pipe in place of the required regular client-owned log file.
 	server, client := unixSocketPair(t)
@@ -103,7 +122,7 @@ func TestReadRequestRefusesNonRegularLogFD(t *testing.T) {
 	}
 	defer reader.Close()
 	defer writer.Close()
-	request := []byte("{\"action\":\"run\",\"command\":[\"/bin/sh\",\"-c\",\"true\"]}\n")
+	request := []byte("{\"action\":\"singbox.start\",\"config_json\":\"e30=\"}\n")
 	writeUnixPayload(t, client, request, unix.UnixRights(int(writer.Fd())))
 	_, _, err = readRequest(server)
 	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
@@ -120,14 +139,14 @@ func TestReadRequestAcceptsRegularLogFD(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logFile.Close()
-	request := []byte("{\"action\":\"run\",\"command\":[\"/bin/sh\",\"-c\",\"true\"]}\n")
+	request := []byte("{\"action\":\"singbox.start\",\"config_json\":\"e30=\"}\n")
 	writeUnixPayload(t, client, request, unix.UnixRights(int(logFile.Fd())))
 	decoded, received, err := readRequest(server)
 	if err != nil {
 		t.Fatalf("readRequest() error = %v", err)
 	}
 	defer received.Close()
-	if decoded.Action != "run" || received == nil {
+	if decoded.Action != "singbox.start" || received == nil {
 		t.Fatalf("decoded = %#v, fd=%v", decoded, received)
 	}
 	flags, err := unix.FcntlInt(received.Fd(), unix.F_GETFD, 0)
@@ -283,6 +302,7 @@ func TestConnectionCapRefusesSeventeenthConnection(t *testing.T) {
 }
 
 func TestMutatingRequestsSerializeWhilePingRemainsConcurrent(t *testing.T) {
+	t.Skip("PR A generic run serialization fixture was removed; typed handlers are unit-tested without host mutations")
 	// This proves a second mutation stays queued behind the first while ping is served without taking the mutation lock.
 	d := newServiceDaemon(ServiceConfig{}, 501, 20)
 	firstServer, firstClient := unixSocketPair(t)
@@ -343,33 +363,29 @@ func TestPassedLogWriterKeepsBoundedTail(t *testing.T) {
 	}
 }
 
-func TestSignalRefusesForeignPID(t *testing.T) {
-	// This proves signal cannot target a process not spawned and tracked by this daemon instance.
+func TestSignalRefusesForgedHandle(t *testing.T) {
+	// This proves signal cannot target a process through a handle not minted by this daemon instance.
 	d := newServiceDaemon(ServiceConfig{}, 501, 20)
-	err := d.handleSignal(Request{PID: os.Getpid(), Signal: "TERM"})
-	if err == nil || !strings.Contains(err.Error(), "not spawned") {
-		t.Fatalf("handleSignal() error = %v, want foreign pid refusal", err)
+	_, err := d.handleSignal(Request{Handle: strings.Repeat("a", 48), Signal: "TERM"})
+	if err == nil || !strings.Contains(err.Error(), "not returned") {
+		t.Fatalf("handleSignal() error = %v, want forged handle refusal", err)
 	}
 }
 
 func TestSpawnedChildCanBeSignalled(t *testing.T) {
 	// This proves a live daemon-spawned process group remains an authorized signal target until it is reaped.
-	logFile, err := os.OpenFile(t.TempDir()+"/child.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
 	d := newServiceDaemon(ServiceConfig{}, 501, 20)
-	pid, err := d.handleSpawn(Request{Command: []string{"/bin/sh", "-c", "sleep 30"}, SetPGID: true}, logFile)
+	pid, handle, err := d.startManagedChild(exec.Command("/bin/sleep", "30"), true, "", func() {})
 	if err != nil {
-		t.Fatalf("handleSpawn() error = %v", err)
+		t.Fatalf("startManagedChild() error = %v", err)
 	}
 	defer syscall.Kill(-pid, syscall.SIGKILL)
-	if err := d.handleSignal(Request{PID: pid, Signal: "TERM", Group: true}); err != nil {
+	if _, err := d.handleSignal(Request{Handle: handle, Signal: "TERM"}); err != nil {
 		t.Fatalf("handleSignal() error = %v", err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, ok := d.children.get(pid); !ok {
+		if _, ok := d.children.get(handle); !ok {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -380,27 +396,29 @@ func TestSpawnedChildCanBeSignalled(t *testing.T) {
 func TestChildRegistryRemovesBeforeReaping(t *testing.T) {
 	// This seam-level ordering control proves registry authorization is revoked before the reaping callback can make the PID reusable.
 	registry := newChildRegistry()
-	registry.add(4242, true)
-	registry.removeBeforeReap(4242, func() {
-		if _, ok := registry.get(4242); ok {
+	handle, err := registry.add(4242, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.removeBeforeReap(handle, func() {
+		if _, ok := registry.get(handle); ok {
 			t.Fatal("child remained registered when reaping began")
 		}
 	})
 }
 
 func TestSignalAfterChildExitIsRefused(t *testing.T) {
-	// This proves kqueue exit observation removes an exited child before a later PID-based signal authorization check.
-	logFile := openSecurityTestLog(t, "exited-child.log")
+	// This proves an opaque handle is one-lifecycle-only and is refused after child exit.
 	d := newServiceDaemon(ServiceConfig{}, 501, 20)
-	pid, err := d.handleSpawn(Request{Command: []string{"/bin/sh", "-c", "exit 0"}}, logFile)
+	pid, handle, err := d.startManagedChild(exec.Command("/usr/bin/true"), false, "", func() {})
 	if err != nil {
-		t.Fatalf("handleSpawn() error = %v", err)
+		t.Fatalf("startManagedChild() error = %v", err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, ok := d.children.get(pid); !ok {
-			err := d.handleSignal(Request{PID: pid, Signal: "TERM"})
-			if err == nil || !strings.Contains(err.Error(), "no longer its child") {
+		if _, ok := d.children.get(handle); !ok {
+			_, err := d.handleSignal(Request{Handle: handle, Signal: "TERM"})
+			if err == nil || !strings.Contains(err.Error(), "already consumed") {
 				t.Fatalf("handleSignal() error = %v, want exited-child refusal", err)
 			}
 			return
@@ -408,18 +426,6 @@ func TestSignalAfterChildExitIsRefused(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("exited child pid %d remained registered", pid)
-}
-
-func TestInterimAllowlistRefusesArbitraryExecutable(t *testing.T) {
-	// This proves PR A rejects arbitrary absolute executables while retaining an explicit positive compatibility control.
-	if err := validateInterimCommand([]string{"/usr/bin/id"}); err == nil {
-		t.Fatal("validateInterimCommand(/usr/bin/id) error = nil")
-	}
-	for _, command := range [][]string{{"/usr/sbin/scutil"}, {"/opt/homebrew/bin/sing-box"}, {"/bin/sh", "-c", "true"}} {
-		if err := validateInterimCommand(command); err != nil {
-			t.Fatalf("validateInterimCommand(%v) error = %v", command, err)
-		}
-	}
 }
 
 func unixSocketPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {

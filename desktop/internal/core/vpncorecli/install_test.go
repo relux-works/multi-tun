@@ -46,8 +46,8 @@ func TestInstallDigestPrintsComputedDigest(t *testing.T) {
 	if code := New(&stdout, &stderr).Run([]string{"install-digest"}); code != 0 {
 		t.Fatalf("install-digest code = %d, stderr=%q", code, stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != strings.Repeat("b", 64) {
-		t.Fatalf("install-digest output = %q", got)
+	if got := strings.Split(strings.TrimSpace(stdout.String()), "\n")[0]; got != strings.Repeat("b", 64) {
+		t.Fatalf("install-digest first line = %q", got)
 	}
 	stdout.Reset()
 	stderr.Reset()

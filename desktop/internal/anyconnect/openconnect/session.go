@@ -964,18 +964,17 @@ func cleanupOrphanedResolverState(cacheDir string) (bool, error) {
 		return true, fmt.Errorf("prepare orphan cleanup runtime dir: %w", err)
 	}
 	logPath := filepath.Join(RuntimeDir(cacheDir), orphanCleanupLogName)
-	command := []string{"/bin/sh", "-c", orphanedResolverCleanupScript()}
-
-	mode, helperCfg, err := resolvePrivilegedMode(PrivilegedModeAuto)
-	if err != nil {
-		return true, fmt.Errorf("resolve privileged mode for orphan cleanup: %w", err)
-	}
-	switch mode {
-	case PrivilegedModeHelper:
-		if err := helperRun(helperCfg, command, "", logPath); err != nil {
+	helperCfg := DefaultPrivilegedHelperConfig()
+	if helperAvailable(helperCfg) {
+		if err := vpnCoreCleanupResolversOpenConnect(helperCfg); err != nil {
 			return true, fmt.Errorf("run orphan cleanup via helper: %w", err)
 		}
-	default:
+	} else {
+		command := []string{"/bin/sh", "-c", orphanedResolverCleanupScript()}
+		mode, _, err := resolvePrivilegedMode(PrivilegedModeAuto)
+		if err != nil {
+			return true, fmt.Errorf("resolve privileged mode for orphan cleanup: %w", err)
+		}
 		if mode == PrivilegedModeSudo {
 			if err := ensureSudoCredentials(); err != nil {
 				return true, fmt.Errorf("sudo authentication for orphan cleanup: %w", err)

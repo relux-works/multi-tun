@@ -3,10 +3,13 @@ package openconnect
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"multi-tun/desktop/internal/core/vpncore"
 )
 
 func TestWritePreStopSnapshotIncludesStatusFields(t *testing.T) {
@@ -321,6 +324,54 @@ func TestOrphanedResolverArtifactsPresentDetectsManagedResolversByMarker(t *test
 
 	if !orphanedResolverArtifactsPresent(cacheDir) {
 		t.Fatal("orphanedResolverArtifactsPresent() = false, want true")
+	}
+}
+
+func TestCleanupOrphanedResolverStateUsesTypedHelperAction(t *testing.T) {
+	// This proves a reachable vpn-core handles resolver cleanup without invoking the legacy shell/sudo lane.
+	cacheDir := t.TempDir()
+	if err := os.MkdirAll(SessionsDir(cacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := CurrentSession{
+		ID: "fixture", MetadataPath: filepath.Join(SessionsDir(cacheDir), metadataFilePrefix+"fixture.json"),
+		Server: "vpn.example.test/outside", Mode: ConnectModeSplitInclude,
+		VPNDomains: []string{"example.test"}, VPNNameservers: []string{"192.0.2.53"},
+	}
+	if err := SaveMetadata(metadata); err != nil {
+		t.Fatal(err)
+	}
+	resolverDir := t.TempDir()
+	resolverPath := filepath.Join(resolverDir, "example.test")
+	if err := os.WriteFile(resolverPath, []byte("# Added by openconnect-tun DNS shim\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	previousResolver := resolverDirOpenConnect
+	previousAvailable := vpnCoreAvailableOpenConnect
+	previousCleanup := vpnCoreCleanupResolversOpenConnect
+	previousPathStat := pathStat
+	previousExec := execCommandOpenConnect
+	resolverDirOpenConnect = resolverDir
+	vpnCoreAvailableOpenConnect = func(vpncore.ServiceConfig) bool { return true }
+	called := false
+	vpnCoreCleanupResolversOpenConnect = func(vpncore.ServiceConfig) error {
+		called = true
+		return os.Remove(resolverPath)
+	}
+	pathStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	execCommandOpenConnect = func(string, ...string) *exec.Cmd { t.Fatal("legacy command lane was invoked"); return nil }
+	t.Cleanup(func() {
+		resolverDirOpenConnect = previousResolver
+		vpnCoreAvailableOpenConnect = previousAvailable
+		vpnCoreCleanupResolversOpenConnect = previousCleanup
+		pathStat = previousPathStat
+		execCommandOpenConnect = previousExec
+	})
+
+	cleaned, err := cleanupOrphanedResolverState(cacheDir)
+	if err != nil || !cleaned || !called {
+		t.Fatalf("cleaned=%t called=%t err=%v", cleaned, called, err)
 	}
 }
 

@@ -28,8 +28,8 @@ func TestVerifyDaemonInstallationAcceptsVerifiedRootOwnedTree(t *testing.T) {
 	}
 }
 
-func TestVerifyDaemonInstallationRejectsTamperedManifestEntry(t *testing.T) {
-	// This proves a listed file changed after manifest creation prevents daemon startup.
+func TestVerifyDaemonInstallationRejectsTamperedPinnedBinEntry(t *testing.T) {
+	// This proves a tampered helper/bin entry makes daemon startup verification fail.
 	fixture := newVerificationFixture(t)
 	if err := os.WriteFile(fixture.extraPath, []byte("tampered\n"), 0o600); err != nil {
 		t.Fatal(err)

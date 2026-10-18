@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -22,8 +24,8 @@ const (
 
 var lowercaseSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// ManifestFile is intentionally extensible: PR B adds root-owned bin/ and
-// libexec/ snapshots without changing the verification format.
+// ManifestFile is intentionally extensible: PR C can add pinned openconnect,
+// vpnc-script, and libexec assets without changing the verification format.
 type ManifestFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -41,6 +43,15 @@ type installPackage struct {
 	binarySHA256   string
 	manifestSHA256 string
 	digest         string
+	tools          []PinnedTool
+}
+
+type PinnedTool struct {
+	Name       string
+	Version    string
+	SourcePath string
+	Path       string
+	SHA256     string
 }
 
 var (
@@ -49,6 +60,7 @@ var (
 	installSleepVPNCore            = time.Sleep
 	installNowVPNCore              = time.Now
 	installVerificationDepsVPNCore = productionVerificationDependencies
+	lookPathInstallVPNCore         = exec.LookPath
 )
 
 func InstallDigest(binaryPath string) (string, error) {
@@ -99,10 +111,25 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 		{"remove existing vpn core helper path", []string{"rm", "-rf", cfg.HelperDir}},
 		{"create vpn core helper directory", []string{"install", "-d", "-o", "root", "-g", "wheel", "-m", "0755", cfg.HelperDir}},
 		{"strip vpn core helper directory ACL", []string{"chmod", "-N", cfg.HelperDir}},
+		{"create vpn core bin directory", []string{"install", "-d", "-o", "root", "-g", "wheel", "-m", "0755", filepath.Join(cfg.HelperDir, "bin")}},
 		{"install vpn core binary", []string{"install", "-o", "root", "-g", "wheel", "-m", "0755", pkg.binaryPath, cfg.BinaryPath()}},
-		{"install vpn core manifest", []string{"install", "-o", "root", "-g", "wheel", "-m", "0644", pkg.manifestPath, cfg.ManifestPath()}},
-		{"install vpn core plist", []string{"install", "-o", "root", "-g", "wheel", "-m", "0644", plistPath, cfg.PlistPath}},
 	}
+	for _, tool := range pkg.tools {
+		commands = append(commands, struct {
+			label string
+			args  []string
+		}{"install pinned " + tool.Name, []string{"install", "-o", "root", "-g", "wheel", "-m", "0755", tool.Path, cfg.ToolPath(tool.Name)}})
+	}
+	commands = append(commands,
+		struct {
+			label string
+			args  []string
+		}{"install vpn core manifest", []string{"install", "-o", "root", "-g", "wheel", "-m", "0644", pkg.manifestPath, cfg.ManifestPath()}},
+		struct {
+			label string
+			args  []string
+		}{"install vpn core plist", []string{"install", "-o", "root", "-g", "wheel", "-m", "0644", plistPath, cfg.PlistPath}},
+	)
 	for _, command := range commands {
 		if _, err := runPrivilegedCommandVPNCore(command.args[0], command.args[1:]...); err != nil {
 			return fmt.Errorf("%s: %w", command.label, err)
@@ -179,12 +206,33 @@ func prepareInstallPackage(binaryPath string) (installPackage, error) {
 	if err != nil {
 		return fail(err)
 	}
+	singBoxPath, err := lookPathInstallVPNCore("sing-box")
+	if err != nil {
+		return fail(fmt.Errorf("resolve sing-box from PATH: %w", err))
+	}
+	singBoxPath, err = filepath.EvalSymlinks(singBoxPath)
+	if err != nil {
+		return fail(fmt.Errorf("resolve sing-box symlinks: %w", err))
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o700); err != nil {
+		return fail(fmt.Errorf("create staged bin directory: %w", err))
+	}
+	stagedSingBox := filepath.Join(binDir, "sing-box")
+	if err := copyRegularFile(singBoxPath, stagedSingBox, 0o700); err != nil {
+		return fail(fmt.Errorf("stage sing-box: %w", err))
+	}
+	singBoxSHA, err := hashFile(stagedSingBox)
+	if err != nil {
+		return fail(err)
+	}
+	tools := []PinnedTool{{Name: "sing-box", Version: pinnedToolVersion(singBoxPath, singBoxSHA), SourcePath: singBoxPath, Path: stagedSingBox, SHA256: singBoxSHA}}
 	manifest := Manifest{
 		Version: manifestVersion,
-		Files: []ManifestFile{{
-			Path:   "vpn-core",
-			SHA256: binarySHA,
-		}},
+		Files: []ManifestFile{
+			{Path: "vpn-core", SHA256: binarySHA},
+			{Path: "bin/sing-box", SHA256: singBoxSHA},
+		},
 	}
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -215,7 +263,74 @@ func prepareInstallPackage(binaryPath string) (installPackage, error) {
 		binarySHA256:   binarySHA,
 		manifestSHA256: hex.EncodeToString(manifestSum[:]),
 		digest:         hex.EncodeToString(digestHash.Sum(nil)),
+		tools:          tools,
 	}, nil
+}
+
+func PinnedToolsForInstall(binaryPath string) ([]PinnedTool, error) {
+	pkg, err := prepareInstallPackage(binaryPath)
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(pkg.dir)
+	result := make([]PinnedTool, len(pkg.tools))
+	copy(result, pkg.tools)
+	return result, nil
+}
+
+func ToolDrift(cfg ServiceConfig) ([]string, error) {
+	data, err := os.ReadFile(cfg.ManifestPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	manifest, err := decodeManifest(data)
+	if err != nil {
+		return nil, err
+	}
+	var drift []string
+	for _, entry := range manifest.Files {
+		if !strings.HasPrefix(entry.Path, "bin/") {
+			continue
+		}
+		name := strings.TrimPrefix(entry.Path, "bin/")
+		path, err := lookPathInstallVPNCore(name)
+		if err != nil {
+			drift = append(drift, fmt.Sprintf("drift: %s pinned=%s path=missing", name, shortSHA(entry.SHA256)))
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, err
+		}
+		pathSHA, err := hashFile(resolved)
+		if err != nil {
+			return nil, err
+		}
+		if pathSHA != entry.SHA256 {
+			drift = append(drift, fmt.Sprintf("drift: %s pinned=%s path=%s", name, shortSHA(entry.SHA256), shortSHA(pathSHA)))
+		}
+	}
+	return drift, nil
+}
+
+func shortSHA(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
+}
+
+func pinnedToolVersion(path, sha string) string {
+	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
+	for index := 0; index+2 < len(parts); index++ {
+		if parts[index] == "Cellar" && parts[index+1] != "" && parts[index+2] != "" {
+			return parts[index+2]
+		}
+	}
+	return "sha256:" + shortSHA(sha)
 }
 
 func copyRegularFile(source, destination string, mode os.FileMode) error {

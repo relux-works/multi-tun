@@ -139,7 +139,7 @@ func durationMillis(value time.Duration) int64 {
 
 func safeRequestAction(action string) string {
 	switch strings.TrimSpace(action) {
-	case "ping", "run", "spawn", "signal", "pending", "other":
+	case "ping", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal", "pending", "other":
 		return strings.TrimSpace(action)
 	default:
 		return "other"

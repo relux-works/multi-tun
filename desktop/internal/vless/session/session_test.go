@@ -16,34 +16,38 @@ import (
 )
 
 func TestStartWithVPNCorePropagatesTimeoutSnapshotWithoutPayload(t *testing.T) {
-	previous := vpnCoreSpawnDetachedSession
-	timeoutErr := errors.New("vpn core rpc spawn timed out after 5s; helper snapshot: state=reachable daemon_pid=42 active_requests=spawn(age=5000ms) queued_requests=none last_completed_request=signal(outcome=ok,duration=1ms,age=12ms)")
-	var capturedCommand []string
-	vpnCoreSpawnDetachedSession = func(command []string, _ string, _ int, _ bool) (int, error) {
-		capturedCommand = append([]string(nil), command...)
-		return 0, timeoutErr
+	// This proves helper startup sends rendered bytes, not a root-readable user path, while preserving redacted timeout context.
+	previous := vpnCoreStartSingBoxSession
+	timeoutErr := errors.New("vpn core rpc singbox.start timed out after 5s; helper snapshot: state=reachable daemon_pid=42 active_requests=singbox.start(age=5000ms)")
+	var capturedConfig []byte
+	vpnCoreStartSingBoxSession = func(configJSON []byte, _ string, _ int, _ bool) (int, string, error) {
+		capturedConfig = append([]byte(nil), configJSON...)
+		return 0, "", timeoutErr
 	}
 	t.Cleanup(func() {
-		vpnCoreSpawnDetachedSession = previous
+		vpnCoreStartSingBoxSession = previous
 	})
 
-	secretConfigPath := "/tmp/credential-secret-vless.json"
-	_, err := startWithVPNCore(CurrentSession{
+	secretConfigPath := filepath.Join(t.TempDir(), "credential-secret-vless.json")
+	if err := os.WriteFile(secretConfigPath, []byte(`{"log":{"level":"info"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := startWithVPNCore(CurrentSession{
 		ConfigPath:  secretConfigPath,
 		LogPath:     "/tmp/credential-secret-vless.log",
 		LogMaxLines: 100,
-	}, "/usr/local/bin/sing-box-secret")
+	})
 	if !errors.Is(err, timeoutErr) {
 		t.Fatalf("startWithVPNCore() error = %v, want wrapped timeout", err)
 	}
-	if !strings.Contains(err.Error(), "vpn core spawn: vpn core rpc spawn timed out") || !strings.Contains(err.Error(), "helper snapshot: state=reachable") {
+	if !strings.Contains(err.Error(), "vpn core singbox.start: vpn core rpc singbox.start timed out") || !strings.Contains(err.Error(), "helper snapshot: state=reachable") {
 		t.Fatalf("startWithVPNCore() error missing helper snapshot: %v", err)
 	}
 	if strings.Contains(err.Error(), secretConfigPath) || strings.Contains(err.Error(), "credential-secret") {
 		t.Fatalf("startWithVPNCore() error leaked payload: %v", err)
 	}
-	if !strings.Contains(strings.Join(capturedCommand, " "), secretConfigPath) {
-		t.Fatalf("test did not exercise secret-bearing RPC payload: command=%q", capturedCommand)
+	if string(capturedConfig) != `{"log":{"level":"info"}}` {
+		t.Fatalf("captured config = %q", capturedConfig)
 	}
 }
 
@@ -81,6 +85,14 @@ func TestSaveAndLoadCurrent(t *testing.T) {
 	}
 	if len(got.Sidecars) != 1 || got.Sidecars[0].Name != "xray" || got.Sidecars[0].PID != 22222 {
 		t.Fatalf("loaded sidecars = %#v, want %#v", got.Sidecars, want.Sidecars)
+	}
+}
+
+func TestLegacyHelperStopRefusesPIDFallbackWithoutHandle(t *testing.T) {
+	// This proves legacy helper metadata cannot turn a stored PID into a privileged signal target when no safe direct fallback exists.
+	err := stopHelperSession(CurrentSession{PID: 4242}, true, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "no safe direct fallback") {
+		t.Fatalf("stopHelperSession() error = %v", err)
 	}
 }
 

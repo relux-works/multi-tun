@@ -17,8 +17,16 @@ type RequestSnapshot = vpncore.RequestSnapshot
 type CompletedRequestSnapshot = vpncore.CompletedRequestSnapshot
 
 var (
-	vpnCoreRunOpenConnect    = vpncore.Run
-	vpnCoreSignalOpenConnect = vpncore.Signal
+	vpnCoreCleanupResolversOpenConnect = vpncore.CleanupResolvers
+	// Compatibility seams remain for existing client unit tests only. The
+	// production functions fail closed; the daemon has no generic run action.
+	vpnCoreRunOpenConnect = func(vpncore.ServiceConfig, []string, string, string) error {
+		return errors.New("generic vpn-core run action was removed")
+	}
+	vpnCoreSignalOpenConnect = func(vpncore.ServiceConfig, int, string, bool) error {
+		return errors.New("PID-based vpn-core signal action was removed")
+	}
+	vpnCoreAvailableOpenConnect = vpncore.Available
 )
 
 func DefaultPrivilegedHelperConfig() PrivilegedHelperConfig {
@@ -37,9 +45,6 @@ func resolvePrivilegedMode(mode string) (string, PrivilegedHelperConfig, error) 
 		if os.Geteuid() == 0 {
 			return PrivilegedModeDirect, cfg, nil
 		}
-		if helperAvailable(cfg) {
-			return PrivilegedModeHelper, cfg, nil
-		}
 		return PrivilegedModeSudo, cfg, nil
 	case PrivilegedModeSudo:
 		if os.Geteuid() == 0 {
@@ -52,7 +57,10 @@ func resolvePrivilegedMode(mode string) (string, PrivilegedHelperConfig, error) 
 		if !helperAvailable(cfg) {
 			return "", cfg, fmt.Errorf("vpn core is not reachable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
 		}
-		return PrivilegedModeHelper, cfg, nil
+		// PR B removes generic root execution before PR C introduces the fully
+		// typed openconnect.start action. Keep the CLI launch working through its
+		// existing sudo lane, and use vpn-core only for typed resolver cleanup.
+		return PrivilegedModeSudo, cfg, nil
 	default:
 		return "", cfg, fmt.Errorf("unsupported privileged mode %q", mode)
 	}
@@ -76,10 +84,6 @@ func RunPrivilegedHelperDaemon(string, int, int) error {
 
 func helperConnect(cfg PrivilegedHelperConfig, command []string, cookie, logPath string) error {
 	return vpnCoreRunOpenConnect(cfg, command, cookie+"\n", logPath)
-}
-
-func helperRun(cfg PrivilegedHelperConfig, command []string, stdinData, logPath string) error {
-	return vpnCoreRunOpenConnect(cfg, command, stdinData, logPath)
 }
 
 func isHelperRPCTimeout(err error) bool {
@@ -119,7 +123,7 @@ func currentLogPath(w io.Writer) string {
 }
 
 func helperAvailable(cfg PrivilegedHelperConfig) bool {
-	return vpncore.Available(cfg)
+	return vpnCoreAvailableOpenConnect(cfg)
 }
 
 func renderPrivilegedHelperPlist(cfg PrivilegedHelperConfig, binaryPath string, clientUID, clientGID int, binarySHA256, manifestSHA256 string) []byte {

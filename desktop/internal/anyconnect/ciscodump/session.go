@@ -34,7 +34,9 @@ type CurrentSession struct {
 	TcpdumpEnabled            bool       `json:"tcpdump_enabled"`
 	TcpdumpBackend            string     `json:"tcpdump_backend,omitempty"`
 	TcpdumpPID                int        `json:"tcpdump_pid,omitempty"`
+	TcpdumpHandle             string     `json:"tcpdump_handle,omitempty"`
 	OCSCTcpdumpPID            int        `json:"ocsc_tcpdump_pid,omitempty"`
+	OCSCTcpdumpHandle         string     `json:"ocsc_tcpdump_handle,omitempty"`
 	ProbeHosts                []string   `json:"probe_hosts,omitempty"`
 	ProbeNameservers          []string   `json:"probe_nameservers,omitempty"`
 	SnapshotCount             int        `json:"snapshot_count,omitempty"`

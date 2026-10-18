@@ -1,6 +1,7 @@
 package vpncore
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -78,10 +79,10 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 	if err := InstallService(cfg, binary, 501, 20, digest); err != nil {
 		t.Fatalf("InstallService() error = %v", err)
 	}
-	if len(commands) != 11 {
-		t.Fatalf("commands = %v, want 11 ordered commands", commands)
+	if len(commands) != 13 {
+		t.Fatalf("commands = %v, want 13 ordered commands", commands)
 	}
-	wantKinds := []string{"rm -rf", "install -d", "chmod -N", "install -o", "install -o", "install -o", "launchctl bootout", "launchctl print", "launchctl print", "launchctl enable", "launchctl bootstrap"}
+	wantKinds := []string{"rm -rf", "install -d", "chmod -N", "install -d", "install -o", "install -o", "install -o", "install -o", "launchctl bootout", "launchctl print", "launchctl print", "launchctl enable", "launchctl bootstrap"}
 	gotKinds := make([]string, 0, len(wantKinds))
 	for _, command := range commands {
 		for _, prefix := range wantKinds {
@@ -98,6 +99,8 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 		"rm -rf " + cfg.HelperDir,
 		"install -d -o root -g wheel -m 0755 " + cfg.HelperDir,
 		"chmod -N " + cfg.HelperDir,
+		"install -d -o root -g wheel -m 0755 " + filepath.Join(cfg.HelperDir, "bin"),
+		" -m 0755 ",
 		" -m 0755 ",
 		" -m 0644 ",
 		" -m 0644 ",
@@ -106,8 +109,8 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 			t.Fatalf("commands[%d] = %q, want fragment %q", index, commands[index], want)
 		}
 	}
-	if !strings.HasSuffix(commands[3], " "+cfg.BinaryPath()) || !strings.HasSuffix(commands[4], " "+cfg.ManifestPath()) || !strings.HasSuffix(commands[5], " "+cfg.PlistPath) {
-		t.Fatalf("installed destinations are wrong: %v", commands[:6])
+	if !strings.HasSuffix(commands[4], " "+cfg.BinaryPath()) || !strings.HasSuffix(commands[5], " "+cfg.ToolPath("sing-box")) || !strings.HasSuffix(commands[6], " "+cfg.ManifestPath()) || !strings.HasSuffix(commands[7], " "+cfg.PlistPath) {
+		t.Fatalf("installed destinations are wrong: %v", commands[:8])
 	}
 	for index, want := range []string{
 		"launchctl bootout system/" + cfg.Label,
@@ -116,8 +119,8 @@ func TestInstallServiceInstallsPackageAndReplacesLaunchServiceInOrder(t *testing
 		"launchctl enable system/" + cfg.Label,
 		"launchctl bootstrap system " + cfg.PlistPath,
 	} {
-		if commands[index+6] != want {
-			t.Fatalf("commands[%d] = %q, want %q", index+6, commands[index+6], want)
+		if commands[index+8] != want {
+			t.Fatalf("commands[%d] = %q, want %q", index+8, commands[index+8], want)
 		}
 	}
 }
@@ -152,6 +155,100 @@ func writeInstallTestBinary(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestInstallPackagePinsResolvedSingBoxInManifestAndDigest(t *testing.T) {
+	// This proves symlink-resolved sing-box bytes are listed in bin/ and changing them changes the install digest.
+	dir := t.TempDir()
+	realTool := filepath.Join(dir, "sing-box-real")
+	linkTool := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(realTool, []byte("sing-box-v1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realTool, linkTool); err != nil {
+		t.Fatal(err)
+	}
+	previous := lookPathInstallVPNCore
+	lookPathInstallVPNCore = func(name string) (string, error) {
+		if name != "sing-box" {
+			t.Fatalf("lookPath(%q)", name)
+		}
+		return linkTool, nil
+	}
+	t.Cleanup(func() { lookPathInstallVPNCore = previous })
+	binary := writeInstallTestBinary(t)
+	first, err := prepareInstallPackage(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(first.dir)
+	manifestData, err := os.ReadFile(first.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := decodeManifest(manifestData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range manifest.Files {
+		if entry.Path == "bin/sing-box" && entry.SHA256 == first.tools[0].SHA256 {
+			found = true
+		}
+	}
+	resolvedTool, err := filepath.EvalSymlinks(realTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || first.tools[0].SourcePath != resolvedTool {
+		t.Fatalf("package tools=%#v manifest=%#v", first.tools, manifest)
+	}
+	if err := os.WriteFile(realTool, []byte("sing-box-v2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	second, err := prepareInstallPackage(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(second.dir)
+	if first.digest == second.digest {
+		t.Fatal("install digest did not change with sing-box bytes")
+	}
+}
+
+func TestToolDriftReportsDifferenceAndSuppressesEquality(t *testing.T) {
+	// This proves status drift emits short pinned/PATH hashes only on a real content mismatch.
+	dir := t.TempDir()
+	cfg := ServiceConfig{HelperDir: filepath.Join(dir, "helper")}
+	if err := os.MkdirAll(cfg.HelperDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathTool := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(pathTool, []byte("same\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := hashFile(pathTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData, _ := json.Marshal(Manifest{Version: manifestVersion, Files: []ManifestFile{{Path: "bin/sing-box", SHA256: sha}}})
+	if err := os.WriteFile(cfg.ManifestPath(), manifestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previous := lookPathInstallVPNCore
+	lookPathInstallVPNCore = func(string) (string, error) { return pathTool, nil }
+	t.Cleanup(func() { lookPathInstallVPNCore = previous })
+	drift, err := ToolDrift(cfg)
+	if err != nil || len(drift) != 0 {
+		t.Fatalf("equal drift=%v err=%v", drift, err)
+	}
+	if err := os.WriteFile(pathTool, []byte("different\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	drift, err = ToolDrift(cfg)
+	if err != nil || len(drift) != 1 || !strings.HasPrefix(drift[0], "drift: sing-box pinned=") || !strings.Contains(drift[0], " path=") {
+		t.Fatalf("different drift=%v err=%v", drift, err)
+	}
 }
 
 func testInstallConfig(t *testing.T) ServiceConfig {

@@ -45,15 +45,16 @@ var (
 	vpnCoreAvailableCiscoDump   = func() bool {
 		return vpncore.Available(vpncore.DefaultServiceConfig())
 	}
-	vpnCoreSpawnDetachedCiscoDump = func(command []string, logPath string, setPGID bool) (int, error) {
-		return vpncore.SpawnDetached(vpncore.DefaultServiceConfig(), command, "", logPath, setPGID)
+	vpnCoreStartTCPDumpCiscoDump = func(interfaceName string, filter []string, applePCAPNG, runAsUser bool) (int, string, error) {
+		return vpncore.StartTCPDump(vpncore.DefaultServiceConfig(), interfaceName, filter, applePCAPNG, runAsUser)
 	}
-	vpnCoreSignalCiscoDump = func(pid int, signal string, group bool) error {
-		return vpncore.Signal(vpncore.DefaultServiceConfig(), pid, signal, group)
+	vpnCoreSignalCiscoDump = func(handle, signal string) (string, error) {
+		return vpncore.Signal(vpncore.DefaultServiceConfig(), handle, signal)
 	}
-	currentProcessRegex     = regexp.MustCompile(`(?i)(/opt/cisco|/Applications/Cisco|/Applications/AnyConnect|\.cisco/hostscan/bin64/cscan|vpnagentd|vpnui|acwebhelper|cscan|acextension|acsockext)`)
-	defaultProbeHosts       = []string{"gitlab.services.corp.example", "portal.corp.example"}
-	defaultProbeNameservers = []string{"10.23.16.4", "10.23.0.23"}
+	processAliveVPNCoreCiscoDump = ProcessAlive
+	currentProcessRegex          = regexp.MustCompile(`(?i)(/opt/cisco|/Applications/Cisco|/Applications/AnyConnect|\.cisco/hostscan/bin64/cscan|vpnagentd|vpnui|acwebhelper|cscan|acextension|acsockext)`)
+	defaultProbeHosts            = []string{"gitlab.services.corp.example", "portal.corp.example"}
+	defaultProbeNameservers      = []string{"10.23.16.4", "10.23.0.23"}
 )
 
 type StartOptions struct {
@@ -107,8 +108,9 @@ type socketSnapshot struct {
 }
 
 type runningTCPDump struct {
-	pid  int
-	stop func(time.Duration) error
+	pid    int
+	handle string
+	stop   func(time.Duration) error
 }
 
 func Start(cacheDir string, options StartOptions) (CurrentSession, error) {
@@ -296,6 +298,7 @@ func RunDaemon(options DaemonOptions) error {
 			return err
 		}
 		current.TcpdumpPID = primaryCapture.pid
+		current.TcpdumpHandle = primaryCapture.handle
 		if current.OCSCPcapPath != "" {
 			ocscCapture, err = startTCPDump(current, options.TcpdumpBinary, defaultOCSCInterface, defaultOCSCFilter, current.OCSCPcapPath)
 			if err != nil {
@@ -303,6 +306,7 @@ func RunDaemon(options DaemonOptions) error {
 				return err
 			}
 			current.OCSCTcpdumpPID = ocscCapture.pid
+			current.OCSCTcpdumpHandle = ocscCapture.handle
 		}
 		if err := SaveMetadata(current); err != nil {
 			return err
@@ -598,14 +602,15 @@ func startTCPDump(current CurrentSession, binary, interfaceName, filter, pcapPat
 			},
 		}, nil
 	case tcpdumpBackendVPNCore:
-		pid, err := vpnCoreSpawnDetachedCiscoDump(command, current.LogPath, false)
+		pid, handle, err := vpnCoreStartTCPDumpCiscoDump(interfaceName, strings.Fields(filter), strings.HasPrefix(interfaceName, "pktap"), true)
 		if err != nil {
 			return runningTCPDump{}, fmt.Errorf("start tcpdump via vpn-core: %w", err)
 		}
 		return runningTCPDump{
-			pid: pid,
+			pid:    pid,
+			handle: handle,
 			stop: func(timeout time.Duration) error {
-				return stopDetachedPID(pid, timeout)
+				return stopDetachedPID(pid, handle, pcapPath, timeout)
 			},
 		}, nil
 	default:
@@ -683,42 +688,62 @@ func stopChildProcess(cmd *exec.Cmd, timeout time.Duration) error {
 	}
 }
 
-func stopDetachedPID(pid int, timeout time.Duration) error {
+func stopDetachedPID(pid int, handle, destination string, timeout time.Duration) error {
 	if pid <= 0 {
 		return nil
 	}
-	if err := vpnCoreSignalCiscoDump(pid, "TERM", false); err != nil {
+	source, err := vpnCoreSignalCiscoDump(handle, "TERM")
+	if err != nil {
 		return err
 	}
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		alive, err := ProcessAlive(pid)
+		alive, err := processAliveVPNCoreCiscoDump(pid)
 		if err != nil {
 			return err
 		}
 		if !alive {
-			return nil
+			return copyCompletedCapture(source, destination)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if err := vpnCoreSignalCiscoDump(pid, "KILL", false); err != nil {
+	source, err = vpnCoreSignalCiscoDump(handle, "KILL")
+	if err != nil {
 		return err
 	}
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		alive, err := ProcessAlive(pid)
+		alive, err := processAliveVPNCoreCiscoDump(pid)
 		if err != nil {
 			return err
 		}
 		if !alive {
-			return nil
+			return copyCompletedCapture(source, destination)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for detached tcpdump pid %d to stop", pid)
+}
+
+func copyCompletedCapture(source, destination string) error {
+	if source == "" {
+		return errors.New("vpn core did not return the completed capture path")
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, input)
+	closeErr := output.Close()
+	return errors.Join(copyErr, closeErr)
 }
 
 func killProcessGroup(pid int, sig syscall.Signal) error {

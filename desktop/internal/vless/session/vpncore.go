@@ -2,20 +2,27 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"time"
 )
 
-func startWithVPNCore(current CurrentSession, executable string) (int, error) {
-	command := []string{executable, "run", "-c", current.ConfigPath}
-	pid, err := vpnCoreSpawnDetachedSession(command, current.LogPath, current.LogMaxLines, true)
+func startWithVPNCore(current CurrentSession) (int, string, error) {
+	configJSON, err := os.ReadFile(current.ConfigPath)
 	if err != nil {
-		return 0, fmt.Errorf("vpn core spawn: %w", err)
+		return 0, "", fmt.Errorf("read rendered sing-box config: %w", err)
 	}
-	return pid, nil
+	pid, handle, err := vpnCoreStartSingBoxSession(configJSON, current.LogPath, current.LogMaxLines, true)
+	if err != nil {
+		return 0, "", fmt.Errorf("vpn core singbox.start: %w", err)
+	}
+	return pid, handle, nil
 }
 
 func stopHelperSession(current CurrentSession, force bool, timeout time.Duration) error {
-	if err := vpnCoreSignalSession(current.PID, "-TERM", true); err != nil {
+	if current.Handle == "" {
+		return fmt.Errorf("legacy helper session has no opaque handle; helper-mode stop is refused and this client has no safe direct fallback—stop the pre-PR-B session with the previous client before upgrading")
+	}
+	if err := vpnCoreSignalSession(current.Handle, "-TERM"); err != nil {
 		return fmt.Errorf("vpn core signal: %w", err)
 	}
 
@@ -33,7 +40,7 @@ func stopHelperSession(current CurrentSession, force bool, timeout time.Duration
 	if !force {
 		return fmt.Errorf("timeout waiting for sing-box pid %d to stop", current.PID)
 	}
-	if err := vpnCoreSignalSession(current.PID, "-KILL", true); err != nil {
+	if err := vpnCoreSignalSession(current.Handle, "-KILL"); err != nil {
 		return fmt.Errorf("vpn core signal: %w", err)
 	}
 	deadline = time.Now().Add(1500 * time.Millisecond)
@@ -51,7 +58,10 @@ func stopHelperSession(current CurrentSession, force bool, timeout time.Duration
 }
 
 func killHelperSession(current CurrentSession) error {
-	if err := vpnCoreSignalSession(current.PID, "-KILL", true); err != nil {
+	if current.Handle == "" {
+		return fmt.Errorf("legacy helper session has no opaque handle; refusing PID-based helper stop because no safe direct fallback exists")
+	}
+	if err := vpnCoreSignalSession(current.Handle, "-KILL"); err != nil {
 		return fmt.Errorf("vpn core signal: %w", err)
 	}
 	return nil

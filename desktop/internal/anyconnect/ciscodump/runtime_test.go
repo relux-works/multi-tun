@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildTCPDumpCommand_SplitsFilter(t *testing.T) {
@@ -42,6 +43,50 @@ func TestBuildTCPDumpCommand_EnablesApplePCAPNGForPktap(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildTCPDumpCommand() = %#v, want %#v", got, want)
+	}
+}
+
+func TestVPNCoreTCPDumpUsesTypedFieldsHandleAndRuntimeArtifact(t *testing.T) {
+	// This proves the helper lane sends typed capture fields, signals by opaque handle, and copies only the returned runtime artifact.
+	dir := t.TempDir()
+	source := filepath.Join(dir, "runtime.pcap")
+	destination := filepath.Join(dir, "client.pcap")
+	if err := os.WriteFile(source, []byte("pcap fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousStart := vpnCoreStartTCPDumpCiscoDump
+	previousSignal := vpnCoreSignalCiscoDump
+	previousAlive := processAliveVPNCoreCiscoDump
+	calledStart := false
+	vpnCoreStartTCPDumpCiscoDump = func(iface string, filter []string, apple, runAsUser bool) (int, string, error) {
+		calledStart = iface == "lo0" && reflect.DeepEqual(filter, []string{"tcp", "and", "port", "443"}) && !apple && runAsUser
+		return 999999, "opaque-handle", nil
+	}
+	vpnCoreSignalCiscoDump = func(handle, signal string) (string, error) {
+		if handle != "opaque-handle" || signal != "TERM" {
+			t.Fatalf("signal handle=%q signal=%q", handle, signal)
+		}
+		return source, nil
+	}
+	processAliveVPNCoreCiscoDump = func(int) (bool, error) { return false, nil }
+	t.Cleanup(func() {
+		vpnCoreStartTCPDumpCiscoDump = previousStart
+		vpnCoreSignalCiscoDump = previousSignal
+		processAliveVPNCoreCiscoDump = previousAlive
+	})
+	capture, err := startTCPDump(CurrentSession{TcpdumpBackend: tcpdumpBackendVPNCore}, "/attacker/ignored", "lo0", "tcp and port 443", destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capture.handle != "opaque-handle" || !calledStart {
+		t.Fatalf("capture=%#v calledStart=%t", capture, calledStart)
+	}
+	if err := capture.stop(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil || string(data) != "pcap fixture" {
+		t.Fatalf("destination=%q err=%v", data, err)
 	}
 }
 

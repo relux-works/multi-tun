@@ -18,10 +18,10 @@ func TestVPNCoreDiagnosticsPrintRequestSnapshot(t *testing.T) {
 			Reachable:  true,
 			DaemonPID:  42,
 			HelperSnapshot: &vpncore.HelperSnapshot{
-				ActiveRequests: []vpncore.RequestSnapshot{{Action: "spawn", AgeMillis: 5001}},
+				ActiveRequests: []vpncore.RequestSnapshot{{Action: "singbox.start", AgeMillis: 5001}},
 				QueuedRequests: []vpncore.RequestSnapshot{{Action: "pending", AgeMillis: 11}},
 				LastCompletedRequest: &vpncore.CompletedRequestSnapshot{
-					Action:         "run",
+					Action:         "dns.scutil",
 					Outcome:        "error",
 					DurationMillis: 20000,
 					AgeMillis:      7,
@@ -39,9 +39,9 @@ func TestVPNCoreDiagnosticsPrintRequestSnapshot(t *testing.T) {
 		t.Fatalf("printVPNCoreDiagnostics() exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 	for _, want := range []string{
-		"vpn_core_active_requests: spawn(age=5001ms)",
+		"vpn_core_active_requests: singbox.start(age=5001ms)",
 		"vpn_core_queued_requests: pending(age=11ms)",
-		"vpn_core_last_completed_request: run(outcome=error,duration=20000ms,age=7ms)",
+		"vpn_core_last_completed_request: dns.scutil(outcome=error,duration=20000ms,age=7ms)",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("vpn core diagnostics missing %q:\n%s", want, stdout.String())

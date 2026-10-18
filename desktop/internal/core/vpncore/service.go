@@ -2,8 +2,9 @@ package vpncore
 
 import (
 	"bytes"
-	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,6 @@ import (
 )
 
 const (
-	runTimeout               = 20 * time.Second
 	maxConcurrentConnections = 16
 )
 
@@ -321,11 +321,11 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 		_ = writeResponse(conn, Response{Error: err.Error()})
 		return
 	}
-	if logFile != nil && request.Action != "spawn" {
+	if logFile != nil && request.Action != "singbox.start" {
 		defer logFile.Close()
 	}
 
-	mutating := request.Action == "run" || request.Action == "spawn" || request.Action == "signal"
+	mutating := request.Action != "ping"
 	if mutating {
 		d.mutation.Lock()
 		defer d.mutation.Unlock()
@@ -335,24 +335,38 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 	switch request.Action {
 	case "ping":
 		response.HelperSnapshot = d.requests.snapshot()
-	case "run":
-		if err := d.handleRun(request, logFile); err != nil {
+	case "singbox.start":
+		pid, handle, err := d.handleSingBoxStart(request, logFile)
+		if err != nil {
+			_ = logFile.Close()
 			response.OK = false
 			response.Error = err.Error()
+		} else {
+			response.PID = pid
+			response.Handle = handle
 		}
-	case "spawn":
-		pid, err := d.handleSpawn(request, logFile)
+	case "dns.scutil":
+		responseError(&response, d.handleSCUtil(request))
+	case "dns.networksetup":
+		responseError(&response, d.handleNetworkSetup(request))
+	case "resolver.cleanup":
+		responseError(&response, d.handleResolverCleanup())
+	case "tcpdump.start":
+		pid, handle, err := d.handleTCPDumpStart(request)
 		if err != nil {
 			response.OK = false
 			response.Error = err.Error()
-			_ = logFile.Close()
 		} else {
 			response.PID = pid
+			response.Handle = handle
 		}
 	case "signal":
-		if err := d.handleSignal(request); err != nil {
+		path, err := d.handleSignal(request)
+		if err != nil {
 			response.OK = false
 			response.Error = err.Error()
+		} else {
+			response.Path = path
 		}
 	default:
 		response.OK = false
@@ -360,6 +374,13 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 	}
 	d.requests.complete(requestID, response.OK)
 	_ = writeResponse(conn, response)
+}
+
+func responseError(response *Response, err error) {
+	if err != nil {
+		response.OK = false
+		response.Error = err.Error()
+	}
 }
 
 const controlBufferBytesVPNCore = 4096
@@ -482,11 +503,19 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 		closeFDs()
 		return Request{}, nil, err
 	}
+	if !knownAction(request.Action) {
+		closeFDs()
+		return Request{}, nil, fmt.Errorf("unsupported vpn core action %q", request.Action)
+	}
+	if err := validateRequestShape(request); err != nil {
+		closeFDs()
+		return Request{}, nil, err
+	}
 
-	wantsLog := request.Action == "run" || request.Action == "spawn"
+	wantsLog := request.Action == "singbox.start"
 	if wantsLog && len(receivedFDs) != 1 {
 		closeFDs()
-		return Request{}, nil, errors.New("run/spawn requires exactly one log file descriptor")
+		return Request{}, nil, errors.New("singbox.start requires exactly one log file descriptor")
 	}
 	if !wantsLog && len(receivedFDs) != 0 {
 		closeFDs()
@@ -513,6 +542,45 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 	return request, file, nil
 }
 
+func validateRequestShape(request Request) error {
+	unexpected := false
+	switch request.Action {
+	case "ping":
+		unexpected = len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
+	case "singbox.start":
+		unexpected = request.Stdin != "" || request.Handle != "" || request.Signal != "" || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
+		if request.LogMaxLines < 0 || request.LogMaxLines > 1_000_000 {
+			return errors.New("singbox.start log_max_lines is outside 0..1000000")
+		}
+	case "dns.scutil":
+		unexpected = len(request.ConfigJSON) != 0 || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
+	case "dns.networksetup":
+		unexpected = len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
+		if len(request.Service) > 256 || len(request.Servers) > 64 {
+			return errors.New("dns.networksetup fields exceed their size limits")
+		}
+	case "resolver.cleanup":
+		unexpected = len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
+	case "tcpdump.start":
+		unexpected = len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0
+	case "signal":
+		unexpected = len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
+	}
+	if unexpected {
+		return fmt.Errorf("vpn core action %q contains fields outside its typed schema", request.Action)
+	}
+	return nil
+}
+
+func knownAction(action string) bool {
+	switch action {
+	case "ping", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal":
+		return true
+	default:
+		return false
+	}
+}
+
 func requireJSONEOF(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -531,145 +599,78 @@ func writeResponse(conn net.Conn, response Response) error {
 	return json.NewEncoder(conn).Encode(response)
 }
 
-func (d *serviceDaemon) handleRun(request Request, logFile *os.File) error {
-	if err := validateInterimCommand(request.Command); err != nil {
-		return err
+func (d *serviceDaemon) handleSignal(request Request) (string, error) {
+	if len(request.Handle) != 48 {
+		return "", errors.New("handle must be a 48-character opaque token")
 	}
-	logWriter := newPassedLogWriter(logFile, request.LogMaxLines)
-	defer logWriter.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
-	defer cancel()
-	cmd := execCommandContextVPNCore(ctx, request.Command[0], request.Command[1:]...)
-	cmd.Stdin = strings.NewReader(request.Stdin)
-	cmd.Stdout = logWriter
-	cmd.Stderr = logWriter
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("timed out after %s", runTimeout)
-		}
-		return err
-	}
-	return nil
-}
-
-func (d *serviceDaemon) handleSpawn(request Request, logFile *os.File) (int, error) {
-	if err := validateInterimCommand(request.Command); err != nil {
-		return 0, err
-	}
-	logWriter := newPassedLogWriter(logFile, request.LogMaxLines)
-	cmd := execCommandVPNCore(request.Command[0], request.Command[1:]...)
-	if request.Stdin != "" {
-		cmd.Stdin = strings.NewReader(request.Stdin)
-	}
-	cmd.Stdout = logWriter
-	cmd.Stderr = logWriter
-	if request.SetPGID {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
-	if err := cmd.Start(); err != nil {
-		_ = logWriter.Close()
-		return 0, err
-	}
-	pid := cmd.Process.Pid
-	d.children.add(pid, request.SetPGID)
-	if err := watchProcessExitVPNCore(pid, func() {
-		d.children.removeBeforeReap(pid, func() {
-			_ = cmd.Wait()
-			_ = logWriter.Close()
-		})
-	}); err != nil {
-		d.children.remove(pid)
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = logWriter.Close()
-		return 0, fmt.Errorf("watch spawned process %d: %w", pid, err)
-	}
-	return pid, nil
-}
-
-func (d *serviceDaemon) handleSignal(request Request) error {
-	if request.PID <= 0 {
-		return errors.New("missing pid")
+	if _, err := hex.DecodeString(request.Handle); err != nil || request.Handle != strings.ToLower(request.Handle) {
+		return "", errors.New("handle must be lowercase hexadecimal")
 	}
 	if request.Signal == "" {
-		return errors.New("missing signal")
+		return "", errors.New("missing signal")
 	}
 	sig, err := parseSignal(request.Signal)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return d.children.signal(request.PID, request.Group, sig)
+	return d.children.signal(request.Handle, sig)
 }
 
-type childRecord struct{ setPGID bool }
+type childRecord struct {
+	pid        int
+	setPGID    bool
+	resultPath string
+}
 
 type childRegistry struct {
 	mu       sync.Mutex
-	children map[int]childRecord
+	children map[string]childRecord
 }
 
-func newChildRegistry() *childRegistry { return &childRegistry{children: make(map[int]childRecord)} }
-func (r *childRegistry) add(pid int, setPGID bool) {
+func newChildRegistry() *childRegistry { return &childRegistry{children: make(map[string]childRecord)} }
+func (r *childRegistry) add(pid int, setPGID bool, resultPath string) (string, error) {
+	var raw [24]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate child handle: %w", err)
+	}
+	handle := hex.EncodeToString(raw[:])
 	r.mu.Lock()
-	r.children[pid] = childRecord{setPGID: setPGID}
+	r.children[handle] = childRecord{pid: pid, setPGID: setPGID, resultPath: resultPath}
+	r.mu.Unlock()
+	return handle, nil
+}
+func (r *childRegistry) remove(handle string) {
+	r.mu.Lock()
+	delete(r.children, handle)
 	r.mu.Unlock()
 }
-func (r *childRegistry) remove(pid int) {
+func (r *childRegistry) removeBeforeReap(handle string, reap func()) {
 	r.mu.Lock()
-	delete(r.children, pid)
-	r.mu.Unlock()
-}
-func (r *childRegistry) removeBeforeReap(pid int, reap func()) {
-	r.mu.Lock()
-	delete(r.children, pid)
+	delete(r.children, handle)
 	r.mu.Unlock()
 	reap()
 }
-func (r *childRegistry) get(pid int) (childRecord, bool) {
+func (r *childRegistry) get(handle string) (childRecord, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	child, ok := r.children[pid]
+	child, ok := r.children[handle]
 	return child, ok
 }
-func (r *childRegistry) signal(pid int, group bool, sig syscall.Signal) error {
+func (r *childRegistry) signal(handle string, sig syscall.Signal) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	child, ok := r.children[pid]
+	child, ok := r.children[handle]
 	if !ok {
-		return fmt.Errorf("pid %d was not spawned by this vpn core daemon or is no longer its child", pid)
+		return "", errors.New("handle was not returned by this vpn core daemon or was already consumed")
 	}
-	if group && !child.setPGID {
-		return fmt.Errorf("pid %d was not spawned in its own process group", pid)
+	target := child.pid
+	if child.setPGID {
+		target = -child.pid
 	}
-	target := pid
-	if group {
-		target = -pid
+	if err := syscall.Kill(target, sig); err != nil {
+		return "", err
 	}
-	return syscall.Kill(target, sig)
-}
-
-// validateInterimCommand is a deliberately narrow PR A compatibility shim.
-// It reduces generic root execution but does not close H03b: PR B/C replace
-// run/spawn with typed actions and root-owned executable snapshots.
-func validateInterimCommand(command []string) error {
-	if len(command) == 0 {
-		return errors.New("missing command")
-	}
-	executable := command[0]
-	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
-		return fmt.Errorf("command executable %q must be a clean absolute path", executable)
-	}
-	// TODO(PR B): remove /bin/sh after resolver cleanup becomes a typed Go action.
-	switch executable {
-	case "/usr/sbin/scutil", "/usr/sbin/networksetup", "/usr/sbin/tcpdump", "/bin/sh":
-		return nil
-	}
-	switch filepath.Base(executable) {
-	case "sing-box", "xray", "openconnect":
-		return nil
-	default:
-		return fmt.Errorf("command executable %q is not in the PR A interim allowlist", executable)
-	}
+	return child.resultPath, nil
 }
 
 func parseSignal(value string) (syscall.Signal, error) {

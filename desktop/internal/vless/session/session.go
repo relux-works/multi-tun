@@ -50,11 +50,12 @@ var (
 	vpnCoreAvailableSession = func() bool {
 		return vpncore.Available(vpncore.DefaultServiceConfig())
 	}
-	vpnCoreSpawnDetachedSession = func(command []string, logPath string, maxLines int, setPGID bool) (int, error) {
-		return vpncore.SpawnDetachedWithLogOptions(vpncore.DefaultServiceConfig(), command, "", logPath, setPGID, vpncore.LogOptions{MaxLines: maxLines})
+	vpnCoreStartSingBoxSession = func(configJSON []byte, logPath string, maxLines int, setPGID bool) (int, string, error) {
+		return vpncore.StartSingBox(vpncore.DefaultServiceConfig(), configJSON, logPath, setPGID, vpncore.LogOptions{MaxLines: maxLines})
 	}
-	vpnCoreSignalSession = func(pid int, signal string, group bool) error {
-		return vpncore.Signal(vpncore.DefaultServiceConfig(), pid, signal, group)
+	vpnCoreSignalSession = func(handle, signal string) error {
+		_, err := vpncore.Signal(vpncore.DefaultServiceConfig(), handle, signal)
+		return err
 	}
 	startupSessionAlive = func(current CurrentSession) (bool, int, error) {
 		return SessionAlive(current)
@@ -110,6 +111,7 @@ type SidecarOptions struct {
 type CurrentSession struct {
 	ID                       string           `json:"id"`
 	PID                      int              `json:"pid"`
+	Handle                   string           `json:"handle,omitempty"`
 	StartedAt                time.Time        `json:"started_at"`
 	Engine                   string           `json:"engine,omitempty"`
 	ConfigPath               string           `json:"config_path"`
@@ -143,14 +145,16 @@ type SidecarSession struct {
 }
 
 func Start(cacheDir, configPath string, profile model.Profile, options StartOptions) (CurrentSession, error) {
-	executable, err := execLookPath("sing-box")
-	if err != nil {
-		return CurrentSession{}, err
-	}
-
 	launchMode, err := resolveLaunchMode(options.Mode, options.PrivilegedLaunch)
 	if err != nil {
 		return CurrentSession{}, err
+	}
+	executable := "sing-box"
+	if launchMode != config.LaunchModeHelper {
+		executable, err = execLookPath("sing-box")
+		if err != nil {
+			return CurrentSession{}, err
+		}
 	}
 
 	now := time.Now().UTC()
@@ -226,12 +230,13 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	switch launchMode {
 	case config.LaunchModeHelper:
 		_ = logFile.Close()
-		pid, err := startWithVPNCore(session, executable)
+		pid, handle, err := startWithVPNCore(session)
 		if err != nil {
 			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
 			return CurrentSession{}, err
 		}
 		session.PID = pid
+		session.Handle = handle
 	default:
 		processLogFile, ok := logFile.(*os.File)
 		if !ok {

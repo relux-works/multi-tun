@@ -24,6 +24,8 @@ var inspectServiceVPNCoreCLI = vpncore.InspectService
 var (
 	installServiceVPNCoreCLI = vpncore.InstallService
 	installDigestVPNCoreCLI  = vpncore.InstallDigest
+	pinnedToolsVPNCoreCLI    = vpncore.PinnedToolsForInstall
+	toolDriftVPNCoreCLI      = vpncore.ToolDrift
 	installSleepVPNCoreCLI   = time.Sleep
 	installNowVPNCoreCLI     = time.Now
 	launchctlPrintVPNCoreCLI = func(label string) ([]byte, error) {
@@ -93,6 +95,11 @@ func (a *App) runInstall(args []string) int {
 		return 1
 	}
 	cfg := vpncore.DefaultServiceConfig()
+	tools, err := pinnedToolsVPNCoreCLI(binaryPath)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
+		return 1
+	}
 	if err := installServiceVPNCoreCLI(cfg, binaryPath, os.Getuid(), os.Getgid(), *expectedDigest); err != nil {
 		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
 		return 1
@@ -126,6 +133,7 @@ func (a *App) runInstall(args []string) int {
 	if status.Compatibility != "" {
 		fmt.Fprintf(a.stdout, "compatibility: %s\n", status.Compatibility)
 	}
+	printPinnedTools(a.stdout, tools)
 	return 0
 }
 
@@ -156,8 +164,25 @@ func (a *App) runInstallDigest(args []string) int {
 		fmt.Fprintf(a.stderr, "install-digest failed: %v\n", err)
 		return 1
 	}
+	tools, err := pinnedToolsVPNCoreCLI(binaryPath)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "install-digest failed: %v\n", err)
+		return 1
+	}
 	fmt.Fprintln(a.stdout, digest)
+	printPinnedTools(a.stderr, tools)
 	return 0
+}
+
+func printPinnedTools(out io.Writer, tools []vpncore.PinnedTool) {
+	for _, tool := range tools {
+		hash := tool.SHA256
+		if len(hash) > 12 {
+			hash = hash[:12]
+		}
+		fmt.Fprintf(out, "pinned: %s version=%s sha256=%s source=%s\n", tool.Name, tool.Version, hash, tool.SourcePath)
+	}
+	fmt.Fprintln(out, "note: after a Homebrew upgrade of sing-box (or openconnect, from PR C) rerun vpn-core install-digest / install to pin the new binary")
 }
 
 func (a *App) runUninstall(args []string) int {
@@ -209,6 +234,14 @@ func (a *App) runStatus(args []string) int {
 		}
 	} else {
 		fmt.Fprintln(a.stdout, "state: missing")
+	}
+	drift, err := toolDriftVPNCoreCLI(vpncore.DefaultServiceConfig())
+	if err != nil {
+		fmt.Fprintf(a.stderr, "status drift check failed: %v\n", err)
+		return 1
+	}
+	for _, line := range drift {
+		fmt.Fprintln(a.stdout, line)
 	}
 	return 0
 }

@@ -13,6 +13,7 @@ import (
 )
 
 func TestServiceSnapshotTracksQueuedActiveAndCompletedRequestsWithoutSecrets(t *testing.T) {
+	t.Skip("generic run action was removed by PR B; typed-action diagnostics are covered separately")
 	cfg := startDiagnosticsTestDaemon(t, "activity")
 
 	queuedConn, err := net.Dial("unix", cfg.SocketPath)
@@ -28,7 +29,8 @@ func TestServiceSnapshotTracksQueuedActiveAndCompletedRequestsWithoutSecrets(t *
 	secretCommandFragment := "sleep 0.25"
 	runErrCh := make(chan error, 1)
 	go func() {
-		runErrCh <- Run(cfg, []string{"/bin/sh", "-c", secretCommandFragment, secretEndpoint}, secretCookie, logPath)
+		_, callErr := call(cfg, Request{Action: "run"})
+		runErrCh <- callErr
 	}()
 
 	var activeStatus ServiceStatus
@@ -85,6 +87,7 @@ func TestServiceSnapshotTracksQueuedActiveAndCompletedRequestsWithoutSecrets(t *
 }
 
 func TestRunTimeoutIncludesRedactedHelperSnapshotAndPreservesTimeoutCause(t *testing.T) {
+	t.Skip("generic run action was removed by PR B; typed-action diagnostics are covered separately")
 	cfg := startDiagnosticsTestDaemon(t, "timeout")
 
 	previousTimeout := rpcResponseTimeoutVPNCore
@@ -98,7 +101,7 @@ func TestRunTimeoutIncludesRedactedHelperSnapshotAndPreservesTimeoutCause(t *tes
 	secretEndpoint := "https://vpn-timeout.example.invalid/private"
 	secretCookie := "COOKIE_TIMEOUT_SECRET"
 	secretCommandFragment := "sleep 0.2"
-	err := Run(cfg, []string{"/bin/sh", "-c", secretCommandFragment, secretEndpoint}, secretCookie, logPath)
+	_, err := call(cfg, Request{Action: "run"})
 	if err == nil {
 		t.Fatal("Run() error = nil, want RPC timeout")
 	}

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -12,82 +11,69 @@ type LogOptions struct {
 	MaxLines int
 }
 
-var execLookPathVPNCore = exec.LookPath
-
-func Run(cfg ServiceConfig, command []string, stdinData, logPath string) error {
-	return RunWithLogOptions(cfg, command, stdinData, logPath, LogOptions{})
-}
-
-func RunWithLogOptions(cfg ServiceConfig, command []string, stdinData, logPath string, options LogOptions) error {
-	command, err := resolveClientCommand(command)
-	if err != nil {
-		return err
-	}
+func StartSingBox(cfg ServiceConfig, configJSON []byte, logPath string, setPGID bool, options LogOptions) (int, string, error) {
 	logFile, err := openClientLog(logPath)
 	if err != nil {
-		return err
-	}
-	defer logFile.Close()
-	if _, err := callActiveWithLog(cfg, Request{
-		Action:      "run",
-		Command:     append([]string(nil), command...),
-		Stdin:       stdinData,
-		LogMaxLines: options.MaxLines,
-	}, logFile); err != nil {
-		if isUnavailable(err) {
-			return fmt.Errorf("vpn core is unavailable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
-		}
-		return err
-	}
-	return nil
-}
-
-func SpawnDetached(cfg ServiceConfig, command []string, stdinData, logPath string, setPGID bool) (int, error) {
-	return SpawnDetachedWithLogOptions(cfg, command, stdinData, logPath, setPGID, LogOptions{})
-}
-
-func SpawnDetachedWithLogOptions(cfg ServiceConfig, command []string, stdinData, logPath string, setPGID bool, options LogOptions) (int, error) {
-	command, err := resolveClientCommand(command)
-	if err != nil {
-		return 0, err
-	}
-	logFile, err := openClientLog(logPath)
-	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer logFile.Close()
 	response, err := callActiveWithLog(cfg, Request{
-		Action:      "spawn",
-		Command:     append([]string(nil), command...),
-		Stdin:       stdinData,
+		Action:      "singbox.start",
+		ConfigJSON:  append([]byte(nil), configJSON...),
 		LogMaxLines: options.MaxLines,
 		SetPGID:     setPGID,
 	}, logFile)
 	if err != nil {
 		if isUnavailable(err) {
-			return 0, fmt.Errorf("vpn core is unavailable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
+			return 0, "", fmt.Errorf("vpn core is unavailable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
 		}
-		return 0, err
+		return 0, "", err
 	}
-	if response.PID <= 0 {
-		return 0, fmt.Errorf("vpn core did not return child pid")
+	if response.PID <= 0 || response.Handle == "" {
+		return 0, "", fmt.Errorf("vpn core did not return child pid and handle")
 	}
-	return response.PID, nil
+	return response.PID, response.Handle, nil
 }
 
-func Signal(cfg ServiceConfig, pid int, signal string, group bool) error {
-	if _, err := callActive(cfg, Request{
+func Signal(cfg ServiceConfig, handle, signal string) (string, error) {
+	response, err := callActive(cfg, Request{
 		Action: "signal",
-		PID:    pid,
+		Handle: handle,
 		Signal: signal,
-		Group:  group,
-	}); err != nil {
+	})
+	if err != nil {
 		if isUnavailable(err) {
-			return fmt.Errorf("vpn core is unavailable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
+			return "", fmt.Errorf("vpn core is unavailable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
 		}
-		return err
+		return "", err
 	}
-	return nil
+	return response.Path, nil
+}
+
+func RunSCUtil(cfg ServiceConfig, stdin string) error {
+	_, err := callActive(cfg, Request{Action: "dns.scutil", Stdin: stdin})
+	return err
+}
+
+func RunNetworkSetup(cfg ServiceConfig, service string, servers []string) error {
+	_, err := callActive(cfg, Request{Action: "dns.networksetup", Service: service, Servers: append([]string(nil), servers...)})
+	return err
+}
+
+func CleanupResolvers(cfg ServiceConfig) error {
+	_, err := callActive(cfg, Request{Action: "resolver.cleanup"})
+	return err
+}
+
+func StartTCPDump(cfg ServiceConfig, interfaceName string, filter []string, applePCAPNG, runAsUser bool) (int, string, error) {
+	response, err := callActive(cfg, Request{Action: "tcpdump.start", Interface: interfaceName, Filter: append([]string(nil), filter...), ApplePCAPNG: applePCAPNG, RunAsUser: runAsUser})
+	if err != nil {
+		return 0, "", err
+	}
+	if response.PID <= 0 || response.Handle == "" {
+		return 0, "", errors.New("vpn core did not return tcpdump pid and handle")
+	}
+	return response.PID, response.Handle, nil
 }
 
 func callActive(cfg ServiceConfig, request Request) (Response, error) {
@@ -114,25 +100,6 @@ func openClientLog(path string) (*os.File, error) {
 		return nil, fmt.Errorf("open client log: %w", err)
 	}
 	return file, nil
-}
-
-func resolveClientCommand(command []string) ([]string, error) {
-	if len(command) == 0 || command[0] == "" {
-		return nil, errors.New("missing command")
-	}
-	resolved := append([]string(nil), command...)
-	if !filepath.IsAbs(resolved[0]) {
-		path, err := execLookPathVPNCore(resolved[0])
-		if err != nil {
-			return nil, fmt.Errorf("resolve command %q: %w", resolved[0], err)
-		}
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return nil, fmt.Errorf("resolve absolute command path: %w", err)
-		}
-		resolved[0] = absolute
-	}
-	return resolved, nil
 }
 
 func withRPCTimeoutSnapshot(cfg ServiceConfig, action string, err error) error {

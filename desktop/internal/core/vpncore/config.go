@@ -7,6 +7,7 @@ const (
 	defaultServicePlistPath  = "/Library/LaunchDaemons/works.relux.vpn-core.plist"
 	defaultServiceSocketPath = "/private/var/run/works.relux.vpn-core.sock"
 	defaultServiceHelperDir  = "/Library/PrivilegedHelperTools/works.relux.vpn-core"
+	defaultServiceRuntimeDir = "/private/var/run/works.relux.vpn-core"
 
 	legacyOpenConnectHelperLabel      = "works.relux.openconnect-tun-helper"
 	legacyOpenConnectHelperPlistPath  = "/Library/LaunchDaemons/works.relux.openconnect-tun-helper.plist"
@@ -20,6 +21,7 @@ type ServiceConfig struct {
 	PlistPath  string
 	SocketPath string
 	HelperDir  string
+	RuntimeDir string
 }
 
 type ServiceStatus struct {
@@ -63,6 +65,7 @@ func DefaultServiceConfig() ServiceConfig {
 		PlistPath:  defaultServicePlistPath,
 		SocketPath: defaultServiceSocketPath,
 		HelperDir:  defaultServiceHelperDir,
+		RuntimeDir: defaultServiceRuntimeDir,
 	}
 }
 
@@ -95,7 +98,8 @@ func sameServiceConfig(left, right ServiceConfig) bool {
 	return left.Label == right.Label &&
 		left.PlistPath == right.PlistPath &&
 		left.SocketPath == right.SocketPath &&
-		left.HelperDir == right.HelperDir
+		left.HelperDir == right.HelperDir &&
+		left.RuntimeDir == right.RuntimeDir
 }
 
 func (c ServiceConfig) BinaryPath() string {
@@ -104,4 +108,8 @@ func (c ServiceConfig) BinaryPath() string {
 
 func (c ServiceConfig) ManifestPath() string {
 	return filepath.Join(c.HelperDir, "manifest.json")
+}
+
+func (c ServiceConfig) ToolPath(name string) string {
+	return filepath.Join(c.HelperDir, "bin", name)
 }

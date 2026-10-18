@@ -34,6 +34,12 @@ var (
 		return execCommand(networksetupPath, "-getdnsservers", service).CombinedOutput()
 	}
 	setDNSServersPrivilegedSession = func(launchMode, logPath string, maxLines int, service string, servers []string) error {
+		if launchMode == config.LaunchModeHelper {
+			if len(servers) == 0 {
+				servers = []string{"Empty"}
+			}
+			return vpncore.RunNetworkSetup(vpncore.DefaultServiceConfig(), service, servers)
+		}
 		args := []string{"-setdnsservers", service}
 		if len(servers) == 0 {
 			args = append(args, "Empty")
@@ -43,6 +49,9 @@ var (
 		return runPrivilegedLoggedCommand(launchMode, logPath, maxLines, append([]string{networksetupPath}, args...))
 	}
 	runScutilPrivilegedSession = func(launchMode, logPath string, maxLines int, stdinData string) error {
+		if launchMode == config.LaunchModeHelper {
+			return vpncore.RunSCUtil(vpncore.DefaultServiceConfig(), stdinData)
+		}
 		return runPrivilegedLoggedCommandWithInput(launchMode, logPath, maxLines, []string{scutilPath}, stdinData)
 	}
 )
@@ -361,7 +370,7 @@ func runPrivilegedLoggedCommandWithInput(launchMode, logPath string, maxLines in
 
 	switch launchMode {
 	case config.LaunchModeHelper:
-		return vpncore.RunWithLogOptions(vpncore.DefaultServiceConfig(), append([]string(nil), command...), stdinData, logPath, vpncore.LogOptions{MaxLines: maxLines})
+		return fmt.Errorf("helper mode requires a typed vpn-core DNS action")
 	case config.LaunchModeDirect:
 		return runLoggedCommand(command, stdinData, logPath, maxLines)
 	case config.LaunchModeSudo:
