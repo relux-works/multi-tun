@@ -53,6 +53,7 @@ func New(stdout, stderr io.Writer) *App {
 }
 
 func (a *App) Run(args []string) int {
+	defer a.flushOutput()
 	if len(args) == 0 {
 		a.printUsage()
 		return 2
@@ -300,4 +301,13 @@ func resolveExecutablePath() (string, error) {
 		return "", fmt.Errorf("empty executable path")
 	}
 	return path, nil
+}
+
+// flushOutput writes any incomplete UTF-8 tail the escaping writers hold.
+func (a *App) flushOutput() {
+	for _, w := range []io.Writer{a.stdout, a.stderr} {
+		if flusher, ok := w.(interface{ Flush() error }); ok {
+			_ = flusher.Flush()
+		}
+	}
 }
