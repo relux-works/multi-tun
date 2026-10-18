@@ -486,3 +486,58 @@ func waitForActiveAction(t *testing.T, daemon *serviceDaemon, action string) {
 	}
 	t.Fatalf("action %q did not become active", action)
 }
+
+// A sender that overflows a small control buffer must not leak descriptors:
+// eight rights in one message are all closed by the daemon and refused.
+func TestReadRequestClosesEveryDescriptorOfAnOversizedRightsMessage(t *testing.T) {
+	const count = 8
+	server, client := unixSocketPair(t)
+	readers := make([]*os.File, 0, count)
+	writerFDs := make([]int, 0, count)
+	writers := make([]*os.File, 0, count)
+	for range count {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		readers = append(readers, reader)
+		writers = append(writers, writer)
+		writerFDs = append(writerFDs, int(writer.Fd()))
+		t.Cleanup(func() { _ = reader.Close() })
+	}
+	request := []byte("{\"action\":\"run\",\"command\":[\"/usr/sbin/scutil\"]}\n")
+	writeUnixPayload(t, client, request, unix.UnixRights(writerFDs...))
+	for _, writer := range writers {
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := readRequest(server); err == nil {
+		t.Fatal("readRequest() error = nil, want refusal of eight descriptors")
+	}
+	for index, reader := range readers {
+		if err := unix.SetNonblock(int(reader.Fd()), true); err != nil {
+			t.Fatal(err)
+		}
+		n, readErr := reader.Read(make([]byte, 1))
+		if n != 0 || readErr != io.EOF {
+			t.Fatalf("pipe %d read = (%d, %v), want EOF: received descriptor leaked", index, n, readErr)
+		}
+	}
+}
+
+// rightsFromControl recovers descriptors from a control buffer whose header
+// claims more bytes than were received, and ignores non-rights messages.
+func TestRightsFromControlToleratesTruncatedBuffer(t *testing.T) {
+	rights := unix.UnixRights(11, 12, 13)
+	truncated := rights[:unix.CmsgLen(0)+8]
+	if got := rightsFromControl(truncated); len(got) != 2 || got[0] != 11 || got[1] != 12 {
+		t.Fatalf("rightsFromControl(truncated) = %v, want [11 12]", got)
+	}
+	if got := rightsFromControl(rights); len(got) != 3 {
+		t.Fatalf("rightsFromControl(full) = %v, want 3 fds", got)
+	}
+	if got := rightsFromControl([]byte{1, 2, 3}); len(got) != 0 {
+		t.Fatalf("rightsFromControl(short) = %v, want none", got)
+	}
+}

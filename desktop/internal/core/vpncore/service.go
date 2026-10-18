@@ -3,6 +3,7 @@ package vpncore
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -360,6 +362,38 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 	_ = writeResponse(conn, response)
 }
 
+const controlBufferBytesVPNCore = 4096
+
+// rightsFromControl returns every descriptor carried by SCM_RIGHTS messages
+// in a received control buffer, tolerating a malformed or truncated buffer:
+// headers are walked with their lengths clamped to the received bytes and
+// only complete descriptor slots are read.
+func rightsFromControl(oob []byte) []int {
+	var fds []int
+	headerLen := unix.CmsgLen(0)
+	for len(oob) >= unix.SizeofCmsghdr {
+		header := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
+		messageLen := int(header.Len)
+		if messageLen < headerLen {
+			break
+		}
+		end := min(messageLen, len(oob))
+		if header.Level == unix.SOL_SOCKET && header.Type == unix.SCM_RIGHTS {
+			for offset := headerLen; offset+4 <= end; offset += 4 {
+				if fd := int(int32(binary.NativeEndian.Uint32(oob[offset : offset+4]))); fd >= 0 {
+					fds = append(fds, fd)
+				}
+			}
+		}
+		next := unix.CmsgSpace(messageLen - headerLen)
+		if next <= 0 || next > len(oob) {
+			break
+		}
+		oob = oob[next:]
+	}
+	return fds
+}
+
 func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 	rawConn, err := conn.SyscallConn()
 	if err != nil {
@@ -374,7 +408,9 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 	}
 	for !bytes.Contains(payload, []byte{'\n'}) {
 		data := make([]byte, 32*1024)
-		oob := make([]byte, unix.CmsgSpace(4*4))
+		// Large enough for Darwin's per-message SCM_RIGHTS limit, so the kernel
+		// never installs descriptors whose numbers we cannot see.
+		oob := make([]byte, controlBufferBytesVPNCore)
 		var n, oobn, flags int
 		var recvErr error
 		readErr := rawConn.Read(func(fd uintptr) bool {
@@ -396,21 +432,15 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 			if oobn == 0 {
 				return true
 			}
-			messages, parseErr := unix.ParseSocketControlMessage(oob[:oobn])
-			if parseErr != nil {
-				recvErr = fmt.Errorf("parse passed file descriptor: %w", parseErr)
-				return true
+			// Track every descriptor the kernel installed before judging the
+			// buffer: a malformed or truncated control message must still have
+			// its rights closed, never dropped.
+			for _, receivedFD := range rightsFromControl(oob[:oobn]) {
+				unix.CloseOnExec(receivedFD)
+				receivedFDs = append(receivedFDs, receivedFD)
 			}
-			for _, message := range messages {
-				fds, parseErr := unix.ParseUnixRights(&message)
-				if parseErr != nil {
-					recvErr = fmt.Errorf("parse passed file descriptor: %w", parseErr)
-					return true
-				}
-				for _, receivedFD := range fds {
-					unix.CloseOnExec(receivedFD)
-					receivedFDs = append(receivedFDs, receivedFD)
-				}
+			if _, parseErr := unix.ParseSocketControlMessage(oob[:oobn]); parseErr != nil {
+				recvErr = fmt.Errorf("parse passed file descriptor: %w", parseErr)
 			}
 			return true
 		})
