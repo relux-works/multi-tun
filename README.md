@@ -144,7 +144,7 @@ Generated artifacts:
 | `vless-tun` | VLESS subscription refresh, profile rendering, and local TUN sessions | `vless-tun refresh dance`, `vless-tun render fortinetz nl` | `~/.config/vless-tun/`, `~/.cache/vless-tun/`, rendered runtime JSON |
 | `ssh-proxy` | Local SSH dynamic SOCKS5 proxy lifecycle management | `ssh-proxy setup --host ssh-alias --force`, `ssh-proxy start`, `ssh-proxy status`, `ssh-proxy stop` | `~/.config/ssh-proxy/`, `~/.cache/ssh-proxy/`, per-session SSH logs |
 | `openconnect-tun` | Cisco/OpenConnect profile inspection and runtime experiments | `openconnect-tun status`, `openconnect-tun inspect-profiles` | `~/.config/openconnect-tun/`, `~/.cache/openconnect-tun/` |
-| `vpn-core` | Privileged typed-action backend for tunnel startup, DNS changes, resolver cleanup, and packet capture; also includes a user-space VLESS subscription metadata probe | `DIGEST="$(vpn-core install-digest)" && vpn-core install --expect-sha256 "$DIGEST"`, `vpn-core status`, `vpn-core inspect-vless-url --insecure <url>` | Root-owned helper and pinned tools under `/Library/PrivilegedHelperTools/works.relux.vpn-core/`, root-only runtime inputs under `/private/var/run/works.relux.vpn-core/`, redacted request-health state, and client-owned logs |
+| `vpn-core` | Privileged typed-action backend for tunnel startup, DNS changes, resolver cleanup, and packet capture; also includes read-only user-space interface auditing and a VLESS subscription metadata probe | `DIGEST="$(vpn-core install-digest)" && vpn-core install --expect-sha256 "$DIGEST"`, `vpn-core status`, `vpn-core interfaces --json`, `vpn-core inspect-vless-url --insecure <url>` | Root-owned helper and pinned tools under `/Library/PrivilegedHelperTools/works.relux.vpn-core/`, root-only runtime inputs under `/private/var/run/works.relux.vpn-core/`, redacted request-health state, client-owned logs, and interface audit output on stdout |
 | `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
 | `xray` | Optional VLESS engine sidecar for profiles that require Xray-only VLESS fields such as `encryption=mlkem...` | `xray run -c <xray-config.json>` through `vless-tun start` when `engine.type=xray` | Sidecar config and sidecar logs under the selected `vless-tun` cache/artifact paths |
 | `Docker` / `Colima` | Linux container labs and controlled SNI-gate experiments | `artifacts/fortinetz-cascade-whitelist/lab/run-macmini-sni-lab.sh nl` | `.temp/fortinetz-cascade/sni-lab-remote/`; remote scratch under `/Users/administrator/.cache/multi-tun/fortinetz-sni-lab` |
@@ -608,6 +608,25 @@ With the default `engine.type=sing-box`, the generated sing-box config contains 
 For subscription compatibility, the sing-box renderer maps Xray's client-only
 `flow=xtls-rprx-vision-udp443` spelling to sing-box's equivalent
 `flow=xtls-rprx-vision`. Xray rendering preserves the original flow value.
+
+### `vpn-core interfaces`
+
+Audits the current macOS `utun` interfaces entirely in read-only user space. It reads interface and IPv4 route tables, then attributes an interface only when its exact name appears in the current `vless-tun` or `openconnect-tun` session record. Addresses and address ranges never imply ownership. Use `--json` for structured output.
+
+```bash
+vpn-core interfaces
+vpn-core interfaces --json
+```
+
+The classes are:
+
+- `owned`: an exact session claim is alive; the report shows its engine and session ID and gives no cleanup advice.
+- `stale`: an exact session claim is dead while the interface remains up; advice uses only that engine's own `vless-tun stop` or `openconnect-tun stop` command. A default route is reported as a fact and warned about only in this class.
+- `unverified`: a claimed session's liveness cannot be determined; the only guidance is to rerun that engine's status command.
+- `unknown`: an IPv4-bearing interface has no claim from either repo engine and is labeled `not ours (another app or system)` with no advice.
+- `system`: an unclaimed utun has no IPv4 address, as with the compact IPv6-link-local macOS system entries; it receives no advice.
+
+When both engines claim the same interface, any live claim wins over unknown or dead claims. An unknown claim wins over dead claims, so the audit never recommends cleanup while ownership may still be live.
 
 ### `vpn-core inspect-vless-url`
 

@@ -80,17 +80,19 @@ func TestStartWithVPNCorePropagatesTimeoutSnapshotWithoutPayload(t *testing.T) {
 	}
 }
 
+// This proves VLESS current-session persistence retains the exact interface name used for ownership attribution.
 func TestSaveAndLoadCurrent(t *testing.T) {
 	t.Parallel()
 
 	cacheDir := t.TempDir()
 	want := CurrentSession{
-		ID:         "20260324T120000Z",
-		PID:        12345,
-		StartedAt:  time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
-		Engine:     config.EngineXray,
-		LogPath:    filepath.Join(cacheDir, "sessions", "sing-box-session-20260324T120000Z.log"),
-		LaunchMode: config.LaunchModeDirect,
+		ID:            "20260324T120000Z",
+		PID:           12345,
+		StartedAt:     time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
+		Engine:        config.EngineXray,
+		InterfaceName: "utun233",
+		LogPath:       filepath.Join(cacheDir, "sessions", "sing-box-session-20260324T120000Z.log"),
+		LaunchMode:    config.LaunchModeDirect,
 		Sidecars: []SidecarSession{
 			{
 				Name:    "xray",
@@ -109,7 +111,7 @@ func TestSaveAndLoadCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCurrent returned error: %v", err)
 	}
-	if got.ID != want.ID || got.PID != want.PID || got.Engine != want.Engine || got.LogPath != want.LogPath {
+	if got.ID != want.ID || got.PID != want.PID || got.Engine != want.Engine || got.InterfaceName != want.InterfaceName || got.LogPath != want.LogPath {
 		t.Fatalf("loaded session = %#v, want %#v", got, want)
 	}
 	if len(got.Sidecars) != 1 || got.Sidecars[0].Name != "xray" || got.Sidecars[0].PID != 22222 {

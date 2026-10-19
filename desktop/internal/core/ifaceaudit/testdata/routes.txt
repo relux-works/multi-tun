@@ -1,0 +1,10 @@
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.0.2.1          UGScg                 en0
+default            link#20            UCS                 utun5
+0/1                172.19.0.2         UGSc              utun233
+10.0.0/8           10.0.0.1           UGSc                utun5
+128.0/1            172.19.0.2         UGSc              utun233
+

@@ -123,6 +123,7 @@ type CurrentSession struct {
 	ProcessComm              string           `json:"process_comm,omitempty"`
 	ProcessStart             time.Time        `json:"process_start,omitempty"`
 	Engine                   string           `json:"engine,omitempty"`
+	InterfaceName            string           `json:"interface_name,omitempty"`
 	ConfigPath               string           `json:"config_path"`
 	LogPath                  string           `json:"log_path"`
 	LogMaxLines              int              `json:"log_max_lines,omitempty"`
@@ -189,6 +190,7 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		ID:                  sessionID,
 		StartedAt:           now,
 		Engine:              firstNonEmpty(options.Engine, config.EngineSingbox),
+		InterfaceName:       strings.TrimSpace(options.InterfaceName),
 		ConfigPath:          configPath,
 		LogPath:             logPath,
 		MetadataPath:        metadataPath,

@@ -1,0 +1,15 @@
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+	options=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>
+	inet 127.0.0.1 netmask 0xff000000
+	inet6 ::1 prefixlen 128
+utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+	inet6 fe80::aede:48ff:fe00:1122%utun0 prefixlen 64 scopeid 0x1f
+utun5: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+	inet 10.0.0.2 --> 10.0.0.1 netmask 0xffffffff
+	inet6 fe80::1234%utun5 prefixlen 64 scopeid 0x20
+utun9: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+	inet 10.8.0.2 --> 10.8.0.1 netmask 0xffffff00
+utun233: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 9000
+	inet 172.19.0.1 --> 172.19.0.2 netmask 0xfffffffc
+	inet6 fdfe:dcba:9876::1 prefixlen 126
+
