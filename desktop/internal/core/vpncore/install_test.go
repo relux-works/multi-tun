@@ -2,6 +2,7 @@ package vpncore
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -285,10 +286,118 @@ func TestInstallPlanMetadataAndDigestUseBytesStagedBeforePATHSourceSwap(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	digestBytes := append(append([]byte(nil), binaryData...), manifestData...)
+	digestBytes := []byte("works.relux.vpn-core.pkg/v1\x00")
+	digestBytes = binary.BigEndian.AppendUint64(digestBytes, uint64(len(binaryData)))
+	digestBytes = append(digestBytes, binaryData...)
+	digestBytes = binary.BigEndian.AppendUint64(digestBytes, uint64(len(manifestData)))
+	digestBytes = append(digestBytes, manifestData...)
 	wantDigest := sha256.Sum256(digestBytes)
 	if plan.Digest() != hex.EncodeToString(wantDigest[:]) {
-		t.Fatalf("plan digest = %q, want digest of staged bytes %x", plan.Digest(), wantDigest)
+		t.Fatalf("plan digest = %q, want framed digest of staged bytes %x", plan.Digest(), wantDigest)
+	}
+}
+
+func TestPackageDigestMatchesFixedVectors(t *testing.T) {
+	// This proves the framing matches vectors computed by independent implementations
+	// (Python hashlib + struct.pack(">Q")): the shared mac-infra vectors (posted in
+	// #mac-infra-lobby/vpn-core-root-install-h03) plus one local vector, including
+	// the empty package and non-UTF-8 binary bytes.
+	for _, tc := range []struct {
+		name             string
+		binary, manifest string
+		want             string
+		unframed         string
+	}{
+		{"mac-infra 1 empty", "", "", "48f4cf7557a6821acf170fc388daba69ad0d9d8a04fae38053e86126539f6b1d", ""},
+		{"mac-infra 2", "ab", "c", "7ab31c62ae8201c0b1f863be472881cce7ee7ec82cbe8a727077536f37a29232", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"mac-infra 3", "a", "bc", "9e0b399700882203bab875094e4867ab6edb2bb5738bdda78a87bb36e7ec96d2", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"mac-infra 4", "vpn-core\x00\xff", "{\"version\":1}\n", "b4a2a21540e568c0aa15ced42cff78fd96c67a561d831b7fe1fc647fa85e99db", "230585662613f457e6addb9f6fa4b3bfc9e0d81edbeb0d8707be8b9b19f7fd96"},
+		{"local", "vpn-core\x00bytes", "{\"version\":1}\n", "8dde545b36c2bbcc6e763d517f584b61a1a7fda7fd014de5e6244459c6211808", ""},
+	} {
+		got, err := packageDigest(strings.NewReader(tc.binary), int64(len(tc.binary)), []byte(tc.manifest))
+		if err != nil || got != tc.want {
+			t.Fatalf("%s: packageDigest() = %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+		if tc.unframed != "" {
+			// The published unframed value must really be the old formula, and must differ.
+			sum := sha256.Sum256([]byte(tc.binary + tc.manifest))
+			if hex.EncodeToString(sum[:]) != tc.unframed || got == tc.unframed {
+				t.Fatalf("%s: unframed = %x, framed = %q, vector unframed = %q", tc.name, sum, got, tc.unframed)
+			}
+		}
+	}
+}
+
+func TestPackageDigestLengthFramingSeparatesBoundary(t *testing.T) {
+	// This proves moving a byte across the binary/manifest boundary changes the digest,
+	// while the unframed concatenation (the control) cannot tell the two packages apart.
+	first, err := packageDigest(strings.NewReader("ab"), 2, []byte("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := packageDigest(strings.NewReader("a"), 1, []byte("bc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != "7ab31c62ae8201c0b1f863be472881cce7ee7ec82cbe8a727077536f37a29232" || second != "9e0b399700882203bab875094e4867ab6edb2bb5738bdda78a87bb36e7ec96d2" {
+		t.Fatalf("framed digests = %q / %q", first, second)
+	}
+	if sha256.Sum256([]byte("ab"+"c")) != sha256.Sum256([]byte("a"+"bc")) {
+		t.Fatal("control: unframed concatenations unexpectedly differ")
+	}
+}
+
+func TestPackageDigestRefusesSizeMismatch(t *testing.T) {
+	// This proves the binary is hashed only when its length equals the declared size,
+	// so the length prefix can never describe bytes other than the ones hashed.
+	for _, tc := range []struct {
+		data string
+		size int64
+	}{{"abc", 4}, {"abcd", 3}, {"", -1}} {
+		if got, err := packageDigest(strings.NewReader(tc.data), tc.size, nil); err == nil {
+			t.Fatalf("packageDigest(%q, %d) = %q, want error", tc.data, tc.size, got)
+		}
+	}
+	if _, err := packageDigest(strings.NewReader("abc"), 3, nil); err != nil {
+		t.Fatalf("control: exact size refused: %v", err)
+	}
+}
+
+func TestInstallServiceRefusesUnframedDigestBeforePrivilege(t *testing.T) {
+	// This proves a digest computed the old unframed way, sha256(vpn-core || manifest.json),
+	// over the exact staged bytes is refused before any sudo check or privileged command.
+	binaryPath := writeInstallTestBinary(t)
+	plan, err := PrepareInstallPlan(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryData, err := os.ReadFile(plan.pkg.binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := os.ReadFile(plan.pkg.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	framed := plan.Digest()
+	plan.Close()
+	unframedSum := sha256.Sum256(append(append([]byte(nil), binaryData...), manifestData...))
+	unframed := hex.EncodeToString(unframedSum[:])
+	if unframed == framed {
+		t.Fatal("control: unframed and framed digests coincide")
+	}
+	var privileged []string
+	sudoChecks := 0
+	withInstallSeams(t, func() error { sudoChecks++; return nil }, func(name string, args ...string) ([]byte, error) {
+		privileged = append(privileged, strings.Join(append([]string{name}, args...), " "))
+		return nil, nil
+	})
+	err = InstallService(testInstallConfig(t), binaryPath, 501, 20, unframed)
+	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("InstallService(unframed) error = %v, want digest mismatch", err)
+	}
+	if sudoChecks != 0 || len(privileged) != 0 {
+		t.Fatalf("privileged work occurred before refusal: sudo=%d commands=%v", sudoChecks, privileged)
 	}
 }
 

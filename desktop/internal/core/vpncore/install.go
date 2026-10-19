@@ -3,6 +3,7 @@ package vpncore
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -305,17 +306,19 @@ func prepareInstallPackage(binaryPath string) (installPackage, error) {
 		return fail(fmt.Errorf("write vpn core manifest: %w", err))
 	}
 	manifestSum := sha256.Sum256(manifestData)
-	digestHash := sha256.New()
 	binaryFile, err := os.Open(stagedBinary)
 	if err != nil {
 		return fail(err)
 	}
-	_, copyErr := io.Copy(digestHash, binaryFile)
+	binaryInfo, statErr := binaryFile.Stat()
+	var digest string
+	if statErr == nil {
+		digest, statErr = packageDigest(binaryFile, binaryInfo.Size(), manifestData)
+	}
 	closeErr := binaryFile.Close()
-	if err := errors.Join(copyErr, closeErr); err != nil {
+	if err := errors.Join(statErr, closeErr); err != nil {
 		return fail(fmt.Errorf("hash vpn core install package: %w", err))
 	}
-	_, _ = digestHash.Write(manifestData)
 
 	return installPackage{
 		dir:            dir,
@@ -323,9 +326,40 @@ func prepareInstallPackage(binaryPath string) (installPackage, error) {
 		manifestPath:   manifestPath,
 		binarySHA256:   binarySHA,
 		manifestSHA256: hex.EncodeToString(manifestSum[:]),
-		digest:         hex.EncodeToString(digestHash.Sum(nil)),
+		digest:         digest,
 		tools:          tools,
 	}, nil
+}
+
+// packageDigestDomain separates the install digest from any other sha256 use.
+// The mac-infra privileged helper computes the same framing; both sides check
+// the shared test vectors.
+const packageDigestDomain = "works.relux.vpn-core.pkg/v1"
+
+// packageDigest is sha256(domain || 0x00 || u64be(len(binary)) || binary ||
+// u64be(len(manifest)) || manifest). The length prefixes keep a byte moved
+// between the binary and the manifest from producing the same digest.
+func packageDigest(binaryData io.Reader, binarySize int64, manifest []byte) (string, error) {
+	if binarySize < 0 {
+		return "", fmt.Errorf("negative vpn core binary size %d", binarySize)
+	}
+	hash := sha256.New()
+	var length [8]byte
+	_, _ = hash.Write([]byte(packageDigestDomain))
+	_, _ = hash.Write([]byte{0})
+	binary.BigEndian.PutUint64(length[:], uint64(binarySize))
+	_, _ = hash.Write(length[:])
+	copied, err := io.Copy(hash, io.LimitReader(binaryData, binarySize+1))
+	if err != nil {
+		return "", err
+	}
+	if copied != binarySize {
+		return "", fmt.Errorf("vpn core binary is %d bytes, expected %d", copied, binarySize)
+	}
+	binary.BigEndian.PutUint64(length[:], uint64(len(manifest)))
+	_, _ = hash.Write(length[:])
+	_, _ = hash.Write(manifest)
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func PinnedToolsForInstall(binaryPath string) ([]PinnedTool, error) {
