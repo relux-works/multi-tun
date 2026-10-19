@@ -18,6 +18,16 @@ type ClaimCollection struct {
 	Issues []string
 }
 
+var (
+	resolveVLESSConfigPath = config.ResolveLoadPath
+	loadVLESSConfig        = config.Load
+	resolveVLESSCurrent    = session.ResolveCurrent
+	checkVLESSSessionAlive = session.SessionAlive
+	loadOpenConnectConfig  = openconnectcfg.LoadOptional
+	loadOpenConnectCurrent = openconnect.LoadCurrent
+	checkOpenConnectAlive  = openconnect.SessionAlive
+)
+
 // CollectClaims reads the same current-session records and invokes the same
 // liveness functions used by the two engine status commands.
 func CollectClaims() ClaimCollection {
@@ -34,13 +44,13 @@ func CollectClaims() ClaimCollection {
 }
 
 func collectVLESSClaims(collection *ClaimCollection) {
-	configPath, err := config.ResolveLoadPath("")
+	configPath, err := resolveVLESSConfigPath("")
 	if err != nil {
 		collection.Issues = append(collection.Issues, fmt.Sprintf("vless-tun configuration path: %v", err))
 		return
 	}
 
-	cfg, err := config.Load(configPath)
+	cfg, err := loadVLESSConfig(configPath)
 	if errors.Is(err, os.ErrNotExist) {
 		cfg = config.DefaultForPath(configPath)
 	} else if err != nil {
@@ -49,7 +59,7 @@ func collectVLESSClaims(collection *ClaimCollection) {
 	}
 
 	for _, cacheDir := range vlessCacheDirs(cfg) {
-		current, err := session.ResolveCurrent(cacheDir, cfg.LaunchOrDefault())
+		current, err := resolveVLESSCurrent(cacheDir, cfg.LaunchOrDefault())
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -62,12 +72,18 @@ func collectVLESSClaims(collection *ClaimCollection) {
 			collection.Issues = append(collection.Issues, fmt.Sprintf("vless-tun session %s has no recorded interface name (started by an older vless-tun); its interface is listed as not ours until the session is restarted", current.ID))
 			continue
 		}
-		alive, _, aliveErr := session.SessionAlive(current)
+		alive, _, aliveErr := checkVLESSSessionAlive(current)
+		liveness := livenessFromCheck(alive, aliveErr)
+		if aliveErr == nil && !alive && current.PID <= 0 {
+			// A PID-less record may still represent a starting session. Keep it
+			// unknown unless another liveness source positively reports it alive.
+			liveness = LivenessUnknown
+		}
 		claim := Claim{
 			Engine:    EngineVLESS,
 			SessionID: current.ID,
 			Interface: interfaceName,
-			Liveness:  livenessFromCheck(alive, aliveErr),
+			Liveness:  liveness,
 		}
 		collection.Claims = append(collection.Claims, claim)
 		if aliveErr != nil {
@@ -107,13 +123,13 @@ func vlessCacheDirs(cfg config.ProjectConfig) []string {
 }
 
 func collectOpenConnectClaim(collection *ClaimCollection) {
-	cfg, _, err := openconnectcfg.LoadOptional("")
+	cfg, _, err := loadOpenConnectConfig("")
 	if err != nil {
 		collection.Issues = append(collection.Issues, fmt.Sprintf("openconnect-tun configuration: %v; rerun openconnect-tun status", err))
 		return
 	}
 	cacheDir := openconnect.ResolveCacheDir(cfg.CacheDirOrDefault())
-	current, err := openconnect.LoadCurrent(cacheDir)
+	current, err := loadOpenConnectCurrent(cacheDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
@@ -127,7 +143,7 @@ func collectOpenConnectClaim(collection *ClaimCollection) {
 		return
 	}
 
-	alive, _, aliveErr := openconnect.SessionAlive(current)
+	alive, _, aliveErr := checkOpenConnectAlive(current)
 	liveness := livenessFromCheck(alive, aliveErr)
 	if aliveErr == nil && current.PID <= 0 {
 		// Match openconnect-tun status: a PID-less current record is still

@@ -620,13 +620,12 @@ vpn-core interfaces --json
 
 The classes are:
 
-- `owned`: an exact session claim is alive; the report shows its engine and session ID and gives no cleanup advice.
-- `stale`: an exact session claim is dead while the interface remains up; advice uses only that engine's own `vless-tun stop` or `openconnect-tun stop` command. A default route is reported as a fact and warned about only in this class.
-- `unverified`: a claimed session's liveness cannot be determined; the only guidance is to rerun that engine's status command.
+- `owned`: an exact session claim is alive; the report shows its engine and session ID and gives no advice.
+- `unverified`: a session claim is dead or its liveness cannot be determined; the only guidance is to rerun that engine's status command. A dead record cannot prove interface continuity because macOS may have reused the name.
 - `unknown`: an IPv4-bearing interface has no claim from either repo engine and is labeled `not ours (another app or system)` with no advice.
 - `system`: an unclaimed utun has no IPv4 address, as with the compact IPv6-link-local macOS system entries; it receives no advice.
 
-When both engines claim the same interface, any live claim wins over unknown or dead claims. An unknown claim wins over dead claims, so the audit never recommends cleanup while ownership may still be live.
+Claim precedence is `alive > unknown > dead`. A default route is shown only as a fact in every class. The audit is purely informational: nothing in its output can mutate a tunnel, process, route, or interface.
 
 ### `vpn-core inspect-vless-url`
 

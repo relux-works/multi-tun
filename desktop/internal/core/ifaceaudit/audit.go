@@ -17,7 +17,6 @@ type Class string
 
 const (
 	ClassOwned      Class = "owned"
-	ClassStale      Class = "stale"
 	ClassUnverified Class = "unverified"
 	ClassUnknown    Class = "unknown"
 	ClassSystem     Class = "system"
@@ -149,7 +148,7 @@ func parseIPv4Address(fields []string) (string, error) {
 	}
 	maskValue, ok := fieldAfter(fields, "netmask")
 	if !ok {
-		return "", fmt.Errorf("missing IPv4 netmask")
+		return address.To4().String(), nil
 	}
 	prefix, err := hexadecimalMaskPrefix(maskValue)
 	if err != nil {
@@ -337,18 +336,11 @@ func classifyResult(result *Result) {
 	case len(unknown) > 0:
 		result.Class = ClassUnverified
 		result.Label = "claimed, but liveness could not be determined"
-		result.Advice = commandsForClaims(unknown, "status")
-	case len(dead) > 0 && result.Up:
-		result.Class = ClassStale
-		result.Label = "claimed by a dead session while the interface is still up"
-		result.Advice = commandsForClaims(dead, "stop")
-		if result.DefaultRoute {
-			result.Warning = "stale interface carries an IPv4 default route"
-		}
+		result.Advice = statusCommandsForClaims(unknown)
 	case len(dead) > 0:
 		result.Class = ClassUnverified
-		result.Label = "dead session claim found, but the interface is not up"
-		result.Advice = commandsForClaims(dead, "status")
+		result.Label = "claimed by a dead session record; the interface name may since have been reused"
+		result.Advice = statusCommandsForClaims(dead)
 	case len(result.IPv4) > 0:
 		result.Class = ClassUnknown
 		result.Label = "not ours (another app or system)"
@@ -358,16 +350,16 @@ func classifyResult(result *Result) {
 	}
 }
 
-func commandsForClaims(claims []Claim, action string) []string {
+func statusCommandsForClaims(claims []Claim) []string {
 	seen := map[string]struct{}{}
 	var commands []string
 	for _, claim := range claims {
 		var command string
 		switch claim.Engine {
 		case EngineVLESS:
-			command = "vless-tun " + action
+			command = "vless-tun status"
 		case EngineOpenConnect:
-			command = "openconnect-tun " + action
+			command = "openconnect-tun status"
 		}
 		if command == "" {
 			continue
