@@ -26,6 +26,7 @@ import (
 
 const (
 	maxConcurrentConnections = 16
+	privateSocketFilename    = "vpn-core.sock"
 )
 
 var (
@@ -136,7 +137,7 @@ func uninstallExactService(cfg ServiceConfig) error {
 		removalErrs = append(removalErrs, fmt.Errorf("remove plist and socket: %w", err))
 	}
 	if cfg.HelperDir != "" {
-		if _, err := runPrivilegedCommandVPNCore("rm", "-rf", cfg.HelperDir); err != nil {
+		if _, err := runPrivilegedCommandVPNCore("rm", "-rf", cfg.HelperDir, privateSocketDir(cfg)); err != nil {
 			removalErrs = append(removalErrs, fmt.Errorf("remove helper directory: %w", err))
 		}
 	}
@@ -210,6 +211,13 @@ type serviceDaemon struct {
 	verify    func() error
 	peerUID   peerUIDLookup
 
+	socketVerification  verificationDependencies
+	listenUnix          func(string, *net.UnixAddr) (*net.UnixListener, error)
+	effectiveUID        func() int
+	chownSocket         func(string, int, int) error
+	beforeSocketPublish func(string) error
+	afterSocketPublish  func(string) error
+
 	connections chan struct{}
 	mutation    sync.Mutex
 	children    *childRegistry
@@ -223,7 +231,149 @@ func newServiceDaemon(cfg ServiceConfig, clientUID, clientGID int) *serviceDaemo
 		requests:    newRequestTracker(),
 		connections: make(chan struct{}, maxConcurrentConnections),
 		children:    newChildRegistry(),
+
+		socketVerification: productionVerificationDependencies(),
+		listenUnix:         net.ListenUnix,
+		effectiveUID:       os.Geteuid,
+		chownSocket:        os.Chown,
 	}
+}
+
+type socketIdentity struct {
+	device uint64
+	inode  uint64
+}
+
+type publishedUnixSocket struct {
+	listener   *net.UnixListener
+	publicPath string
+	identity   socketIdentity
+}
+
+func socketIdentityFromInfo(path string, info os.FileInfo) (socketIdentity, error) {
+	if info.Mode()&os.ModeSocket == 0 {
+		return socketIdentity{}, fmt.Errorf("%s is not a unix socket", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return socketIdentity{}, fmt.Errorf("inspect unix socket identity for %s", path)
+	}
+	return socketIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}, nil
+}
+
+func sameSocketIdentity(left, right socketIdentity) bool {
+	return left.device == right.device && left.inode == right.inode
+}
+
+func (s *publishedUnixSocket) close() error {
+	closeErr := s.listener.Close()
+	info, err := os.Lstat(s.publicPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return closeErr
+	}
+	if err != nil {
+		return errors.Join(closeErr, fmt.Errorf("inspect published vpn core socket during cleanup: %w", err))
+	}
+	identity, err := socketIdentityFromInfo(s.publicPath, info)
+	if err != nil || !sameSocketIdentity(identity, s.identity) {
+		return closeErr
+	}
+	removeErr := os.Remove(s.publicPath)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = fmt.Errorf("remove published vpn core socket: %w", removeErr)
+	}
+	return errors.Join(closeErr, removeErr)
+}
+
+// privateSocketDir is where the daemon binds and permissions the socket before it
+// atomically publishes it at the public path. It lives next to the helper directory,
+// under the same strictly verified root-owned parent.
+func privateSocketDir(cfg ServiceConfig) string {
+	return filepath.Clean(cfg.HelperDir) + ".run"
+}
+
+func (d *serviceDaemon) preparePublishedSocket() (_ *publishedUnixSocket, returnErr error) {
+	if d.cfg.HelperDir == "" {
+		return nil, errors.New("helper directory is required for private vpn core socket")
+	}
+	if d.cfg.SocketPath == "" {
+		return nil, errors.New("public vpn core socket path is required")
+	}
+	// The private directory is a sibling of the helper directory, not inside it: the
+	// installed helper tree must contain exactly the packaged entries.
+	if err := verifySecureDirectory(filepath.Dir(filepath.Clean(d.cfg.HelperDir)), d.socketVerification); err != nil {
+		return nil, fmt.Errorf("verify vpn core helper parent for private socket: %w", err)
+	}
+
+	privateDir := privateSocketDir(d.cfg)
+	if err := os.Mkdir(privateDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, fmt.Errorf("create private vpn core socket directory: %w", err)
+	}
+	if err := verifySecureDirectory(privateDir, d.socketVerification); err != nil {
+		return nil, fmt.Errorf("verify private vpn core socket directory: %w", err)
+	}
+
+	privatePath := filepath.Join(privateDir, privateSocketFilename)
+	if err := os.Remove(privatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove stale private vpn core socket: %w", err)
+	}
+	listener, err := d.listenUnix("unix", &net.UnixAddr{Name: privatePath, Net: "unix"})
+	if err != nil {
+		return nil, fmt.Errorf("listen on private vpn core socket: %w", err)
+	}
+	listener.SetUnlinkOnClose(false)
+	defer func() {
+		if returnErr != nil {
+			_ = listener.Close()
+			_ = os.Remove(privatePath)
+		}
+	}()
+
+	if err := os.Chmod(privatePath, 0o600); err != nil {
+		return nil, fmt.Errorf("chmod private vpn core socket: %w", err)
+	}
+	if d.effectiveUID() == 0 {
+		if err := d.chownSocket(privatePath, d.clientUID, d.clientGID); err != nil {
+			return nil, fmt.Errorf("chown private vpn core socket: %w", err)
+		}
+	}
+	privateInfo, err := os.Lstat(privatePath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect prepared private vpn core socket: %w", err)
+	}
+	privateIdentity, err := socketIdentityFromInfo(privatePath, privateInfo)
+	if err != nil {
+		return nil, err
+	}
+	if d.beforeSocketPublish != nil {
+		if err := d.beforeSocketPublish(d.cfg.SocketPath); err != nil {
+			return nil, fmt.Errorf("before vpn core socket publish: %w", err)
+		}
+	}
+	if err := os.Rename(privatePath, d.cfg.SocketPath); err != nil {
+		return nil, fmt.Errorf("atomically publish vpn core socket: %w", err)
+	}
+	if d.afterSocketPublish != nil {
+		if err := d.afterSocketPublish(d.cfg.SocketPath); err != nil {
+			return nil, fmt.Errorf("after vpn core socket publish: %w", err)
+		}
+	}
+	publicInfo, err := os.Lstat(d.cfg.SocketPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect published vpn core socket: %w", err)
+	}
+	publicIdentity, err := socketIdentityFromInfo(d.cfg.SocketPath, publicInfo)
+	if err != nil {
+		return nil, err
+	}
+	if !sameSocketIdentity(privateIdentity, publicIdentity) {
+		return nil, errors.New("published vpn core socket identity changed during startup")
+	}
+	return &publishedUnixSocket{
+		listener:   listener,
+		publicPath: d.cfg.SocketPath,
+		identity:   publicIdentity,
+	}, nil
 }
 
 func (d *serviceDaemon) serve() error {
@@ -236,27 +386,14 @@ func (d *serviceDaemon) serve() error {
 	if d.peerUID == nil {
 		return errors.New("peer credential verification is not configured")
 	}
-	if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
-		return fmt.Errorf("create vpn core socket dir: %w", err)
-	}
-	_ = os.Remove(d.cfg.SocketPath)
-
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: d.cfg.SocketPath, Net: "unix"})
+	publishedSocket, err := d.preparePublishedSocket()
 	if err != nil {
-		return fmt.Errorf("listen on vpn core socket: %w", err)
+		return err
 	}
 	defer func() {
-		_ = listener.Close()
-		_ = os.Remove(d.cfg.SocketPath)
+		_ = publishedSocket.close()
 	}()
-	if err := os.Chmod(d.cfg.SocketPath, 0o600); err != nil {
-		return fmt.Errorf("chmod vpn core socket: %w", err)
-	}
-	if os.Geteuid() == 0 {
-		if err := os.Chown(d.cfg.SocketPath, d.clientUID, d.clientGID); err != nil {
-			return fmt.Errorf("chown vpn core socket: %w", err)
-		}
-	}
+	listener := publishedSocket.listener
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

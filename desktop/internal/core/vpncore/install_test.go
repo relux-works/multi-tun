@@ -792,6 +792,33 @@ func TestUninstallServiceToleratesVerifiedAbsentState(t *testing.T) {
 	}
 }
 
+func TestUninstallServiceRemovesPrivateSocketDirectory(t *testing.T) {
+	// This proves uninstall removes the sibling private socket directory together with the helper directory, so no root-owned socket state is left behind.
+	cfg := testInstallConfig(t)
+	privateDir := privateSocketDir(cfg)
+	if err := os.MkdirAll(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
+	var commands []string
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		if name == "launchctl" && args[0] == "print" {
+			return nil, launchctlTestError(113, nil)
+		}
+		return nil, performFakeInstall(name, args, nil)
+	})
+	if err := UninstallService(cfg); err != nil {
+		t.Fatalf("UninstallService() error = %v", err)
+	}
+	if !strings.Contains(strings.Join(commands, "\n"), "rm -rf "+cfg.HelperDir+" "+privateDir) {
+		t.Fatalf("uninstall commands = %v, want helper and private socket directory removal", commands)
+	}
+	if _, err := os.Lstat(privateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private socket directory still present: %v", err)
+	}
+}
+
 func TestForgetLaunchdLabelRecognizesOnlyExplicitAbsence(t *testing.T) {
 	// These cases prove only exit 113 or launchd's service-not-found output is classified as absence.
 	for _, test := range []struct {

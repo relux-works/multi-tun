@@ -33,15 +33,15 @@ func TestRPCClientRejectsUnexpectedServerUIDBeforeSendingRequestOrFD(t *testing.
 	defer logFile.Close()
 
 	_, err = callWithTimeoutAndLog(cfg, Request{Action: "ping"}, time.Second, logFile)
-	if err == nil || !strings.Contains(err.Error(), "vpn core socket peer uid 501 is not root; refusing to send the request") {
-		t.Fatalf("callWithTimeoutAndLog() error = %v, want peer uid refusal", err)
-	}
 	result := <-observed
 	if result.payloadBytes != 0 || result.rightsBytes != 0 {
 		t.Fatalf("listener received payload=%d rights=%d, want no request data", result.payloadBytes, result.rightsBytes)
 	}
 	if result.err != nil && !errors.Is(result.err, io.EOF) {
 		t.Fatalf("listener read error = %v, want EOF after empty connection", result.err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "vpn core socket peer uid 501 is not root; refusing to send the request") {
+		t.Fatalf("callWithTimeoutAndLog() error = %v, want peer uid refusal", err)
 	}
 }
 

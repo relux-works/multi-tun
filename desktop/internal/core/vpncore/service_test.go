@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestRenderPlist(t *testing.T) {
@@ -153,8 +155,9 @@ func TestDaemonRunWithLogOptionsKeepsTail(t *testing.T) {
 
 func TestCompatibilityStatusFindsLegacyServiceWithoutSelectingItForRPC(t *testing.T) {
 	// This proves status still finds the legacy service while hardened availability refuses its incompatible wire protocol.
-	primarySocketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-primary-%d.sock", time.Now().UnixNano()))
-	legacySocketPath := filepath.Join(os.TempDir(), fmt.Sprintf("vpn-core-legacy-%d.sock", time.Now().UnixNano()))
+	root := resolvedTempDir(t)
+	primarySocketPath := filepath.Join(root, "primary.sock")
+	legacySocketPath := filepath.Join(root, "legacy.sock")
 	_ = os.Remove(primarySocketPath)
 	_ = os.Remove(legacySocketPath)
 	defer os.Remove(primarySocketPath)
@@ -164,11 +167,13 @@ func TestCompatibilityStatusFindsLegacyServiceWithoutSelectingItForRPC(t *testin
 		Label:      "works.relux.primary-test",
 		PlistPath:  "/Library/LaunchDaemons/works.relux.primary-test.plist",
 		SocketPath: primarySocketPath,
+		HelperDir:  filepath.Join(root, "ph"),
 	}
 	legacyCfg := ServiceConfig{
 		Label:      "works.relux.legacy-test",
 		PlistPath:  "/Library/LaunchDaemons/works.relux.legacy-test.plist",
 		SocketPath: legacySocketPath,
+		HelperDir:  filepath.Join(root, "lh"),
 	}
 
 	prevCompat := compatibilityServiceConfigsVPNCore
@@ -239,8 +244,20 @@ func syscallKill(pid int, signal int) error {
 }
 
 func runTestDaemon(cfg ServiceConfig, peerUID uint32) error {
+	if cfg.HelperDir == "" {
+		socketDir, err := filepath.EvalSymlinks(filepath.Dir(cfg.SocketPath))
+		if err != nil {
+			return err
+		}
+		cfg.HelperDir = filepath.Join(socketDir, "."+filepath.Base(cfg.SocketPath)+".helper")
+	}
+	if err := os.MkdirAll(cfg.HelperDir, 0o700); err != nil {
+		return err
+	}
 	daemon := newServiceDaemon(cfg, int(peerUID), os.Getgid())
 	daemon.verify = func() error { return nil }
 	daemon.peerUID = func(*net.UnixConn) (uint32, error) { return peerUID, nil }
+	daemon.socketVerification.owner = func(string, *unix.Stat_t) (uint32, error) { return 0, nil }
+	daemon.socketVerification.checkACL = func(string, int) error { return nil }
 	return daemon.serve()
 }
