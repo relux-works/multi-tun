@@ -178,7 +178,11 @@ func launchctlServiceAbsent(err error) bool {
 
 func verifyServicePathsAbsent(cfg ServiceConfig) error {
 	var errs []error
-	for _, path := range []string{cfg.PlistPath, cfg.SocketPath, cfg.HelperDir} {
+	paths := []string{cfg.PlistPath, cfg.SocketPath, cfg.HelperDir}
+	if cfg.HelperDir != "" {
+		paths = append(paths, privateSocketDir(cfg))
+	}
+	for _, path := range paths {
 		if path == "" {
 			continue
 		}

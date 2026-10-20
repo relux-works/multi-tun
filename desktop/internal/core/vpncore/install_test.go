@@ -819,6 +819,46 @@ func TestUninstallServiceRemovesPrivateSocketDirectory(t *testing.T) {
 	}
 }
 
+func TestUninstallServiceFailsWhenPrivateSocketDirectoryRemains(t *testing.T) {
+	// This proves uninstall does not report success while the private socket directory survives removal, even when the helper directory itself is gone.
+	cfg := testInstallConfig(t)
+	privateDir := privateSocketDir(cfg)
+	if err := os.MkdirAll(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	withInstallVerification(t, func(string, *unix.Stat_t) (uint32, error) { return 0, nil }, func(string, int) error { return nil })
+	withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+		if name == "launchctl" && args[0] == "print" {
+			return nil, launchctlTestError(113, nil)
+		}
+		if name == "rm" && len(args) > 0 && args[0] == "-rf" {
+			// Remove only the helper directory; the private socket directory survives.
+			return nil, os.RemoveAll(cfg.HelperDir)
+		}
+		return nil, performFakeInstall(name, args, nil)
+	})
+	err := UninstallService(cfg)
+	if err == nil || !strings.Contains(err.Error(), privateDir+" still exists") {
+		t.Fatalf("UninstallService() error = %v, want private socket directory still exists", err)
+	}
+}
+
+func TestVerifyServicePathsAbsentIgnoresPrivateDirWithoutHelperDir(t *testing.T) {
+	// This proves a config without a helper directory (legacy compatibility services) never checks the relative path privateSocketDir would derive from an empty helper dir.
+	dir := t.TempDir()
+	t.Chdir(dir)
+	derived := privateSocketDir(ServiceConfig{})
+	if filepath.IsAbs(derived) {
+		t.Fatalf("derived private dir %q is absolute; the control below would not exercise the cwd", derived)
+	}
+	if err := os.Mkdir(derived, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyServicePathsAbsent(ServiceConfig{}); err != nil {
+		t.Fatalf("verifyServicePathsAbsent(empty helper) error = %v, want nil", err)
+	}
+}
+
 func TestForgetLaunchdLabelRecognizesOnlyExplicitAbsence(t *testing.T) {
 	// These cases prove only exit 113 or launchd's service-not-found output is classified as absence.
 	for _, test := range []struct {
