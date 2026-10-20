@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"multi-tun/desktop/internal/anyconnect/keychain"
 	"multi-tun/desktop/internal/anyconnect/openconnect"
@@ -424,6 +425,281 @@ func TestDeriveStatusViewFallsBackToCiscoInfo(t *testing.T) {
 	}
 	if view.CiscoState != "" {
 		t.Fatalf("CiscoState = %q, want empty", view.CiscoState)
+	}
+}
+
+type statusTestDependencies struct {
+	detectState    func() (openconnect.State, string, error)
+	connectionInfo func() (*openconnect.ConnectionInfo, string, error)
+	currentRuntime func() (*openconnect.RuntimeStatus, error)
+	listProfiles   func() ([]openconnect.CLIProfile, string, error)
+	currentSession func(string) (*openconnect.CurrentSession, string, bool, error)
+}
+
+func installStatusTestDependencies(t *testing.T, dependencies statusTestDependencies) {
+	t.Helper()
+	originalDetectState := detectStateOpenConnectCLI
+	originalConnectionInfo := getConnectionInfoOpenConnectCLI
+	originalCurrentRuntime := currentRuntimeOpenConnectCLI
+	originalListProfiles := listProfilesOpenConnectCLI
+	originalCurrentSession := currentSessionStateOpenConnectCLI
+	t.Cleanup(func() {
+		detectStateOpenConnectCLI = originalDetectState
+		getConnectionInfoOpenConnectCLI = originalConnectionInfo
+		currentRuntimeOpenConnectCLI = originalCurrentRuntime
+		listProfilesOpenConnectCLI = originalListProfiles
+		currentSessionStateOpenConnectCLI = originalCurrentSession
+	})
+
+	detectStateOpenConnectCLI = dependencies.detectState
+	getConnectionInfoOpenConnectCLI = dependencies.connectionInfo
+	currentRuntimeOpenConnectCLI = dependencies.currentRuntime
+	listProfilesOpenConnectCLI = dependencies.listProfiles
+	currentSessionStateOpenConnectCLI = dependencies.currentSession
+}
+
+func statusTestPaths(t *testing.T) (configPath, cacheDir string, args []string) {
+	t.Helper()
+	root := t.TempDir()
+	configPath = filepath.Join(root, "openconnect.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(configPath) error = %v", err)
+	}
+	cacheDir = filepath.Join(root, "cache")
+	return configPath, cacheDir, []string{"status", "--config", configPath, "--cache-dir", cacheDir}
+}
+
+func TestRunStatusContinuesAfterCiscoStateTimeout(t *testing.T) {
+	// Proves a Cisco state timeout is non-fatal, shows the recorded live OpenConnect session and reason, and skips later Cisco probes.
+	connectionInfoCalls := 0
+	listProfilesCalls := 0
+	installStatusTestDependencies(t, statusTestDependencies{
+		detectState: func() (openconnect.State, string, error) {
+			return openconnect.StateUnknown, "/opt/cisco/anyconnect/bin/vpn", fmt.Errorf("vpn state timed out after 25ms")
+		},
+		connectionInfo: func() (*openconnect.ConnectionInfo, string, error) {
+			connectionInfoCalls++
+			return nil, "", nil
+		},
+		currentRuntime: func() (*openconnect.RuntimeStatus, error) {
+			return &openconnect.RuntimeStatus{PID: 4242, Interface: "utun8", Uptime: "00:36"}, nil
+		},
+		listProfiles: func() ([]openconnect.CLIProfile, string, error) {
+			listProfilesCalls++
+			return nil, "", nil
+		},
+		currentSession: func(string) (*openconnect.CurrentSession, string, bool, error) {
+			return &openconnect.CurrentSession{
+				ID:        "20261020T080000Z",
+				Mode:      openconnect.ConnectModeSplitInclude,
+				Server:    "vpn.example.com/outside",
+				StartedAt: time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC),
+				Interface: "utun8",
+			}, "active", true, nil
+		},
+	})
+
+	_, _, args := statusTestPaths(t)
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run(args)
+
+	if exitCode != 0 {
+		t.Fatalf("Run(status) exitCode = %d, want 0; stderr = %q", exitCode, stderr.String())
+	}
+	if connectionInfoCalls != 0 {
+		t.Fatalf("GetConnectionInfo calls = %d, want 0 after DetectState timeout", connectionInfoCalls)
+	}
+	if listProfilesCalls != 0 {
+		t.Fatalf("ListProfiles calls = %d, want 0 after DetectState timeout", listProfilesCalls)
+	}
+	for _, want := range []string{
+		"session: active\n",
+		"session_id: 20261020T080000Z\n",
+		"session_server: vpn.example.com/outside\n",
+		"cisco agent unavailable: vpn state timed out after 25ms\n",
+		"state: connected\n",
+		"state_source: openconnect_runtime\n",
+		"openconnect_pid: 4242\n",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("Run(status) stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunStatusContinuesAfterCiscoConnectionInfoExecError(t *testing.T) {
+	// Proves a Cisco vpn stats exec error is non-fatal, reports the reason, skips profiles, and does not hide a live OpenConnect runtime.
+	installStatusTestDependencies(t, statusTestDependencies{
+		detectState: func() (openconnect.State, string, error) {
+			return openconnect.StateDisconnected, "/opt/cisco/anyconnect/bin/vpn", nil
+		},
+		connectionInfo: func() (*openconnect.ConnectionInfo, string, error) {
+			return nil, "/opt/cisco/anyconnect/bin/vpn", fmt.Errorf("running vpn stats: executable failed")
+		},
+		currentRuntime: func() (*openconnect.RuntimeStatus, error) {
+			return &openconnect.RuntimeStatus{PID: 4242, Interface: "utun8"}, nil
+		},
+		listProfiles: func() ([]openconnect.CLIProfile, string, error) {
+			t.Fatal("ListProfiles called after GetConnectionInfo exec error")
+			return nil, "", nil
+		},
+		currentSession: func(string) (*openconnect.CurrentSession, string, bool, error) {
+			return &openconnect.CurrentSession{ID: "20261020T080000Z", Mode: openconnect.ConnectModeFull, Server: "vpn.example.com"}, "active", true, nil
+		},
+	})
+
+	_, _, args := statusTestPaths(t)
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run(args)
+
+	if exitCode != 0 {
+		t.Fatalf("Run(status) exitCode = %d, want 0; stderr = %q", exitCode, stderr.String())
+	}
+	for _, want := range []string{
+		"session_id: 20261020T080000Z\n",
+		"cisco agent unavailable: running vpn stats: executable failed\n",
+		"state_source: openconnect_runtime\n",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunStatusContinuesAfterCiscoProfilesExecError(t *testing.T) {
+	// Proves a Cisco vpn hosts exec error is non-fatal, reports the reason, and preserves the state already obtained from healthy Cisco probes.
+	installStatusTestDependencies(t, statusTestDependencies{
+		detectState: func() (openconnect.State, string, error) {
+			return openconnect.StateConnected, "/opt/cisco/anyconnect/bin/vpn", nil
+		},
+		connectionInfo: func() (*openconnect.ConnectionInfo, string, error) {
+			return &openconnect.ConnectionInfo{State: openconnect.StateConnected}, "/opt/cisco/anyconnect/bin/vpn", nil
+		},
+		currentRuntime: func() (*openconnect.RuntimeStatus, error) { return nil, nil },
+		listProfiles: func() ([]openconnect.CLIProfile, string, error) {
+			return nil, "/opt/cisco/anyconnect/bin/vpn", fmt.Errorf("running vpn hosts: executable failed")
+		},
+		currentSession: func(string) (*openconnect.CurrentSession, string, bool, error) {
+			return nil, "none", false, nil
+		},
+	})
+
+	_, _, args := statusTestPaths(t)
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run(args)
+
+	if exitCode != 0 {
+		t.Fatalf("Run(status) exitCode = %d, want 0; stderr = %q", exitCode, stderr.String())
+	}
+	for _, want := range []string{
+		"cisco agent unavailable: running vpn hosts: executable failed\n",
+		"state: connected\n",
+		"cli_profiles: 0\n",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunStatusCiscoNotInstalledOutputUnchanged(t *testing.T) {
+	// Proves the Cisco-not-installed status path retains its exact pre-change output and exit code.
+	installStatusTestDependencies(t, statusTestDependencies{
+		detectState: func() (openconnect.State, string, error) {
+			return openconnect.StateNotInstalled, "", nil
+		},
+		connectionInfo: func() (*openconnect.ConnectionInfo, string, error) { return nil, "", nil },
+		currentRuntime: func() (*openconnect.RuntimeStatus, error) { return nil, nil },
+		listProfiles:   func() ([]openconnect.CLIProfile, string, error) { return nil, "", nil },
+		currentSession: func(string) (*openconnect.CurrentSession, string, bool, error) {
+			return nil, "none", false, nil
+		},
+	})
+
+	configPath, cacheDir, args := statusTestPaths(t)
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run(args)
+	want := fmt.Sprintf("config: %s\ncache_dir: %s\nsession: none\nvpn_binary: missing\nstate: not_installed\nstate_source: cisco_cli\ncli_profiles: 0\n", configPath, cacheDir)
+
+	if exitCode != 0 {
+		t.Fatalf("Run(status) exitCode = %d, want 0; stderr = %q", exitCode, stderr.String())
+	}
+	if stdout.String() != want {
+		t.Fatalf("Run(status) output changed:\n--- got ---\n%s--- want ---\n%s", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("Run(status) stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunStatusCiscoHealthyOutputUnchanged(t *testing.T) {
+	// Proves the healthy Cisco status path retains its exact pre-change output and exit code.
+	installStatusTestDependencies(t, statusTestDependencies{
+		detectState: func() (openconnect.State, string, error) {
+			return openconnect.StateConnected, "/opt/cisco/anyconnect/bin/vpn", nil
+		},
+		connectionInfo: func() (*openconnect.ConnectionInfo, string, error) {
+			return &openconnect.ConnectionInfo{
+				State:      openconnect.StateConnected,
+				ServerAddr: "vpn.example.com",
+				Duration:   "01:23:45",
+				ClientAddr: "192.0.2.42",
+				TunnelMode: "Split Tunnel",
+			}, "/opt/cisco/anyconnect/bin/vpn", nil
+		},
+		currentRuntime: func() (*openconnect.RuntimeStatus, error) { return nil, nil },
+		listProfiles: func() ([]openconnect.CLIProfile, string, error) {
+			return []openconnect.CLIProfile{{Name: "Corp Primary"}, {Name: "Corp Backup"}}, "/opt/cisco/anyconnect/bin/vpn", nil
+		},
+		currentSession: func(string) (*openconnect.CurrentSession, string, bool, error) {
+			return nil, "none", false, nil
+		},
+	})
+
+	configPath, cacheDir, args := statusTestPaths(t)
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run(args)
+	want := fmt.Sprintf("config: %s\ncache_dir: %s\nsession: none\nvpn_binary: /opt/cisco/anyconnect/bin/vpn\nstate: connected\nstate_source: cisco_cli\nserver: vpn.example.com\nclient_addr: 192.0.2.42\ntunnel_mode: Split Tunnel\nduration: 01:23:45\ncli_profiles: 2\n- Corp Primary\n- Corp Backup\n", configPath, cacheDir)
+
+	if exitCode != 0 {
+		t.Fatalf("Run(status) exitCode = %d, want 0; stderr = %q", exitCode, stderr.String())
+	}
+	if stdout.String() != want {
+		t.Fatalf("Run(status) output changed:\n--- got ---\n%s--- want ---\n%s", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("Run(status) stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunStatusKeepsOpenConnectRuntimeErrorsFatal(t *testing.T) {
+	// Proves a real OpenConnect runtime-state error still exits 1 even when every Cisco probe succeeds.
+	installStatusTestDependencies(t, statusTestDependencies{
+		detectState:    func() (openconnect.State, string, error) { return openconnect.StateDisconnected, "", nil },
+		connectionInfo: func() (*openconnect.ConnectionInfo, string, error) { return nil, "", nil },
+		currentRuntime: func() (*openconnect.RuntimeStatus, error) { return nil, fmt.Errorf("runtime state unreadable") },
+		listProfiles:   func() ([]openconnect.CLIProfile, string, error) { return nil, "", nil },
+		currentSession: func(string) (*openconnect.CurrentSession, string, bool, error) {
+			t.Fatal("currentSession called after runtime error")
+			return nil, "", false, nil
+		},
+	})
+
+	_, _, args := statusTestPaths(t)
+	var stdout, stderr bytes.Buffer
+	exitCode := New(&stdout, &stderr).Run(args)
+
+	if exitCode != 1 {
+		t.Fatalf("Run(status) exitCode = %d, want 1", exitCode)
+	}
+	if stderr.String() != "status failed: runtime state unreadable\n" {
+		t.Fatalf("Run(status) stderr = %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("Run(status) stdout = %q, want empty", stdout.String())
 	}
 }
 

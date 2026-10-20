@@ -1,6 +1,54 @@
 package openconnect
 
-import "testing"
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestDetectStateCancelsHangingCommandWithinConfiguredTimeout(t *testing.T) {
+	// Proves a vpn state command that hangs until context cancellation returns before the shortened Cisco timeout plus margin.
+	originalCandidates := vpnBinaryCandidates
+	originalPathStat := pathStat
+	originalRunCommand := runCommand
+	originalTimeout := cmdTimeout
+	t.Cleanup(func() {
+		vpnBinaryCandidates = originalCandidates
+		pathStat = originalPathStat
+		runCommand = originalRunCommand
+		cmdTimeout = originalTimeout
+	})
+
+	vpnBinaryCandidates = []string{"/fake/cisco/vpn"}
+	pathStat = func(string) (os.FileInfo, error) { return nil, nil }
+	cmdTimeout = 25 * time.Millisecond
+	runCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name != vpnBinaryCandidates[0] || len(args) != 1 || args[0] != "state" {
+			t.Fatalf("runCommand(%q, %q), want vpn state", name, args)
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	startedAt := time.Now()
+	state, vpnBinary, err := DetectState()
+	elapsed := time.Since(startedAt)
+
+	if state != StateUnknown {
+		t.Fatalf("DetectState() state = %q, want %q", state, StateUnknown)
+	}
+	if vpnBinary != vpnBinaryCandidates[0] {
+		t.Fatalf("DetectState() vpnBinary = %q, want %q", vpnBinary, vpnBinaryCandidates[0])
+	}
+	if err == nil || !strings.Contains(err.Error(), "vpn state timed out after 25ms") {
+		t.Fatalf("DetectState() error = %v, want shortened timeout", err)
+	}
+	if elapsed >= cmdTimeout+200*time.Millisecond {
+		t.Fatalf("DetectState() elapsed = %s, want < %s", elapsed, cmdTimeout+200*time.Millisecond)
+	}
+}
 
 func TestParseStateConnected(t *testing.T) {
 	if got := parseState("  >> state: Connected"); got != StateConnected {

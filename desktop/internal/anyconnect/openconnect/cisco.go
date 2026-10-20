@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-const cmdTimeout = 5 * time.Second
-
 var (
+	cmdTimeout = 5 * time.Second
+
 	vpnBinaryCandidates = []string{
 		"/opt/cisco/secureclient/bin/vpn",
 		"/opt/cisco/anyconnect/bin/vpn",

@@ -17,8 +17,17 @@ import (
 )
 
 type App struct {
-	stdout io.Writer
-	stderr io.Writer
+	stdout             io.Writer
+	stderr             io.Writer
+	statusDependencies StatusDependencies
+}
+
+type StatusDependencies struct {
+	DetectState    func() (openconnect.State, string, error)
+	ConnectionInfo func() (*openconnect.ConnectionInfo, string, error)
+	CurrentRuntime func() (*openconnect.RuntimeStatus, error)
+	ListProfiles   func() ([]openconnect.CLIProfile, string, error)
+	CurrentSession func(string) (*openconnect.CurrentSession, string, bool, error)
 }
 
 type statusView struct {
@@ -29,18 +38,33 @@ type statusView struct {
 }
 
 var (
-	keychainGet                   = keychain.Get
-	keychainSetWithOptions        = keychain.SetWithOptions
-	keychainExists                = keychain.Exists
-	resolveSetupHostEntry         = openconnect.ResolveServerFromProfiles
-	defaultSetupProfileSearchPath = openconnect.DefaultProfileSearchPaths
-	userHomeDirOpenConnect        = os.UserHomeDir
+	keychainGet                       = keychain.Get
+	keychainSetWithOptions            = keychain.SetWithOptions
+	keychainExists                    = keychain.Exists
+	resolveSetupHostEntry             = openconnect.ResolveServerFromProfiles
+	defaultSetupProfileSearchPath     = openconnect.DefaultProfileSearchPaths
+	userHomeDirOpenConnect            = os.UserHomeDir
+	detectStateOpenConnectCLI         = openconnect.DetectState
+	getConnectionInfoOpenConnectCLI   = openconnect.GetConnectionInfo
+	currentRuntimeOpenConnectCLI      = openconnect.CurrentRuntime
+	listProfilesOpenConnectCLI        = openconnect.ListProfiles
+	currentSessionStateOpenConnectCLI = currentSessionState
 )
 
 const defaultDisconnectTimeout = 20 * time.Second
 
 func New(stdout, stderr io.Writer) *App {
-	return &App{stdout: stdout, stderr: stderr}
+	return NewWithStatusDependencies(stdout, stderr, StatusDependencies{
+		DetectState:    detectStateOpenConnectCLI,
+		ConnectionInfo: getConnectionInfoOpenConnectCLI,
+		CurrentRuntime: currentRuntimeOpenConnectCLI,
+		ListProfiles:   listProfilesOpenConnectCLI,
+		CurrentSession: currentSessionStateOpenConnectCLI,
+	})
+}
+
+func NewWithStatusDependencies(stdout, stderr io.Writer, dependencies StatusDependencies) *App {
+	return &App{stdout: stdout, stderr: stderr, statusDependencies: dependencies}
 }
 
 func deriveStatusView(ciscoState openconnect.State, info *openconnect.ConnectionInfo, runtime *openconnect.RuntimeStatus) statusView {
@@ -259,27 +283,21 @@ func (a *App) runStatus(args []string) int {
 		return 1
 	}
 	resolvedCacheDir := resolveCacheDir(*cacheDir, cfg)
-	state, vpnBinary, err := openconnect.DetectState()
+	state, vpnBinary, ciscoErr := a.statusDependencies.DetectState()
+	var info *openconnect.ConnectionInfo
+	var profiles []openconnect.CLIProfile
+	if ciscoErr == nil {
+		info, _, ciscoErr = a.statusDependencies.ConnectionInfo()
+	}
+	runtime, err := a.statusDependencies.CurrentRuntime()
 	if err != nil {
 		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
 		return 1
 	}
-	info, _, err := openconnect.GetConnectionInfo()
-	if err != nil {
-		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
-		return 1
+	if ciscoErr == nil {
+		profiles, _, ciscoErr = a.statusDependencies.ListProfiles()
 	}
-	runtime, err := openconnect.CurrentRuntime()
-	if err != nil {
-		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
-		return 1
-	}
-	profiles, _, err := openconnect.ListProfiles()
-	if err != nil {
-		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
-		return 1
-	}
-	current, currentState, _, currentErr := currentSessionState(resolvedCacheDir)
+	current, currentState, _, currentErr := a.statusDependencies.CurrentSession(resolvedCacheDir)
 	if currentErr != nil {
 		fmt.Fprintf(a.stderr, "status failed: %v\n", currentErr)
 		return 1
@@ -333,6 +351,9 @@ func (a *App) runStatus(args []string) int {
 		fmt.Fprintln(a.stdout, "vpn_binary: missing")
 	} else {
 		fmt.Fprintf(a.stdout, "vpn_binary: %s\n", vpnBinary)
+	}
+	if ciscoErr != nil {
+		fmt.Fprintf(a.stdout, "cisco agent unavailable: %v\n", ciscoErr)
 	}
 	view := deriveStatusView(state, info, runtime)
 	fmt.Fprintf(a.stdout, "state: %s\n", view.State)
