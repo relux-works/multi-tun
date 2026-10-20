@@ -16,10 +16,12 @@ import (
 )
 
 type ownerLookup func(path string, stat *unix.Stat_t) (uint32, error)
+type groupLookup func(path string, stat *unix.Stat_t) (uint32, error)
 
 type verificationDependencies struct {
 	executable func() (string, error)
 	owner      ownerLookup
+	group      groupLookup
 	checkACL   func(string, int) error
 }
 
@@ -28,6 +30,9 @@ func productionVerificationDependencies() verificationDependencies {
 		executable: os.Executable,
 		owner: func(_ string, stat *unix.Stat_t) (uint32, error) {
 			return stat.Uid, nil
+		},
+		group: func(_ string, stat *unix.Stat_t) (uint32, error) {
+			return stat.Gid, nil
 		},
 		checkACL: checkWriteACL,
 	}
@@ -60,14 +65,14 @@ func verifyDaemonInstallation(cfg ServiceConfig, binarySHA256, manifestSHA256 st
 		return fmt.Errorf("daemon executable %s is not installed helper %s", resolvedExecutable, resolvedInstalled)
 	}
 
-	binaryData, err := readVerifiedRegularFile(cfg.BinaryPath(), deps, false)
+	binaryData, err := readVerifiedRegularFile(cfg.BinaryPath(), deps)
 	if err != nil {
 		return fmt.Errorf("verify vpn core binary: %w", err)
 	}
 	if got := sha256Hex(binaryData); got != binarySHA256 {
 		return fmt.Errorf("vpn core binary sha256 mismatch: got %s, expected %s", got, binarySHA256)
 	}
-	manifestData, err := readVerifiedRegularFile(cfg.ManifestPath(), deps, false)
+	manifestData, err := readVerifiedRegularFile(cfg.ManifestPath(), deps)
 	if err != nil {
 		return fmt.Errorf("verify vpn core manifest: %w", err)
 	}
@@ -98,7 +103,7 @@ func verifyDaemonInstallation(cfg ServiceConfig, binarySHA256, manifestSHA256 st
 				return fmt.Errorf("manifest vpn-core sha256 does not match daemon binary sha256")
 			}
 		}
-		data, err := readVerifiedRegularFile(filepath.Join(cfg.HelperDir, entry.Path), deps, false)
+		data, err := readVerifiedRegularFile(filepath.Join(cfg.HelperDir, entry.Path), deps)
 		if err != nil {
 			return fmt.Errorf("verify manifest entry %q: %w", entry.Path, err)
 		}
@@ -109,7 +114,7 @@ func verifyDaemonInstallation(cfg ServiceConfig, binarySHA256, manifestSHA256 st
 	if !foundBinary {
 		return errors.New("manifest does not contain vpn-core")
 	}
-	if err := verifySecureDirectory(filepath.Dir(cfg.SocketPath), deps, true); err != nil {
+	if err := verifySocketDirectory(filepath.Dir(cfg.SocketPath), deps); err != nil {
 		return fmt.Errorf("verify socket directory: %w", err)
 	}
 	return nil
@@ -134,8 +139,8 @@ func decodeManifest(data []byte) (Manifest, error) {
 	return manifest, nil
 }
 
-func readVerifiedRegularFile(path string, deps verificationDependencies, allowStickyDirectory bool) ([]byte, error) {
-	fd, stat, err := openSecurePath(path, false, deps, allowStickyDirectory)
+func readVerifiedRegularFile(path string, deps verificationDependencies) ([]byte, error) {
+	fd, stat, err := openSecurePath(path, false, deps, false)
 	if err != nil {
 		return nil, err
 	}
@@ -154,8 +159,16 @@ func readVerifiedRegularFile(path string, deps verificationDependencies, allowSt
 	return io.ReadAll(file)
 }
 
-func verifySecureDirectory(path string, deps verificationDependencies, allowSticky bool) error {
-	fd, _, err := openSecurePath(path, true, deps, allowSticky)
+func verifySecureDirectory(path string, deps verificationDependencies) error {
+	fd, _, err := openSecurePath(path, true, deps, false)
+	if fd >= 0 {
+		_ = unix.Close(fd)
+	}
+	return err
+}
+
+func verifySocketDirectory(path string, deps verificationDependencies) error {
+	fd, _, err := openSecurePath(path, true, deps, true)
 	if fd >= 0 {
 		_ = unix.Close(fd)
 	}
@@ -166,10 +179,10 @@ func verifyHelperRemovalParent(helperDir string, deps verificationDependencies) 
 	if helperDir == "" {
 		return errors.New("helper directory is required")
 	}
-	return verifySecureDirectory(filepath.Dir(filepath.Clean(helperDir)), deps, false)
+	return verifySecureDirectory(filepath.Dir(filepath.Clean(helperDir)), deps)
 }
 
-func openSecurePath(path string, wantDirectory bool, deps verificationDependencies, allowStickyFinalDirectory bool) (int, *unix.Stat_t, error) {
+func openSecurePath(path string, wantDirectory bool, deps verificationDependencies, socketDirectoryFinal bool) (int, *unix.Stat_t, error) {
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(clean) {
 		return -1, nil, fmt.Errorf("path %q must be absolute", path)
@@ -179,7 +192,7 @@ func openSecurePath(path string, wantDirectory bool, deps verificationDependenci
 		return -1, nil, err
 	}
 	currentPath := string(filepath.Separator)
-	if err := verifyOpenedNode(currentPath, currentFD, true, false, deps); err != nil {
+	if err := verifyOpenedNode(currentPath, currentFD, true, deps); err != nil {
 		_ = unix.Close(currentFD)
 		return -1, nil, err
 	}
@@ -207,10 +220,15 @@ func openSecurePath(path string, wantDirectory bool, deps verificationDependenci
 		currentFD = nextFD
 		currentPath = filepath.Join(currentPath, part)
 		isDirectory := !final || wantDirectory
-		allowSticky := final && wantDirectory && allowStickyFinalDirectory
-		if err := verifyOpenedNode(currentPath, currentFD, isDirectory, allowSticky, deps); err != nil {
+		var verifyErr error
+		if final && wantDirectory && socketDirectoryFinal {
+			verifyErr = verifyOpenedSocketDirectory(currentPath, currentFD, deps)
+		} else {
+			verifyErr = verifyOpenedNode(currentPath, currentFD, isDirectory, deps)
+		}
+		if verifyErr != nil {
 			_ = unix.Close(currentFD)
-			return -1, nil, err
+			return -1, nil, verifyErr
 		}
 	}
 	var stat unix.Stat_t
@@ -221,7 +239,7 @@ func openSecurePath(path string, wantDirectory bool, deps verificationDependenci
 	return currentFD, &stat, nil
 }
 
-func verifyOpenedNode(path string, fd int, directory, allowSticky bool, deps verificationDependencies) error {
+func verifyOpenedNode(path string, fd int, directory bool, deps verificationDependencies) error {
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return fmt.Errorf("stat %s: %w", path, err)
@@ -237,9 +255,39 @@ func verifyOpenedNode(path string, fd int, directory, allowSticky bool, deps ver
 		return fmt.Errorf("%s is owned by uid %d, want root", path, uid)
 	}
 	if stat.Mode&0o022 != 0 {
-		sticky := stat.Mode&unix.S_ISVTX != 0
-		if !directory || !allowSticky || !sticky {
-			return fmt.Errorf("%s is group/world-writable", path)
+		return fmt.Errorf("%s is group/world-writable", path)
+	}
+	if err := deps.checkACL(path, fd); err != nil {
+		return fmt.Errorf("unsafe ACL on %s: %w", path, err)
+	}
+	return nil
+}
+
+func verifyOpenedSocketDirectory(path string, fd int, deps verificationDependencies) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	uid, err := deps.owner(path, &stat)
+	if err != nil {
+		return fmt.Errorf("lookup owner for %s: %w", path, err)
+	}
+	if uid != 0 {
+		return fmt.Errorf("%s is owned by uid %d, want root", path, uid)
+	}
+	if stat.Mode&0o002 != 0 {
+		return fmt.Errorf("%s is world-writable", path)
+	}
+	if stat.Mode&0o020 != 0 {
+		gid, err := deps.group(path, &stat)
+		if err != nil {
+			return fmt.Errorf("lookup group for %s: %w", path, err)
+		}
+		if gid != 0 && gid != 1 {
+			return fmt.Errorf("%s is user-writable by gid %d", path, gid)
 		}
 	}
 	if err := deps.checkACL(path, fd); err != nil {

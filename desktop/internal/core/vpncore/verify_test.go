@@ -17,6 +17,7 @@ type verificationFixture struct {
 	manifestSHA  string
 	binaryPath   string
 	extraPath    string
+	socketDir    string
 	dependencies verificationDependencies
 }
 
@@ -97,6 +98,131 @@ func TestVerifyDaemonInstallationRejectsWriteACL(t *testing.T) {
 	}
 }
 
+func TestVerifyDaemonInstallationAcceptsDaemonGroupWritableSocketDirectory(t *testing.T) {
+	// This proves a root-owned 0775 socket directory in gid 1 is accepted for the stock macOS /var/run layout.
+	fixture := newVerificationFixture(t)
+	if err := os.Chmod(fixture.socketDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	fixture.dependencies.group = func(path string, _ *unix.Stat_t) (uint32, error) {
+		if path == fixture.socketDir {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	if err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies); err != nil {
+		t.Fatalf("verifyDaemonInstallation() error = %v", err)
+	}
+}
+
+func TestVerifyDaemonInstallationAcceptsWheelGroupWritableSocketDirectory(t *testing.T) {
+	// This proves a root-owned 0775 socket directory in gid 0 is accepted by the socket-only relaxation.
+	fixture := newVerificationFixture(t)
+	if err := os.Chmod(fixture.socketDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	fixture.dependencies.group = func(string, *unix.Stat_t) (uint32, error) { return 0, nil }
+	if err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies); err != nil {
+		t.Fatalf("verifyDaemonInstallation() error = %v", err)
+	}
+}
+
+func TestVerifyDaemonInstallationRejectsUserWritableSocketDirectory(t *testing.T) {
+	// This proves a root-owned 0775 socket directory in gid 20 is refused as user-writable.
+	fixture := newVerificationFixture(t)
+	if err := os.Chmod(fixture.socketDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	fixture.dependencies.group = func(path string, _ *unix.Stat_t) (uint32, error) {
+		if path == fixture.socketDir {
+			return 20, nil
+		}
+		return 0, nil
+	}
+	err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies)
+	if err == nil || !strings.Contains(err.Error(), "user-writable") {
+		t.Fatalf("verifyDaemonInstallation() error = %v, want user-writable refusal", err)
+	}
+}
+
+func TestVerifyDaemonInstallationRejectsWorldWritableSocketDirectory(t *testing.T) {
+	// This proves a root-owned 0777 socket directory is refused even when its group is trusted.
+	fixture := newVerificationFixture(t)
+	if err := os.Chmod(fixture.socketDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies)
+	if err == nil || !strings.Contains(err.Error(), "world-writable") {
+		t.Fatalf("verifyDaemonInstallation() error = %v, want world-writable refusal", err)
+	}
+}
+
+func TestVerifyDaemonInstallationRejectsStickyWorldWritableSocketDirectory(t *testing.T) {
+	// This proves sticky does not make a root-owned 0777 socket directory acceptable.
+	fixture := newVerificationFixture(t)
+	if err := os.Chmod(fixture.socketDir, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies)
+	if err == nil || !strings.Contains(err.Error(), "world-writable") {
+		t.Fatalf("verifyDaemonInstallation() error = %v, want sticky world-writable refusal", err)
+	}
+}
+
+func TestVerifyDaemonInstallationRejectsNonRootSocketDirectoryOwner(t *testing.T) {
+	// This proves the relaxed socket-directory mode still requires root ownership.
+	fixture := newVerificationFixture(t)
+	fixture.dependencies.owner = func(path string, _ *unix.Stat_t) (uint32, error) {
+		if path == fixture.socketDir {
+			return 501, nil
+		}
+		return 0, nil
+	}
+	err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies)
+	if err == nil || !strings.Contains(err.Error(), "want root") {
+		t.Fatalf("verifyDaemonInstallation() error = %v, want root-owner refusal", err)
+	}
+}
+
+func TestVerifyDaemonInstallationRejectsUnsafeSocketDirectoryACL(t *testing.T) {
+	// This proves the socket-directory relaxation still refuses an unsafe ACL.
+	fixture := newVerificationFixture(t)
+	fixture.dependencies.checkACL = func(path string, _ int) error {
+		if path == fixture.socketDir {
+			return errors.New("write-capable ACL entry")
+		}
+		return nil
+	}
+	err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies)
+	if err == nil || !strings.Contains(err.Error(), "unsafe ACL") {
+		t.Fatalf("verifyDaemonInstallation() error = %v, want unsafe ACL refusal", err)
+	}
+}
+
+func TestGroupWritableDaemonGroupRemainsRefusedOutsideSocketDirectory(t *testing.T) {
+	// This proves gid-1 group-writable helper directories and helper-removal parents remain under the strict rule.
+	fixture := newVerificationFixture(t)
+	if err := os.Chmod(fixture.cfg.HelperDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	fixture.dependencies.group = func(string, *unix.Stat_t) (uint32, error) { return 1, nil }
+	err := verifyDaemonInstallation(fixture.cfg, fixture.binarySHA, fixture.manifestSHA, fixture.dependencies)
+	if err == nil || !strings.Contains(err.Error(), "group/world-writable") {
+		t.Fatalf("verifyDaemonInstallation() helper-dir error = %v, want strict writable-mode refusal", err)
+	}
+
+	removalParent := filepath.Join(filepath.Dir(fixture.cfg.HelperDir), "removal-parent")
+	if err := os.Mkdir(removalParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(removalParent, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyHelperRemovalParent(filepath.Join(removalParent, "helper"), fixture.dependencies); err == nil || !strings.Contains(err.Error(), "group/world-writable") {
+		t.Fatalf("verifyHelperRemovalParent() error = %v, want strict writable-mode refusal", err)
+	}
+}
+
 func newVerificationFixture(t *testing.T) verificationFixture {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -151,9 +277,11 @@ func newVerificationFixture(t *testing.T) verificationFixture {
 		manifestSHA: sha256Hex(manifestData),
 		binaryPath:  binaryPath,
 		extraPath:   extraPath,
+		socketDir:   socketDir,
 		dependencies: verificationDependencies{
 			executable: func() (string, error) { return binaryPath, nil },
 			owner:      func(string, *unix.Stat_t) (uint32, error) { return 0, nil },
+			group:      func(string, *unix.Stat_t) (uint32, error) { return 0, nil },
 			checkACL:   func(string, int) error { return nil },
 		},
 	}

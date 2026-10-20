@@ -19,7 +19,11 @@ const (
 	maxRequestBytesVPNCore           = 1 << 20
 )
 
-var rpcResponseTimeoutVPNCore = 5 * time.Second
+var (
+	rpcResponseTimeoutVPNCore          = 5 * time.Second
+	expectedRPCServerUIDVPNCore uint32 = 0
+	rpcPeerUIDVPNCore                  = localPeerUID
+)
 
 type Request struct {
 	Action      string   `json:"action"`
@@ -70,6 +74,13 @@ func callWithTimeoutAndLog(cfg ServiceConfig, request Request, timeout time.Dura
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
 		return Response{}, errors.New("vpn core socket is not a unix connection")
+	}
+	peerUID, err := rpcPeerUIDVPNCore(unixConn)
+	if err != nil {
+		return Response{}, fmt.Errorf("read vpn core socket peer uid: %w", err)
+	}
+	if peerUID != expectedRPCServerUIDVPNCore {
+		return Response{}, fmt.Errorf("vpn core socket peer uid %d is not root; refusing to send the request", peerUID)
 	}
 
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {

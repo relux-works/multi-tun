@@ -218,7 +218,7 @@ func verifyInstalledPackage(cfg ServiceConfig, pkg installPackage, plistData []b
 	if err := verifyDaemonInstallation(cfg, pkg.binarySHA256, pkg.manifestSHA256, deps); err != nil {
 		return err
 	}
-	installed, err := readVerifiedRegularFile(cfg.PlistPath, deps, false)
+	installed, err := readVerifiedRegularFile(cfg.PlistPath, deps)
 	if err != nil {
 		return fmt.Errorf("verify installed plist: %w", err)
 	}

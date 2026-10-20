@@ -211,6 +211,7 @@ func TestCompatibilityStatusFindsLegacyServiceWithoutSelectingItForRPC(t *testin
 
 func waitForSocket(t *testing.T, cfg ServiceConfig, errCh <-chan error) {
 	t.Helper()
+	withRPCServerIdentity(t, uint32(os.Getuid()), localPeerUID)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

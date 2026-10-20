@@ -503,7 +503,11 @@ func withInstallVerification(t *testing.T, owner ownerLookup, checkACL func(stri
 	t.Helper()
 	previous := installVerificationDepsVPNCore
 	installVerificationDepsVPNCore = func() verificationDependencies {
-		return verificationDependencies{owner: owner, checkACL: checkACL}
+		return verificationDependencies{
+			owner:    owner,
+			group:    func(string, *unix.Stat_t) (uint32, error) { return 0, nil },
+			checkACL: checkACL,
+		}
 	}
 	t.Cleanup(func() { installVerificationDepsVPNCore = previous })
 }
