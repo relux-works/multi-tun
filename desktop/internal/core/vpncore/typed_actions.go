@@ -525,7 +525,7 @@ func (d *serviceDaemon) handleResolverCleanup() error {
 		if closeErr != nil {
 			return closeErr
 		}
-		if strings.HasPrefix(line, "# Added by openconnect-tun DNS shim") || strings.HasPrefix(line, "# Added by openconnect-tun public bypass") {
+		if IsOpenConnectResolverMarker(line) {
 			if err := os.Remove(path); err != nil {
 				return err
 			}

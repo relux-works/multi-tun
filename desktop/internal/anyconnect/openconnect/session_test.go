@@ -286,6 +286,7 @@ func TestStopCleansOrphanedResolverStateWithoutCurrentSession(t *testing.T) {
 }
 
 func TestOrphanedResolverArtifactsPresentDetectsManagedResolversByMarker(t *testing.T) {
+	// Proves a historical domain with a first-line DNS shim marker is detected while unrelated names are ignored.
 	cacheDir := t.TempDir()
 	session := CurrentSession{
 		ID:             "20260413T102417Z",
@@ -317,7 +318,7 @@ func TestOrphanedResolverArtifactsPresentDetectsManagedResolversByMarker(t *test
 		resolverDirOpenConnect = prevResolverDir
 	})
 
-	if err := os.WriteFile(filepath.Join(resolverDir, "example.com"), []byte("placeholder\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(resolverDir, "example.com"), []byte("# Added by openconnect-tun DNS shim\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(example.com) error = %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(resolverDir, "search.tailscale"), []byte("# Added by tailscaled\n"), 0o644); err != nil {

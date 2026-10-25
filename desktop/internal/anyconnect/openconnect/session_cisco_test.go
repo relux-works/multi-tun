@@ -20,13 +20,13 @@ func installPreStopSnapshotTestSeams(t *testing.T) CurrentSession {
 	previousInfo := getConnectionInfoOpenConnect
 	previousRuntime := currentRuntimeOpenConnect
 	previousRoutes := currentRoutesOpenConnect
-	previousCommand := execCommandOpenConnect
+	previousCommand := newPreStopCommandOpenConnect
 	t.Cleanup(func() {
 		detectStateOpenConnect = previousState
 		getConnectionInfoOpenConnect = previousInfo
 		currentRuntimeOpenConnect = previousRuntime
 		currentRoutesOpenConnect = previousRoutes
-		execCommandOpenConnect = previousCommand
+		newPreStopCommandOpenConnect = previousCommand
 	})
 	currentRuntimeOpenConnect = func() (*RuntimeStatus, error) {
 		return &RuntimeStatus{PID: 4242, Interface: "utun8", Uptime: "00:57"}, nil
@@ -34,12 +34,12 @@ func installPreStopSnapshotTestSeams(t *testing.T) CurrentSession {
 	currentRoutesOpenConnect = func() ([]string, error) {
 		return []string{"192.0.2.53/32", "198.51.100.53/32"}, nil
 	}
-	execCommandOpenConnect = func(name string, args ...string) *exec.Cmd {
+	newPreStopCommandOpenConnect = func(name string, args ...string) *exec.Cmd {
 		switch {
 		case name == "scutil" && strings.Join(args, " ") == "--dns":
-			return exec.Command("/usr/bin/printf", "%s", "DNS configuration\nresolver #1\n")
+			return exec.Command("/bin/sh", "-c", `printf 'DNS configuration\nresolver #1\n'`)
 		case name == "netstat" && strings.Join(args, " ") == "-rn -f inet":
-			return exec.Command("/usr/bin/printf", "%s", "Routing tables\nInternet:\n")
+			return exec.Command("/bin/sh", "-c", `printf 'Routing tables\nInternet:\n'`)
 		default:
 			t.Fatalf("unexpected snapshot command: %s %q", name, args)
 			return nil

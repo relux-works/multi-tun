@@ -919,6 +919,20 @@ with unknown liveness on identity errors. Both clients share the read-only macOS
 `desktop/internal/processidentity`; launchd lookup errors propagate unless the
 service is explicitly reported missing.
 
+OpenConnect stop acquires the per-cache startup lock before clearing starting or
+stale records or cleaning orphan resolvers. If startup holds the lock, stop leaves
+records and resolver files untouched and asks the caller to retry after startup
+finishes. Stop reloads the current record and rechecks session identity under the
+lock before cleanup; if a session became live, stop preserves it and asks the
+caller to retry explicitly. Initially verified live-session stops do not acquire
+this lock. Resolver presence and cleanup recognize only regular files with an
+openconnect-tun marker on the first line; foreign files and symlinks are preserved
+by both cleanup paths.
+Pre-stop `scutil --dns` and `netstat -rn -f inet` diagnostics each have a five-second
+deadline; diagnostics time out without signalling, record the timeout, and let
+stop continue. These read-only commands finish naturally and are reaped in the
+background; output arriving after a timeout is discarded.
+
 ```bash
 go fmt ./...
 go test ./...

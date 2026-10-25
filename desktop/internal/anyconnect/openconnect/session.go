@@ -2,6 +2,7 @@ package openconnect
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"multi-tun/desktop/internal/core/vpncore"
 )
 
 const (
@@ -35,6 +38,10 @@ var currentRuntimeOpenConnect = CurrentRuntime
 var currentRoutesOpenConnect = CurrentRoutes
 var appendPreStopSnapshotOpenConnect = appendPreStopSnapshot
 var waitForSessionCleanupOpenConnect = waitForSessionCleanup
+var acquireStopCleanupLockOpenConnect = acquireOpenConnectStopCleanupLock
+var preStopCommandTimeoutOpenConnect = 5 * time.Second
+var newPreStopCommandOpenConnect = exec.Command
+var errOpenConnectStartupInProgress = errors.New("another openconnect startup is already in progress for this cache")
 
 type CurrentSession struct {
 	ProcessComm      string    `json:"process_comm,omitempty"`
@@ -149,11 +156,19 @@ func acquireOpenConnectStartupLock(cacheDir string) (*openConnectStartupLock, er
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, fmt.Errorf("another openconnect startup is already in progress for this cache; retry after it exits")
+			return nil, fmt.Errorf("%w; retry after it exits", errOpenConnectStartupInProgress)
 		}
 		return nil, fmt.Errorf("lock openconnect startup: %w", err)
 	}
 	return &openConnectStartupLock{file: file}, nil
+}
+
+func acquireOpenConnectStopCleanupLock(cacheDir string) (*openConnectStartupLock, error) {
+	lock, err := acquireOpenConnectStartupLock(cacheDir)
+	if errors.Is(err, errOpenConnectStartupInProgress) {
+		return nil, fmt.Errorf("%w; retry stop after it finishes", errOpenConnectStartupInProgress)
+	}
+	return lock, err
 }
 
 func (lock *openConnectStartupLock) Close() error {
@@ -526,7 +541,7 @@ func readConnectConvergenceState(logPath string) (connectConvergenceState, error
 	return state, nil
 }
 
-func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error) {
+func loadOpenConnectStopSession(cacheDir string) (CurrentSession, error) {
 	current, err := LoadCurrent(cacheDir)
 	if errors.Is(err, os.ErrNotExist) {
 		pid, pidErr := findOpenConnectPID()
@@ -536,12 +551,39 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 			current = CurrentSession{PID: pid}
 		}
 	} else if err != nil {
+		return CurrentSession{}, err
+	}
+	return current, nil
+}
+
+func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error) {
+	current, err := loadOpenConnectStopSession(cacheDir)
+	if err != nil {
 		return CurrentSession{}, "", err
 	}
 
 	alive, _, err := SessionAlive(current)
 	if err != nil {
 		return CurrentSession{}, "", err
+	}
+	if current.PID <= 0 || !alive {
+		lock, err := acquireStopCleanupLockOpenConnect(cacheDir)
+		if err != nil {
+			return CurrentSession{}, "", err
+		}
+		defer lock.Close()
+		// Connect may have published a different session since the initial read.
+		current, err = loadOpenConnectStopSession(cacheDir)
+		if err != nil {
+			return CurrentSession{}, "", err
+		}
+		alive, _, err = SessionAlive(current)
+		if err != nil {
+			return CurrentSession{}, "", err
+		}
+		if alive {
+			return current, "", errors.New("an openconnect session started while stop was running; retry stop to stop the new session")
+		}
 	}
 	if current.PID <= 0 {
 		if current.ID != "" {
@@ -886,11 +928,29 @@ func writePreStopSnapshot(w io.Writer, current CurrentSession, snapshot stopSnap
 }
 
 func commandCombinedOutput(name string, args ...string) string {
-	out, err := execCommandOpenConnect(name, args...).CombinedOutput()
-	if err != nil && len(out) == 0 {
+	timeout := preStopCommandTimeoutOpenConnect
+	cmd := newPreStopCommandOpenConnect(name, args...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		// Send no signal: Go's Darwin process kill is not reuse-safe. These
+		// commands are read-only, so letting them finish is harmless. Wait
+		// keeps reaping responsibility; never read its output after timeout.
+		return fmt.Sprintf("%s: timed out after %s", name, timeout)
+	case err := <-done:
+		if err != nil && out.Len() == 0 {
+			return ""
+		}
+		return strings.TrimSpace(out.String())
+	}
 }
 
 func writeLogHeader(file *os.File, current CurrentSession) {
@@ -1028,7 +1088,18 @@ func cleanupOrphanedResolverState(cacheDir string) (bool, error) {
 
 func orphanedResolverArtifactsPresent(cacheDir string) bool {
 	for _, domain := range orphanedResolverArtifactDomains(cacheDir) {
-		if _, err := os.Stat(filepath.Join(resolverDirOpenConnect, domain)); err == nil {
+		path := filepath.Join(resolverDirOpenConnect, domain)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		line, readErr := bufio.NewReader(io.LimitReader(file, 4096)).ReadString('\n')
+		_ = file.Close()
+		if (readErr == nil || errors.Is(readErr, io.EOF)) && vpncore.IsOpenConnectResolverMarker(line) {
 			return true
 		}
 	}
@@ -1073,11 +1144,13 @@ func orphanedResolverArtifactDomains(cacheDir string) []string {
 func orphanedResolverCleanupScript() string {
 	return `set -eu
 
-if [ ! -d /etc/resolver ]; then
+resolver_dir=` + shellQuote(resolverDirOpenConnect) + `
+if [ ! -d "$resolver_dir" ]; then
   exit 0
 fi
 
-for f in /etc/resolver/*; do
+for f in "$resolver_dir"/*; do
+  [ -L "$f" ] && continue
   [ -f "$f" ] || continue
   first_line=$(head -n 1 "$f" 2>/dev/null || true)
   case "$first_line" in
