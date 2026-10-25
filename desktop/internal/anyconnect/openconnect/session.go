@@ -29,6 +29,10 @@ const (
 
 var cleanupOrphanedResolverStateOpenConnect = cleanupOrphanedResolverState
 var resolverDirOpenConnect = "/etc/resolver"
+var detectStateOpenConnect = DetectState
+var getConnectionInfoOpenConnect = GetConnectionInfo
+var currentRuntimeOpenConnect = CurrentRuntime
+var currentRoutesOpenConnect = CurrentRoutes
 
 type CurrentSession struct {
 	ID               string    `json:"id"`
@@ -65,6 +69,7 @@ type OverlayDNS struct {
 type stopSnapshot struct {
 	VPNBinary  string
 	CiscoState State
+	CiscoError error
 	Info       *ConnectionInfo
 	Runtime    *RuntimeStatus
 	Routes     []string
@@ -786,17 +791,19 @@ func appendPreStopSnapshot(cacheDir string, current CurrentSession) error {
 
 func collectPreStopSnapshot() stopSnapshot {
 	snapshot := stopSnapshot{}
-	if state, vpnBinary, err := DetectState(); err == nil {
+	if state, vpnBinary, err := detectStateOpenConnect(); err == nil {
 		snapshot.CiscoState = state
 		snapshot.VPNBinary = vpnBinary
+		if info, _, err := getConnectionInfoOpenConnect(); err == nil {
+			snapshot.Info = info
+		}
+	} else {
+		snapshot.CiscoError = err
 	}
-	if info, _, err := GetConnectionInfo(); err == nil {
-		snapshot.Info = info
-	}
-	if runtime, err := CurrentRuntime(); err == nil {
+	if runtime, err := currentRuntimeOpenConnect(); err == nil {
 		snapshot.Runtime = runtime
 	}
-	if routes, err := CurrentRoutes(); err == nil {
+	if routes, err := currentRoutesOpenConnect(); err == nil {
 		snapshot.Routes = routes
 	}
 	snapshot.ScutilDNS = commandCombinedOutput("scutil", "--dns")
@@ -824,6 +831,10 @@ func writePreStopSnapshot(w io.Writer, current CurrentSession, snapshot stopSnap
 	}
 	if snapshot.CiscoState != "" {
 		_, _ = fmt.Fprintf(w, "pre_stop_cisco_state: %s\n", snapshot.CiscoState)
+	}
+	if snapshot.CiscoError != nil {
+		reason := strings.NewReplacer("\r", " ", "\n", " ").Replace(snapshot.CiscoError.Error())
+		_, _ = fmt.Fprintf(w, "pre_stop_cisco_error: %s\n", reason)
 	}
 	if snapshot.Info != nil {
 		if snapshot.Info.State != "" {
@@ -952,10 +963,13 @@ func joinOrNone(values []string) string {
 }
 
 func cleanupOrphanedResolverState(cacheDir string) (bool, error) {
-	if state, _, err := DetectState(); err == nil && state == StateConnected {
+	// Check for artifacts first so a stop with nothing to clean never waits on a Cisco probe.
+	if !orphanedResolverArtifactsPresent(cacheDir) {
 		return false, nil
 	}
-	if !orphanedResolverArtifactsPresent(cacheDir) {
+	// Cleanup removes only /etc/resolver files with openconnect-tun first-line markers,
+	// so an unknown Cisco state must not block removal of our own artifacts.
+	if state, _, err := detectStateOpenConnect(); err == nil && state == StateConnected {
 		return false, nil
 	}
 
