@@ -3,10 +3,10 @@
 package vpncore
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -90,6 +90,10 @@ func openACLTestPath(t *testing.T, path string, directory bool) int {
 	return fd
 }
 
+// aclEntryLine matches an ACL entry printed by `ls -le` (" 0: group:everyone allow read"),
+// not the clock time on the file line, which can also contain "0:".
+var aclEntryLine = regexp.MustCompile(`(?m)^ *[0-9]+: `)
+
 func TestRuntimeQuarantineClearACLRemovesExtendedEntries(t *testing.T) {
 	// Descriptor ACL clearing removes planted read, write and deny ACLs from temporary directories; plain directories also succeed.
 	for _, rule := range []string{"", "everyone allow read", "everyone allow add_file", "everyone deny read"} {
@@ -105,7 +109,7 @@ func TestRuntimeQuarantineClearACLRemovesExtendedEntries(t *testing.T) {
 					t.Fatalf("plant ACL: %v (%s)", err, output)
 				}
 				output, err := exec.Command("ls", "-lde", path).CombinedOutput()
-				if err != nil || !bytes.Contains(output, []byte("0:")) {
+				if err != nil || !aclEntryLine.Match(output) {
 					t.Fatalf("ACL control not planted: %v (%s)", err, output)
 				}
 			}
@@ -113,7 +117,7 @@ func TestRuntimeQuarantineClearACLRemovesExtendedEntries(t *testing.T) {
 				t.Fatal(err)
 			}
 			output, err := exec.Command("ls", "-lde", path).CombinedOutput()
-			if err != nil || bytes.Contains(output, []byte("0:")) {
+			if err != nil || aclEntryLine.Match(output) {
 				t.Fatalf("ACL not empty: %v (%s)", err, output)
 			}
 			var stat unix.Stat_t
