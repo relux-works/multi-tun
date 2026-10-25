@@ -80,7 +80,7 @@ func InstallDigest(binaryPath string) (string, error) {
 	return plan.Digest(), nil
 }
 
-func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, expectedDigest string) error {
+func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, expectedDigest string, options ...MaintenanceOptions) error {
 	if err := validateSHA256("expected install digest", expectedDigest); err != nil {
 		return err
 	}
@@ -92,7 +92,7 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 		return err
 	}
 	defer plan.Close()
-	return plan.Install(cfg, clientUID, clientGID, expectedDigest)
+	return plan.Install(cfg, clientUID, clientGID, expectedDigest, options...)
 }
 
 func PrepareInstallPlan(binaryPath string) (*InstallPlan, error) {
@@ -128,7 +128,7 @@ func (p *InstallPlan) Close() error {
 	return os.RemoveAll(dir)
 }
 
-func (p *InstallPlan) Install(cfg ServiceConfig, clientUID, clientGID int, expectedDigest string) error {
+func (p *InstallPlan) Install(cfg ServiceConfig, clientUID, clientGID int, expectedDigest string, options ...MaintenanceOptions) (result error) {
 	if err := validateSHA256("expected install digest", expectedDigest); err != nil {
 		return err
 	}
@@ -151,6 +151,24 @@ func (p *InstallPlan) Install(cfg ServiceConfig, clientUID, clientGID int, expec
 	if err := os.WriteFile(plistPath, plistData, 0o600); err != nil {
 		return fmt.Errorf("write staged vpn core plist: %w", err)
 	}
+
+	guard, err := drainServices(maintenanceConfigs(cfg), options)
+	if err != nil {
+		return err
+	}
+	primaryForgotten, bootstrapped := false, false
+	defer func() {
+		if primaryForgotten {
+			var maintenance *InstallMaintenanceError
+			if lease, held := guard.leases[cfg.Label]; result != nil && !errors.As(result, &maintenance) && (held || bootstrapped) {
+				result = &InstallMaintenanceError{Installed: bootstrapped, ExpiresAt: lease.until, Err: result}
+			}
+			// A post-bootout primary lease is released explicitly after readiness;
+			// deferred rollback remains for services that were never removed.
+			guard.forgotten(cfg.Label)
+		}
+		guard.release()
+	}()
 
 	// No authentication or privileged command is attempted until every digest
 	// and argument has been validated above.
@@ -193,19 +211,24 @@ func (p *InstallPlan) Install(cfg ServiceConfig, clientUID, clientGID int, expec
 		cleanupErr := removeInstalledPackage(cfg)
 		return errors.Join(fmt.Errorf("installed vpn core package failed verification, nothing was bootstrapped: %w", err), cleanupErr)
 	}
-	if err := cleanupCompatibilityServices(cfg); err != nil {
+	if err := cleanupCompatibilityServices(cfg, guard); err != nil {
 		return fmt.Errorf("remove compatibility service: %w", err)
+	}
+	if err := guard.beforeBootout(cfg.Label); err != nil {
+		return err
 	}
 	if err := forgetLaunchdLabel(cfg.Label); err != nil {
 		return fmt.Errorf("replace vpn core service: %w", err)
 	}
+	primaryForgotten = true
 	if _, err := runPrivilegedCommandVPNCore("launchctl", "enable", launchctlTarget(cfg.Label)); err != nil {
 		return fmt.Errorf("enable vpn core service: %w", err)
 	}
 	if _, err := runPrivilegedCommandVPNCore("launchctl", "bootstrap", "system", cfg.PlistPath); err != nil {
 		return fmt.Errorf("bootstrap vpn core service: %w", err)
 	}
-	return nil
+	bootstrapped = true
+	return guard.releaseReplacement(cfg)
 }
 
 // verifyInstalledPackage re-reads the root-owned destinations before launchd

@@ -57,9 +57,6 @@ func (t *requestTracker) begin(id uint64, action string) {
 
 	delete(t.queued, id)
 	action = safeRequestAction(action)
-	if action == "ping" {
-		return
-	}
 	t.active[id] = trackedRequest{id: id, action: action, started: time.Now()}
 }
 
@@ -78,6 +75,9 @@ func (t *requestTracker) complete(id uint64, ok bool) {
 		return
 	}
 	delete(t.active, id)
+	if request.action == "ping" {
+		return
+	}
 	now := time.Now()
 	outcome := requestOutcomeError
 	if ok {
@@ -114,6 +114,9 @@ func (t *requestTracker) snapshot() *HelperSnapshot {
 func requestSnapshots(requests map[uint64]trackedRequest, now time.Time) []RequestSnapshot {
 	ordered := make([]trackedRequest, 0, len(requests))
 	for _, request := range requests {
+		if request.action == "ping" {
+			continue
+		}
 		ordered = append(ordered, request)
 	}
 	sort.Slice(ordered, func(i, j int) bool {
@@ -139,7 +142,7 @@ func durationMillis(value time.Duration) int64 {
 
 func safeRequestAction(action string) string {
 	switch strings.TrimSpace(action) {
-	case "ping", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal", "pending", "other":
+	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal", "pending", "other":
 		return strings.TrimSpace(action)
 	default:
 		return "other"

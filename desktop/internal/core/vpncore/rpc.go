@@ -23,9 +23,11 @@ var (
 	rpcResponseTimeoutVPNCore          = 5 * time.Second
 	expectedRPCServerUIDVPNCore uint32 = 0
 	rpcPeerUIDVPNCore                  = localPeerUID
+	rpcDialVPNCore                     = (&net.Dialer{}).DialContext
 )
 
 type Request struct {
+	Token       string   `json:"token,omitempty"`
 	Action      string   `json:"action"`
 	ConfigJSON  []byte   `json:"config_json,omitempty"`
 	Stdin       string   `json:"stdin,omitempty"`
@@ -42,13 +44,21 @@ type Request struct {
 }
 
 type Response struct {
-	OK             bool            `json:"ok"`
-	Error          string          `json:"error,omitempty"`
-	DaemonPID      int             `json:"daemon_pid,omitempty"`
-	PID            int             `json:"pid,omitempty"`
-	Handle         string          `json:"handle,omitempty"`
-	Path           string          `json:"path,omitempty"`
-	HelperSnapshot *HelperSnapshot `json:"helper_snapshot,omitempty"`
+	Token            string                 `json:"token,omitempty"`
+	OK               bool                   `json:"ok"`
+	Error            string                 `json:"error,omitempty"`
+	DaemonPID        int                    `json:"daemon_pid,omitempty"`
+	PID              int                    `json:"pid,omitempty"`
+	Handle           string                 `json:"handle,omitempty"`
+	Path             string                 `json:"path,omitempty"`
+	HelperSnapshot   *HelperSnapshot        `json:"helper_snapshot,omitempty"`
+	MaintenanceDrain *MaintenanceDrainState `json:"maintenance_drain,omitempty"`
+}
+
+// MaintenanceDrainState is public status only; ownership tokens stay private.
+type MaintenanceDrainState struct {
+	Active    bool   `json:"active"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 func call(cfg ServiceConfig, request Request) (Response, error) {
@@ -66,7 +76,7 @@ func callWithTimeoutAndLog(cfg ServiceConfig, request Request, timeout time.Dura
 	dialTimeout := minDuration(rpcDialTimeoutVPNCore, timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", cfg.SocketPath)
+	conn, err := rpcDialVPNCore(ctx, "unix", cfg.SocketPath)
 	if err != nil {
 		return Response{}, err
 	}

@@ -337,10 +337,10 @@ func (d *serviceDaemon) handleSingBoxStart(request Request, logFile *os.File) (i
 	return d.startManagedChild(cmd, request.SetPGID, "", func() {
 		_ = writer.Close()
 		_ = os.RemoveAll(dir)
-	})
+	}, "sing-box")
 }
 
-func (d *serviceDaemon) startManagedChild(cmd *exec.Cmd, setPGID bool, resultPath string, cleanup func()) (int, string, error) {
+func (d *serviceDaemon) startManagedChild(cmd *exec.Cmd, setPGID bool, resultPath string, cleanup func(), kind ...string) (int, string, error) {
 	if setPGID {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
@@ -349,7 +349,7 @@ func (d *serviceDaemon) startManagedChild(cmd *exec.Cmd, setPGID bool, resultPat
 		return 0, "", err
 	}
 	pid := cmd.Process.Pid
-	handle, err := d.children.add(pid, setPGID, resultPath)
+	handle, err := d.children.add(pid, setPGID, resultPath, kind...)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -583,5 +583,5 @@ func (d *serviceDaemon) handleTCPDumpStart(request Request) (int, string, error)
 		if err := chownVPNCore(outputPath, d.clientUID, d.clientGID); err == nil {
 			_ = chownVPNCore(dir, d.clientUID, d.clientGID)
 		}
-	})
+	}, "tcpdump")
 }

@@ -15,13 +15,15 @@ type fakeInstallPlan struct {
 	tools     []vpncore.PinnedTool
 	install   func(vpncore.ServiceConfig, int, int, string) error
 	closeCall bool
+	options   []vpncore.MaintenanceOptions
 }
 
 func (p *fakeInstallPlan) Digest() string { return p.digest }
 func (p *fakeInstallPlan) PinnedTools() []vpncore.PinnedTool {
 	return append([]vpncore.PinnedTool(nil), p.tools...)
 }
-func (p *fakeInstallPlan) Install(cfg vpncore.ServiceConfig, uid, gid int, digest string) error {
+func (p *fakeInstallPlan) Install(cfg vpncore.ServiceConfig, uid, gid int, digest string, options ...vpncore.MaintenanceOptions) error {
+	p.options = append([]vpncore.MaintenanceOptions(nil), options...)
 	if p.install == nil {
 		return nil
 	}

@@ -438,10 +438,16 @@ func TestToolDriftReportsDifferenceAndSuppressesEquality(t *testing.T) {
 
 func testInstallConfig(t *testing.T) ServiceConfig {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	// Package-copy fixtures model a clean ready replacement after fake bootstrap;
+	// maintenance orchestration tests replace this seam with actual RPC dispatch.
+	previousPing := maintenancePingVPNCore
+	maintenancePingVPNCore = func(ServiceConfig, time.Duration) (Response, error) {
+		return Response{OK: true, MaintenanceDrain: &MaintenanceDrainState{}}, nil
 	}
+	t.Cleanup(func() { maintenancePingVPNCore = previousPing })
+	// Keep the socket within Darwin's sockaddr_un limit now that install and
+	// uninstall authenticate the existing daemon before changing the service.
+	root := resolvedTempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "run"), 0o755); err != nil {
 		t.Fatal(err)
 	}

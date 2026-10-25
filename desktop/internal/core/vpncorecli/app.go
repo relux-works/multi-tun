@@ -1,6 +1,7 @@
 package vpncorecli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,11 +24,12 @@ type App struct {
 type installPlanVPNCoreCLI interface {
 	Digest() string
 	PinnedTools() []vpncore.PinnedTool
-	Install(vpncore.ServiceConfig, int, int, string) error
+	Install(vpncore.ServiceConfig, int, int, string, ...vpncore.MaintenanceOptions) error
 	Close() error
 }
 
 var inspectServiceVPNCoreCLI = vpncore.InspectService
+var uninstallServiceVPNCoreCLI = vpncore.UninstallService
 
 var (
 	prepareInstallPlanVPNCoreCLI = func(binaryPath string) (installPlanVPNCoreCLI, error) {
@@ -94,6 +96,7 @@ func (a *App) runInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	expectedDigest := fs.String("expect-sha256", "", "Expected vpn-core install digest")
+	allowDisruption := fs.Bool("allow-disruption", false, "Allow interruption of daemon-managed tunnels")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -118,8 +121,15 @@ func (a *App) runInstall(args []string) int {
 		return 1
 	}
 	defer plan.Close()
-	if err := plan.Install(cfg, os.Getuid(), os.Getgid(), *expectedDigest); err != nil {
-		fmt.Fprintf(a.stderr, "install failed: %v\n", err)
+	a.warnDisruption(*allowDisruption)
+	if err := plan.Install(cfg, os.Getuid(), os.Getgid(), *expectedDigest, vpncore.MaintenanceOptions{AllowDisruption: *allowDisruption}); err != nil {
+		var maintenance *vpncore.InstallMaintenanceError
+		if errors.As(err, &maintenance) && maintenance.Installed {
+			fmt.Fprintln(a.stdout, "installed vpn core")
+			fmt.Fprintln(a.stderr, err)
+		} else {
+			fmt.Fprintf(a.stderr, "install failed: %v\n", err)
+		}
 		return 1
 	}
 
@@ -204,13 +214,15 @@ func printPinnedTools(out io.Writer, tools []vpncore.PinnedTool) {
 
 func (a *App) runUninstall(args []string) int {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	allowDisruption := fs.Bool("allow-disruption", false, "Allow interruption of daemon-managed tunnels")
 	fs.SetOutput(a.stderr)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	cfg := vpncore.DefaultServiceConfig()
-	if err := vpncore.UninstallService(cfg); err != nil {
+	a.warnDisruption(*allowDisruption)
+	if err := uninstallServiceVPNCoreCLI(cfg, vpncore.MaintenanceOptions{AllowDisruption: *allowDisruption}); err != nil {
 		fmt.Fprintf(a.stderr, "uninstall failed: %v\n", err)
 		return 1
 	}
@@ -218,6 +230,12 @@ func (a *App) runUninstall(args []string) int {
 	fmt.Fprintf(a.stdout, "socket: %s\n", cfg.SocketPath)
 	fmt.Fprintf(a.stdout, "label: %s\n", cfg.Label)
 	return 0
+}
+
+func (a *App) warnDisruption(allow bool) {
+	if allow {
+		fmt.Fprintln(a.stderr, "warning: --allow-disruption skips the idle check; daemon-managed tunnels may be interrupted")
+	}
 }
 
 func (a *App) runStatus(args []string) int {
@@ -292,8 +310,8 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
 	fmt.Fprintln(a.stdout, "  vpn-core install-digest")
-	fmt.Fprintln(a.stdout, "  vpn-core install --expect-sha256 HEX")
-	fmt.Fprintln(a.stdout, "  vpn-core uninstall")
+	fmt.Fprintln(a.stdout, "  vpn-core install --expect-sha256 HEX [--allow-disruption]")
+	fmt.Fprintln(a.stdout, "  vpn-core uninstall [--allow-disruption]")
 	fmt.Fprintln(a.stdout, "  vpn-core status")
 	fmt.Fprintln(a.stdout, "  vpn-core interfaces [--json]")
 	fmt.Fprintln(a.stdout, "  vpn-core inspect-vless-url [--source-mode proxy|direct] [--insecure] [--host name] [--tls-server-name name] URL")

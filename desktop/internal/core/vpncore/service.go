@@ -101,12 +101,17 @@ func inspectExactServiceWithTimeout(cfg ServiceConfig, timeout time.Duration) (S
 	return status, nil
 }
 
-func UninstallService(cfg ServiceConfig) error {
+func UninstallService(cfg ServiceConfig, options ...MaintenanceOptions) error {
 	if cfg.HelperDir != "" {
 		if err := verifyHelperRemovalParent(cfg.HelperDir, installVerificationDepsVPNCore()); err != nil {
 			return fmt.Errorf("verify helper removal parent: %w", err)
 		}
 	}
+	guard, err := drainServices(maintenanceConfigs(cfg), options)
+	if err != nil {
+		return err
+	}
+	defer guard.release()
 	if err := ensureSudoCredentialsVPNCore(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
@@ -114,19 +119,19 @@ func UninstallService(cfg ServiceConfig) error {
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
 		configs = append(configs, compat.ServiceConfig)
 	}
-	return uninstallServiceConfigs(append(configs, cfg), "")
+	return uninstallServiceConfigs(append(configs, cfg), "", guard)
 }
 
-func cleanupCompatibilityServices(cfg ServiceConfig) error {
+func cleanupCompatibilityServices(cfg ServiceConfig, guards ...*maintenanceGuard) error {
 	var configs []ServiceConfig
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
 		configs = append(configs, compat.ServiceConfig)
 	}
 	// Installation has not forgotten the primary; never remove its runtime here.
-	return uninstallServiceConfigs(configs, cfg.RuntimeDir)
+	return uninstallServiceConfigs(configs, cfg.RuntimeDir, guards...)
 }
 
-func uninstallServiceConfigs(configs []ServiceConfig, preservedRuntime string) error {
+func uninstallServiceConfigs(configs []ServiceConfig, preservedRuntime string, guards ...*maintenanceGuard) error {
 	lastRuntimeUser := make(map[string]int)
 	for index, cfg := range configs {
 		lastRuntimeUser[cfg.RuntimeDir] = index
@@ -138,26 +143,40 @@ func uninstallServiceConfigs(configs []ServiceConfig, preservedRuntime string) e
 		if lastRuntimeUser[runtime] != index || runtime == preservedRuntime {
 			cfg.RuntimeDir = ""
 		}
-		forgetErr, err := uninstallExactService(cfg, errors.Join(failedForget[runtime]...))
+		forgetErr, err := uninstallExactService(cfg, errors.Join(failedForget[runtime]...), guards...)
 		if forgetErr != nil {
 			failedForget[runtime] = append(failedForget[runtime], fmt.Errorf("%s: %w", cfg.Label, forgetErr))
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("uninstall service %s: %w", cfg.Label, err))
+			var maintenanceErr *maintenanceBootoutError
+			if errors.As(err, &maintenanceErr) {
+				return errors.Join(errs...) // No more privileged changes after a final refusal.
+			}
 		}
 	}
 	return errors.Join(errs...)
 }
 
 // The first result records confirmed forget independently of path cleanup errors.
-func uninstallExactService(cfg ServiceConfig, earlierForgetErr error) (error, error) {
+func uninstallExactService(cfg ServiceConfig, earlierForgetErr error, guards ...*maintenanceGuard) (error, error) {
 	if cfg.HelperDir != "" {
 		if err := verifyHelperRemovalParent(cfg.HelperDir, installVerificationDepsVPNCore()); err != nil {
 			err = fmt.Errorf("verify helper removal parent: %w", err)
 			return err, err
 		}
 	}
+	for _, guard := range guards {
+		if err := guard.beforeBootout(cfg.Label); err != nil {
+			return err, err
+		}
+	}
 	forgetErr := forgetLaunchdLabel(cfg.Label)
+	if forgetErr == nil {
+		for _, guard := range guards {
+			guard.forgotten(cfg.Label)
+		}
+	}
 	var removalErrs []error
 	if _, err := runPrivilegedCommandVPNCore("rm", "-f", cfg.PlistPath, cfg.SocketPath); err != nil {
 		removalErrs = append(removalErrs, fmt.Errorf("remove plist and socket: %w", err))
@@ -247,12 +266,13 @@ func RunDaemon(cfg ServiceConfig, clientUID, clientGID int, binarySHA256, manife
 type peerUIDLookup func(*net.UnixConn) (uint32, error)
 
 type serviceDaemon struct {
-	cfg       ServiceConfig
-	clientUID int
-	clientGID int
-	requests  *requestTracker
-	verify    func() error
-	peerUID   peerUIDLookup
+	cfg          ServiceConfig
+	clientUID    int
+	clientGID    int
+	requests     *requestTracker
+	verify       func() error
+	peerUID      peerUIDLookup
+	startSingBox func(Request, *os.File) (int, string, error)
 
 	socketVerification  verificationDependencies
 	listenUnix          func(string, *net.UnixAddr) (*net.UnixListener, error)
@@ -261,25 +281,32 @@ type serviceDaemon struct {
 	beforeSocketPublish func(string) error
 	afterSocketPublish  func(string) error
 
-	connections chan struct{}
-	mutation    sync.Mutex
-	children    *childRegistry
+	connections  chan struct{}
+	mutation     sync.Mutex
+	children     *childRegistry
+	drainToken   string    // Protected by mutation.
+	drainUntil   time.Time // Writes require mutation and drainStateMu; ping reads with drainStateMu.
+	drainStateMu sync.RWMutex
+	leaseFiles   maintenanceLeaseFiles
 }
 
 func newServiceDaemon(cfg ServiceConfig, clientUID, clientGID int) *serviceDaemon {
-	return &serviceDaemon{
+	d := &serviceDaemon{
 		cfg:         cfg,
 		clientUID:   clientUID,
 		clientGID:   clientGID,
 		requests:    newRequestTracker(),
 		connections: make(chan struct{}, maxConcurrentConnections),
 		children:    newChildRegistry(),
+		leaseFiles:  productionMaintenanceLeaseFiles(),
 
 		socketVerification: productionVerificationDependencies(),
 		listenUnix:         net.ListenUnix,
 		effectiveUID:       os.Geteuid,
 		chownSocket:        os.Chown,
 	}
+	d.startSingBox = d.handleSingBoxStart
+	return d
 }
 
 type socketIdentity struct {
@@ -429,6 +456,7 @@ func (d *serviceDaemon) serve() error {
 	if d.peerUID == nil {
 		return errors.New("peer credential verification is not configured")
 	}
+	d.restoreMaintenanceLease()
 	publishedSocket, err := d.preparePublishedSocket()
 	if err != nil {
 		return err
@@ -512,11 +540,32 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 	}
 	d.requests.begin(requestID, request.Action)
 	response := Response{OK: true, DaemonPID: os.Getpid()}
+	if mutating && request.Action != "maintenance.undrain" && request.Action != "maintenance.renew" && d.drainActive() {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		responseError(&response, errors.New("vpn core is draining for maintenance"))
+		d.requests.complete(requestID, false)
+		_ = writeResponse(conn, response)
+		return
+	}
 	switch request.Action {
 	case "ping":
 		response.HelperSnapshot = d.requests.snapshot()
+		response.MaintenanceDrain = d.maintenanceDrainState()
+	case "maintenance.drain":
+		token, err := d.drain(requestID)
+		responseError(&response, err)
+		response.Token = token
+	case "maintenance.undrain":
+		responseError(&response, d.undrain(request.Token))
+	case "maintenance.renew":
+		responseError(&response, d.renew(request.Token, requestID))
+		if response.OK {
+			response.Token = request.Token
+		}
 	case "singbox.start":
-		pid, handle, err := d.handleSingBoxStart(request, logFile)
+		pid, handle, err := d.startSingBox(request, logFile)
 		if err != nil {
 			_ = logFile.Close()
 			response.OK = false
@@ -725,7 +774,13 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 func validateRequestShape(request Request) error {
 	unexpected := false
 	switch request.Action {
-	case "ping":
+	case "maintenance.undrain", "maintenance.renew":
+		if !validMaintenanceToken(request.Token) {
+			return errors.New("maintenance token is required and must be 64 lowercase hex characters")
+		}
+		request.Token = ""
+		fallthrough
+	case "ping", "maintenance.drain":
 		unexpected = len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
 	case "singbox.start":
 		unexpected = request.Stdin != "" || request.Handle != "" || request.Signal != "" || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
@@ -746,7 +801,7 @@ func validateRequestShape(request Request) error {
 	case "signal":
 		unexpected = len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
 	}
-	if unexpected {
+	if unexpected || request.Token != "" {
 		return fmt.Errorf("vpn core action %q contains fields outside its typed schema", request.Action)
 	}
 	return nil
@@ -754,7 +809,7 @@ func validateRequestShape(request Request) error {
 
 func knownAction(action string) bool {
 	switch action {
-	case "ping", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal":
+	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal":
 		return true
 	default:
 		return false
@@ -797,6 +852,7 @@ func (d *serviceDaemon) handleSignal(request Request) (string, error) {
 }
 
 type childRecord struct {
+	kind       string
 	pid        int
 	setPGID    bool
 	resultPath string
@@ -808,14 +864,18 @@ type childRegistry struct {
 }
 
 func newChildRegistry() *childRegistry { return &childRegistry{children: make(map[string]childRecord)} }
-func (r *childRegistry) add(pid int, setPGID bool, resultPath string) (string, error) {
+func (r *childRegistry) add(pid int, setPGID bool, resultPath string, kind ...string) (string, error) {
 	var raw [24]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("generate child handle: %w", err)
 	}
 	handle := hex.EncodeToString(raw[:])
 	r.mu.Lock()
-	r.children[handle] = childRecord{pid: pid, setPGID: setPGID, resultPath: resultPath}
+	childKind := "unknown"
+	if len(kind) != 0 {
+		childKind = kind[0]
+	}
+	r.children[handle] = childRecord{pid: pid, setPGID: setPGID, resultPath: resultPath, kind: childKind}
 	r.mu.Unlock()
 	return handle, nil
 }
