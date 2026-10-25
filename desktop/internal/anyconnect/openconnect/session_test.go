@@ -83,7 +83,9 @@ func extractLineValue(body string, prefix string) string {
 	return ""
 }
 
+// A matching live OpenConnect identity exposes the expanded overlay DNS domains and routes.
 func TestActiveOverlayDNSReturnsExpandedDomainsForLiveSession(t *testing.T) {
+	withIdentitySeams(t, "openconnect", time.Now(), nil)
 	cacheDir := t.TempDir()
 	current := CurrentSession{
 		ID:             "20260328T194252Z",

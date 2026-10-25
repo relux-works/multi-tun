@@ -13,6 +13,7 @@ import (
 )
 
 var (
+	ensureSudoLaunchd     = ensureSudo
 	execCombinedOutput    = func(name string, args ...string) ([]byte, error) { return exec.Command(name, args...).CombinedOutput() }
 	launchctlPIDPattern   = regexp.MustCompile(`\bpid = ([0-9]+)\b`)
 	launchctlStatePattern = regexp.MustCompile(`\bstate = ([A-Za-z0-9_-]+)\b`)
@@ -26,7 +27,7 @@ type LaunchdServiceStatus struct {
 }
 
 func startWithLaunchd(current CurrentSession, executable string) (int, error) {
-	if err := ensureSudo(); err != nil {
+	if err := ensureSudoLaunchd(); err != nil {
 		return 0, fmt.Errorf("sudo authentication: %w", err)
 	}
 
@@ -71,7 +72,7 @@ func startWithLaunchd(current CurrentSession, executable string) (int, error) {
 }
 
 func stopLaunchdSession(current CurrentSession, timeout time.Duration) error {
-	if err := ensureSudo(); err != nil {
+	if err := ensureSudoLaunchd(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
 
@@ -100,9 +101,17 @@ func launchdPID(label string) (int, error) {
 
 	out, err := launchdPrint(label)
 	if err != nil {
-		return 0, nil
+		if launchdServiceMissing(out, err) {
+			return 0, nil
+		}
+		return 0, err
 	}
 	return parseLaunchdPID(string(out)), nil
+}
+
+// launchdServiceMissing recognizes the explicit launchctl not-found diagnostic only.
+func launchdServiceMissing(out []byte, err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "Could not find service") || strings.Contains(string(out), "Could not find service"))
 }
 
 func InspectLaunchd(label string) (LaunchdServiceStatus, error) {
@@ -113,7 +122,7 @@ func InspectLaunchd(label string) (LaunchdServiceStatus, error) {
 
 	out, err := launchdPrint(label)
 	if err != nil {
-		if strings.Contains(err.Error(), "Could not find service") || strings.Contains(string(out), "Could not find service") {
+		if launchdServiceMissing(out, err) {
 			return status, nil
 		}
 		return status, err

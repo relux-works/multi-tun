@@ -76,6 +76,8 @@ func TestConnectWithCookiePropagatesVPNCoreTimeoutSnapshotWithoutPayload(t *test
 }
 
 func TestConnectWithCookieCleansUpRecoveredHelperPIDAfterTimeout(t *testing.T) {
+	// Cleanup verifies the synthetic attempt PID before signalling through its seam.
+	withIdentitySeams(t, "openconnect", time.Now(), nil)
 	previousRun := vpnCoreRunOpenConnect
 	previousSignal := failedStartSignalOpenConnect
 	previousAlive := failedStartProcessAliveOpenConnect
@@ -232,6 +234,8 @@ func TestWaitForOpenConnectPIDFileRetriesPartialWrite(t *testing.T) {
 }
 
 func TestCleanupFailedOpenConnectStartEscalatesOnlyAttemptPID(t *testing.T) {
+	// Cleanup verifies the synthetic attempt PID before signalling through its seam.
+	withIdentitySeams(t, "openconnect", time.Now(), nil)
 	previousSignal := failedStartSignalOpenConnect
 	previousAlive := failedStartProcessAliveOpenConnect
 	previousTimeout := failedStartCleanupTimeoutOpenConnect
@@ -265,7 +269,7 @@ func TestCleanupFailedOpenConnectStartEscalatesOnlyAttemptPID(t *testing.T) {
 	failedStartCleanupTimeoutOpenConnect = 15 * time.Millisecond
 	failedStartCleanupPollOpenConnect = time.Millisecond
 
-	if err := cleanupFailedOpenConnectStart(attemptPID, PrivilegedModeHelper, "/tmp/test-vpn-core.sock"); err != nil {
+	if err := cleanupFailedOpenConnectStart(CurrentSession{PID: attemptPID, PrivilegedMode: PrivilegedModeHelper, HelperSocketPath: "/tmp/test-vpn-core.sock"}); err != nil {
 		t.Fatalf("cleanupFailedOpenConnectStart() error = %v", err)
 	}
 	if got, want := signals, []string{"-INT", "-TERM", "-KILL"}; fmt.Sprint(got) != fmt.Sprint(want) {
@@ -315,6 +319,8 @@ func TestCleanupFailedOpenConnectAttemptClearsCurrentAfterExit(t *testing.T) {
 }
 
 func TestCleanupFailedOpenConnectAttemptPreservesCurrentWhenPIDSurvives(t *testing.T) {
+	// Cleanup verifies the synthetic attempt PID before signalling through its seam.
+	withIdentitySeams(t, "openconnect", time.Now(), nil)
 	previousSignal := failedStartSignalOpenConnect
 	previousAlive := failedStartProcessAliveOpenConnect
 	previousTimeout := failedStartCleanupTimeoutOpenConnect
@@ -479,6 +485,8 @@ func TestConnectRejectsMatchingUntrackedOpenConnectSessionBeforeDryRun(t *testin
 }
 
 func TestConcurrentSameSecondOpenConnectAttemptsKeepPIDOwnershipIsolated(t *testing.T) {
+	// Cleanup verifies the synthetic attempt PID before signalling through its seam.
+	withIdentitySeams(t, "openconnect", time.Now(), nil)
 	previousSignal := failedStartSignalOpenConnect
 	previousAlive := failedStartProcessAliveOpenConnect
 	t.Cleanup(func() {

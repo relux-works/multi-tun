@@ -1,5 +1,5 @@
 package session
 
-import "errors"
+import "multi-tun/desktop/internal/processidentity"
 
-var errProcessIdentityUnsupported = errors.New("process identity is unsupported on this platform")
+var errProcessIdentityUnsupported = processidentity.ErrUnsupported

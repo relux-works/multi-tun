@@ -908,6 +908,17 @@ vless-tun status
 
 ## Development
 
+Desktop VLESS primary/sidecar and OpenConnect session records retain the observed
+process command and start time. Liveness and stop checks reject reused PIDs and
+return identity lookup errors without further PID signals. OpenConnect failed-start
+cleanup also verifies identity and preserves a current record on uncertainty.
+Legacy records use executable name checks; wrapped sidecars accept the supervisor
+or known payload name. An ambiguous payload with another live name retains the
+record and returns an error. OpenConnect status shows retained recovery context
+with unknown liveness on identity errors. Both clients share the read-only macOS `kern.proc.pid` lookup in
+`desktop/internal/processidentity`; launchd lookup errors propagate unless the
+service is explicitly reported missing.
+
 ```bash
 go fmt ./...
 go test ./...

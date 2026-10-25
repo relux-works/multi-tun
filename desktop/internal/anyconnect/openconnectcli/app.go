@@ -49,6 +49,7 @@ var (
 	currentRuntimeOpenConnectCLI      = openconnect.CurrentRuntime
 	listProfilesOpenConnectCLI        = openconnect.ListProfiles
 	currentSessionStateOpenConnectCLI = currentSessionState
+	sessionAliveOpenConnectCLI        = openconnect.SessionAlive
 )
 
 const defaultDisconnectTimeout = 20 * time.Second
@@ -298,9 +299,12 @@ func (a *App) runStatus(args []string) int {
 		profiles, _, ciscoErr = a.statusDependencies.ListProfiles()
 	}
 	current, currentState, _, currentErr := a.statusDependencies.CurrentSession(resolvedCacheDir)
-	if currentErr != nil {
+	if currentErr != nil && current == nil {
 		fmt.Fprintf(a.stderr, "status failed: %v\n", currentErr)
 		return 1
+	}
+	if currentErr != nil {
+		currentState = "unknown"
 	}
 
 	fmt.Fprintf(a.stdout, "config: %s\n", resolvedConfigPath)
@@ -346,6 +350,12 @@ func (a *App) runStatus(args []string) int {
 				fmt.Fprintf(a.stdout, "last_log_line: %s\n", last)
 			}
 		}
+	}
+	if currentErr != nil {
+		fmt.Fprintf(a.stdout, "openconnect_pid: %d\n", current.PID)
+		fmt.Fprintf(a.stdout, "session identity unknown: %v\n", currentErr)
+		fmt.Fprintf(a.stderr, "status failed: %v\n", currentErr)
+		return 1
 	}
 	if vpnBinary == "" {
 		fmt.Fprintln(a.stdout, "vpn_binary: missing")
@@ -1285,7 +1295,7 @@ func currentSessionState(cacheDir string) (*openconnect.CurrentSession, string, 
 		return nil, "unknown", false, err
 	}
 
-	alive, pid, err := openconnect.SessionAlive(current)
+	alive, pid, err := sessionAliveOpenConnectCLI(current)
 	if err != nil {
 		return &current, "unknown", false, err
 	}

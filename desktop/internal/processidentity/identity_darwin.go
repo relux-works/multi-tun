@@ -1,6 +1,6 @@
 //go:build darwin
 
-package session
+package processidentity
 
 import (
 	"bytes"
@@ -9,10 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// processIdentity reports the command name (MAXCOMLEN-truncated) and start
+// Read reports the command name (MAXCOMLEN-truncated) and start
 // time of a live process, so a recorded PID can be matched against the
 // process that actually holds it now.
-func processIdentity(pid int) (string, time.Time, error) {
+func Read(pid int) (string, time.Time, error) {
 	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return "", time.Time{}, err

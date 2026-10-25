@@ -33,8 +33,12 @@ var detectStateOpenConnect = DetectState
 var getConnectionInfoOpenConnect = GetConnectionInfo
 var currentRuntimeOpenConnect = CurrentRuntime
 var currentRoutesOpenConnect = CurrentRoutes
+var appendPreStopSnapshotOpenConnect = appendPreStopSnapshot
+var waitForSessionCleanupOpenConnect = waitForSessionCleanup
 
 type CurrentSession struct {
+	ProcessComm      string    `json:"process_comm,omitempty"`
+	ProcessStart     time.Time `json:"process_start,omitempty"`
 	ID               string    `json:"id"`
 	PID              int       `json:"pid"`
 	StartedAt        time.Time `json:"started_at"`
@@ -274,11 +278,12 @@ func ProcessAlive(pid int) (bool, error) {
 }
 
 func SessionAlive(current CurrentSession) (bool, int, error) {
-	alive, err := ProcessAlive(current.PID)
-	if err != nil {
+	alive, err := processAliveOpenConnect(current.PID)
+	if err != nil || !alive {
 		return false, current.PID, err
 	}
-	return alive, current.PID, nil
+	matches, err := sessionProcessMatches(current)
+	return matches, current.PID, err
 }
 
 func connectConvergenceExpectationsForSession(current CurrentSession) connectConvergenceExpectations {
@@ -575,13 +580,13 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 		return current, "stale", nil
 	}
 
-	_ = appendPreStopSnapshot(cacheDir, current)
+	_ = appendPreStopSnapshotOpenConnect(cacheDir, current)
 
 	privilegedMode := current.PrivilegedMode
 	if privilegedMode == "" {
 		privilegedMode = PrivilegedModeAuto
 	}
-	if err := interruptOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath); err != nil {
+	if err := signalMatchingSession(current, "-INT", privilegedMode); err != nil {
 		return CurrentSession{}, "", fmt.Errorf("failed to stop openconnect pid %d: %w", current.PID, err)
 	}
 
@@ -602,7 +607,7 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 			return CurrentSession{}, "", err
 		}
 		if !alive {
-			if err := waitForSessionCleanup(cacheDir, current, time.Until(deadline)); err != nil {
+			if err := waitForSessionCleanupOpenConnect(cacheDir, current, time.Until(deadline)); err != nil {
 				return CurrentSession{}, "", err
 			}
 			if current.ID != "" {
@@ -615,18 +620,24 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 		}
 		now := time.Now()
 		if !termSent && now.After(termDeadline) {
-			_ = terminateOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
+			if err := signalMatchingSession(current, "-TERM", privilegedMode); err != nil {
+				return CurrentSession{}, "", err
+			}
 			termSent = true
 		}
 		if !killSent && now.After(killDeadline) {
-			_ = killOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
+			if err := signalMatchingSession(current, "-KILL", privilegedMode); err != nil {
+				return CurrentSession{}, "", err
+			}
 			killSent = true
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
 	if !killSent {
-		_ = killOpenConnectPID(current.PID, privilegedMode, current.HelperSocketPath)
+		if err := signalMatchingSession(current, "-KILL", privilegedMode); err != nil {
+			return CurrentSession{}, "", err
+		}
 	}
 	finalDeadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(finalDeadline) {
@@ -635,7 +646,7 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 			return CurrentSession{}, "", err
 		}
 		if !alive {
-			if err := waitForSessionCleanup(cacheDir, current, time.Until(finalDeadline)); err != nil {
+			if err := waitForSessionCleanupOpenConnect(cacheDir, current, time.Until(finalDeadline)); err != nil {
 				return CurrentSession{}, "", err
 			}
 			if current.ID != "" {

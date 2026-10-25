@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
+	"multi-tun/desktop/internal/processidentity"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 )
@@ -40,7 +41,8 @@ var (
 	execLookPath           = exec.LookPath
 	execCommand            = exec.Command
 	launchdPIDSession      = launchdPID
-	processIdentitySession = processIdentity
+	processIdentitySession = processidentity.Read
+	processAliveSession    = ProcessAlive
 	stopLaunchdSessionFunc = stopLaunchdSession
 	routeGetHostSession    = func(host string) ([]byte, error) {
 		return execCommand(routePath, "-n", "get", host).CombinedOutput()
@@ -154,10 +156,12 @@ type CurrentSession struct {
 }
 
 type SidecarSession struct {
-	Name    string   `json:"name"`
-	PID     int      `json:"pid"`
-	Command []string `json:"command,omitempty"`
-	LogPath string   `json:"log_path,omitempty"`
+	ProcessComm  string    `json:"process_comm,omitempty"`
+	ProcessStart time.Time `json:"process_start,omitempty"`
+	Name         string    `json:"name"`
+	PID          int       `json:"pid"`
+	Command      []string  `json:"command,omitempty"`
+	LogPath      string    `json:"log_path,omitempty"`
 }
 
 func Start(cacheDir, configPath string, profile model.Profile, options StartOptions) (CurrentSession, error) {
@@ -297,6 +301,13 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 
 	pid, err := waitForStableStart(session, 1500*time.Millisecond)
 	if err != nil {
+		if errors.Is(err, errSessionLivenessUnknown) {
+			persistErr := SaveCurrent(cacheDir, session)
+			if release != nil {
+				_ = release()
+			}
+			return session, errors.Join(err, persistErr)
+		}
 		_ = stopStartedSession(session)
 		_ = ClearCurrent(cacheDir)
 		if release != nil {
@@ -543,7 +554,7 @@ func ProcessAlive(pid int) (bool, error) {
 }
 
 func SessionAlive(current CurrentSession) (bool, int, error) {
-	alive, err := ProcessAlive(current.PID)
+	alive, err := processAliveSession(current.PID)
 	if err != nil {
 		return false, current.PID, err
 	}
@@ -601,9 +612,6 @@ func recordProcessIdentity(session *CurrentSession) error {
 
 var identityRetryDelay = 100 * time.Millisecond
 
-// processStartTolerance absorbs the kern.proc start-time granularity.
-const processStartTolerance = time.Second
-
 // sessionProcessMatches reports whether the live process holding current.PID
 // is the recorded one. Records carrying ProcessComm/ProcessStart must match
 // both; legacy records are matched by the recorded executable's name only.
@@ -616,21 +624,11 @@ func sessionProcessMatches(current CurrentSession) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("verify identity of pid %d: %w", current.PID, err)
 	}
-	if current.ProcessComm != "" {
-		delta := started.Sub(current.ProcessStart)
-		if delta < 0 {
-			delta = -delta
-		}
-		return comm == current.ProcessComm && delta <= processStartTolerance, nil
-	}
 	want := "sing-box"
 	if len(current.Command) > 0 && strings.TrimSpace(current.Command[0]) != "" {
 		want = filepath.Base(current.Command[0])
 	}
-	if len(want) > 16 {
-		want = want[:16]
-	}
-	return comm == want, nil
+	return processidentity.Matches(comm, started, current.ProcessComm, current.ProcessStart, want), nil
 }
 
 func SessionsDir(cacheDir string) string {
@@ -715,16 +713,17 @@ func startSidecar(cacheDir, sessionID string, option SidecarOptions) (SidecarSes
 	if err := cmd.Start(); err != nil {
 		return SidecarSession{}, err
 	}
-	if err := cmd.Process.Release(); err != nil {
-		_ = signalGroup(cmd.Process.Pid, syscall.SIGKILL)
+	sidecar := SidecarSession{
+		Name: name, PID: cmd.Process.Pid, Command: command, LogPath: logPath,
+	}
+	if err := recordSidecarIdentity(&sidecar); err != nil {
+		// This unreaped child was started by this invocation; its PID cannot be reused.
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return SidecarSession{}, err
 	}
-
-	sidecar := SidecarSession{
-		Name:    name,
-		PID:     cmd.Process.Pid,
-		Command: command,
-		LogPath: logPath,
+	if err := cmd.Process.Release(); err != nil {
+		return SidecarSession{}, err
 	}
 	startedSidecar, err := waitForSidecarStart(sidecar, option, 500*time.Millisecond)
 	if err != nil {
@@ -745,6 +744,9 @@ func waitForSidecarStart(sidecar SidecarSession, option SidecarOptions, timeout 
 				return SidecarSession{}, err
 			} else if found {
 				sidecar.PID = discovered.PID
+				if err := recordSidecarIdentity(&sidecar); err != nil {
+					return SidecarSession{}, err
+				}
 				return sidecar, nil
 			}
 			if last := LastRelevantLogLine(sidecar.LogPath); last != "" {
@@ -768,21 +770,130 @@ func stopSidecars(sidecars []SidecarSession, force bool, timeout time.Duration) 
 	return nil
 }
 
+func recordSidecarIdentity(sidecar *SidecarSession) error {
+	current := CurrentSession{PID: sidecar.PID}
+	if err := recordProcessIdentity(&current); err != nil {
+		return err
+	}
+	sidecar.ProcessComm, sidecar.ProcessStart = current.ProcessComm, current.ProcessStart
+	return nil
+}
+
+func sidecarAlive(sidecar SidecarSession) (bool, error) {
+	alive, err := sidecarProcessAliveSession(sidecar.PID)
+	if err != nil || !alive {
+		return alive, err
+	}
+	if sidecar.ProcessComm == "" && (len(sidecar.Command) == 0 || strings.TrimSpace(sidecar.Command[0]) == "") {
+		return false, fmt.Errorf("cannot verify sidecar pid %d: missing recorded command", sidecar.PID)
+	}
+	current := CurrentSession{PID: sidecar.PID, Command: sidecar.Command, ProcessComm: sidecar.ProcessComm, ProcessStart: sidecar.ProcessStart}
+	if sidecar.ProcessComm != "" || !isSidecarWrapper(filepath.Base(sidecar.Command[0])) {
+		return sessionProcessMatches(current)
+	}
+	comm, started, err := processIdentitySession(sidecar.PID)
+	if errors.Is(err, errProcessIdentityUnsupported) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("verify identity of pid %d: %w", sidecar.PID, err)
+	}
+	// Legacy records may hold either the supervisor PID or its discovered child.
+	if processidentity.Matches(comm, started, "", time.Time{}, filepath.Base(sidecar.Command[0])) {
+		return true, nil
+	}
+	payload, err := legacySidecarPayload(sidecar.Command)
+	if err != nil {
+		return false, fmt.Errorf("cannot verify legacy wrapped sidecar %q pid %d (live process %q): %w", sidecar.Name, sidecar.PID, comm, err)
+	}
+	return processidentity.Matches(comm, started, "", time.Time{}, payload), nil
+}
+
+func isSidecarWrapper(name string) bool {
+	switch name {
+	case "sudo", "env", "nice", "nohup", "caffeinate":
+		return true
+	}
+	return false
+}
+
+// Parse only wrapper arguments whose boundaries are known. Shell strings and
+// unsupported flags remain uncertain instead of guessing a process to signal.
+func legacySidecarPayload(command []string) (string, error) {
+	for len(command) > 0 {
+		name := filepath.Base(command[0])
+		if !isSidecarWrapper(name) {
+			if strings.TrimSpace(command[0]) == "" {
+				break
+			}
+			return name, nil
+		}
+		command = command[1:]
+		for len(command) > 0 {
+			arg := command[0]
+			if arg == "--" {
+				command = command[1:]
+				break
+			}
+			if name == "env" && strings.Contains(arg, "=") && !strings.HasPrefix(arg, "-") {
+				command = command[1:]
+				continue
+			}
+			if !strings.HasPrefix(arg, "-") {
+				break
+			}
+			takesValue, known := false, false
+			switch name {
+			case "sudo":
+				switch arg {
+				case "-n", "-E", "-H", "-S", "-k", "-b":
+					known = true
+				case "-u", "-g", "-h", "-p", "-C", "-T", "-r", "-t", "-D", "-R":
+					takesValue, known = true, true
+				}
+			case "env":
+				switch arg {
+				case "-i", "--ignore-environment":
+					known = true
+				case "-u", "--unset", "-C", "--chdir":
+					takesValue, known = true, true
+				}
+			case "nice":
+				takesValue, known = arg == "-n", arg == "-n"
+			case "caffeinate":
+				if arg == "-t" || arg == "-w" {
+					takesValue, known = true, true
+				} else {
+					known = len(arg) > 1 && strings.Trim(arg[1:], "dimsu") == ""
+				}
+			}
+			if !known || (takesValue && len(command) < 2) {
+				return "", fmt.Errorf("unsupported or incomplete %s argument %q", name, arg)
+			}
+			command = command[1:]
+			if takesValue {
+				command = command[1:]
+			}
+		}
+	}
+	return "", errors.New("missing wrapper payload")
+}
+
 func stopSidecar(sidecar SidecarSession, force bool, timeout time.Duration) error {
-	alive, err := ProcessAlive(sidecar.PID)
+	alive, err := sidecarAlive(sidecar)
 	if err != nil {
 		return err
 	}
 	if !alive {
 		return nil
 	}
-	if err := signalGroup(sidecar.PID, syscall.SIGTERM); err != nil {
+	if err := sidecarSignalGroupSession(sidecar.PID, syscall.SIGTERM); err != nil {
 		return err
 	}
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		alive, err := ProcessAlive(sidecar.PID)
+		alive, err := sidecarAlive(sidecar)
 		if err != nil {
 			return err
 		}
@@ -794,7 +905,14 @@ func stopSidecar(sidecar SidecarSession, force bool, timeout time.Duration) erro
 	if !force {
 		return fmt.Errorf("timeout waiting for %s sidecar pid %d to stop", sidecar.Name, sidecar.PID)
 	}
-	if err := signalGroup(sidecar.PID, syscall.SIGKILL); err != nil {
+	alive, err = sidecarAlive(sidecar)
+	if err != nil {
+		return err
+	}
+	if !alive {
+		return nil
+	}
+	if err := sidecarSignalGroupSession(sidecar.PID, syscall.SIGKILL); err != nil {
 		return err
 	}
 	return nil
@@ -1103,12 +1221,14 @@ func signalGroup(pid int, signal syscall.Signal) error {
 	return err
 }
 
+var errSessionLivenessUnknown = errors.New("session liveness is unknown")
+
 func waitForStableStart(current CurrentSession, timeout time.Duration) (int, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		alive, pid, err := SessionAlive(current)
 		if err != nil {
-			return current.PID, err
+			return current.PID, fmt.Errorf("%w: %w", errSessionLivenessUnknown, err)
 		}
 		if !alive {
 			return current.PID, fmt.Errorf("sing-box exited during startup")

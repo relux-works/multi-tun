@@ -380,7 +380,19 @@ func TestCleanupOrphanSidecarsSkipsOptionsWithoutConfigPath(t *testing.T) {
 	}
 }
 
+// A discovered fork replaces the starter PID and records its observed identity.
 func TestWaitForSidecarStartDiscoversForkedSidecar(t *testing.T) {
+	previousIdentity := processIdentitySession
+	t.Cleanup(func() { processIdentitySession = previousIdentity })
+	started := time.Now().Add(-time.Minute)
+	var identityPIDs []int
+	processIdentitySession = func(pid int) (string, time.Time, error) {
+		identityPIDs = append(identityPIDs, pid)
+		if pid != 777 {
+			t.Fatalf("identity PID=%d, want discovered PID 777", pid)
+		}
+		return "xray", started, nil
+	}
 	prevList := sidecarProcessListSession
 	prevAlive := sidecarProcessAliveSession
 	t.Cleanup(func() {
@@ -399,8 +411,10 @@ func TestWaitForSidecarStartDiscoversForkedSidecar(t *testing.T) {
 	}
 
 	got, err := waitForSidecarStart(SidecarSession{
-		Name:    "xray",
-		PID:     111,
+		Name:        "xray",
+		PID:         111,
+		Command:     []string{"sudo", "-n", "/opt/bin/xray", "run"},
+		ProcessComm: "sudo", ProcessStart: started.Add(-time.Hour),
 		LogPath: filepath.Join(t.TempDir(), "xray.log"),
 	}, SidecarOptions{
 		Name:       "xray",
@@ -410,8 +424,11 @@ func TestWaitForSidecarStartDiscoversForkedSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForSidecarStart() error = %v", err)
 	}
-	if got.PID != 777 {
-		t.Fatalf("waitForSidecarStart() pid = %d, want discovered pid 777", got.PID)
+	if got.PID != 777 || got.ProcessComm != "xray" || !got.ProcessStart.Equal(started) || len(identityPIDs) != 1 || identityPIDs[0] != 777 {
+		t.Fatalf("result=%+v identity PIDs=%v", got, identityPIDs)
+	}
+	if strings.Join(got.Command, " ") != "sudo -n /opt/bin/xray run" {
+		t.Fatalf("original command changed: %v", got.Command)
 	}
 }
 

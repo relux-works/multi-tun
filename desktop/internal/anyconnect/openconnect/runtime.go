@@ -49,6 +49,7 @@ const (
 )
 
 var (
+	resolvePrivilegedModeOpenConnect     = resolvePrivilegedMode
 	execLookPathOpenConnect              = exec.LookPath
 	execCommandOpenConnect               = exec.Command
 	listOpenConnectProcessesOpenConnect  = listOpenConnectProcesses
@@ -56,6 +57,7 @@ var (
 	failedStartProcessAliveOpenConnect   = ProcessAlive
 	failedStartCleanupTimeoutOpenConnect = 5 * time.Second
 	failedStartCleanupPollOpenConnect    = 50 * time.Millisecond
+	connectWithCookieOpenConnect         = connectWithCookie
 	authenticateOpenConnect              = authenticate
 	lookupHostOpenConnect                = net.LookupHost
 	systemLookupHostOpenConnect          = lookupHostViaSystemSourcesOpenConnect
@@ -287,7 +289,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	}
 
 	if options.DryRun {
-		privilegedMode, _, err := resolvePrivilegedMode(options.PrivilegedMode)
+		privilegedMode, _, err := resolvePrivilegedModeOpenConnect(options.PrivilegedMode)
 		if err != nil {
 			return ConnectResult{}, err
 		}
@@ -302,7 +304,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		}, nil
 	}
 
-	privilegedMode, helperCfg, err := resolvePrivilegedMode(options.PrivilegedMode)
+	privilegedMode, helperCfg, err := resolvePrivilegedModeOpenConnect(options.PrivilegedMode)
 	if err != nil {
 		return ConnectResult{}, err
 	}
@@ -391,7 +393,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	}
 
 	writeProgressf(options.ProgressWriter, "phase: connecting to %s", server)
-	pid, iface, err := connectWithCookie(auth, ocPath, scriptExec, pidFilePath, logFile, privilegedMode, helperCfg, options.ClientMimicry)
+	pid, iface, err := connectWithCookieOpenConnect(auth, ocPath, scriptExec, pidFilePath, logFile, privilegedMode, helperCfg, options.ClientMimicry)
 	if err != nil {
 		current.PID = pid
 		current.Interface = iface
@@ -401,6 +403,10 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 
 	current.PID = pid
 	current.Interface = iface
+	if err := recordProcessIdentity(&current); err != nil {
+		// Preserve a discoverable legacy record and its cleanup context without signalling an unverified PID.
+		return ConnectResult{}, errors.Join(err, preserveFailedOpenConnectAttempt(cacheDir, current))
+	}
 
 	pid, err = waitForStableStart(current, 1500*time.Millisecond)
 	if err != nil {
@@ -3627,7 +3633,7 @@ func failedOpenConnectLaunchResult(pidFilePath, privilegedMode, helperSocketPath
 	}
 	cleanupSucceeded := true
 	if pid > 0 {
-		if cleanupErr := cleanupFailedOpenConnectStart(pid, privilegedMode, helperSocketPath); cleanupErr != nil {
+		if cleanupErr := cleanupFailedOpenConnectStart(CurrentSession{PID: pid, PrivilegedMode: privilegedMode, HelperSocketPath: helperSocketPath}); cleanupErr != nil {
 			cleanupSucceeded = false
 			launchErr = fmt.Errorf("%w; failed-start cleanup: %v", launchErr, cleanupErr)
 		}
@@ -4049,15 +4055,9 @@ func elevatedCommand(mode string, args ...string) (string, []string) {
 }
 
 func cleanupFailedOpenConnectAttempt(cacheDir string, current CurrentSession) error {
-	cleanupErr := cleanupFailedOpenConnectStart(current.PID, current.PrivilegedMode, current.HelperSocketPath)
+	cleanupErr := cleanupFailedOpenConnectStart(current)
 	if cleanupErr != nil {
-		metadataErr := SaveMetadata(current)
-		currentErr := SaveCurrent(cacheDir, current)
-		return errors.Join(
-			cleanupErr,
-			wrapOptionalError("preserve failed session metadata", metadataErr),
-			wrapOptionalError("preserve current session", currentErr),
-		)
+		return errors.Join(cleanupErr, preserveFailedOpenConnectAttempt(cacheDir, current))
 	}
 
 	var removeErr error
@@ -4074,18 +4074,35 @@ func cleanupFailedOpenConnectAttempt(cacheDir string, current CurrentSession) er
 	)
 }
 
-func cleanupFailedOpenConnectStart(pid int, privilegedMode, helperSocketPath string) error {
-	if pid <= 0 {
-		return nil
-	}
-	alive, err := failedStartProcessAliveOpenConnect(pid)
-	if err != nil {
-		return fmt.Errorf("inspect openconnect pid %d before failed-start cleanup: %w", pid, err)
-	}
-	if !alive {
-		return nil
-	}
+func preserveFailedOpenConnectAttempt(cacheDir string, current CurrentSession) error {
+	metadataErr := SaveMetadata(current)
+	currentErr := SaveCurrent(cacheDir, current)
+	return errors.Join(
+		wrapOptionalError("preserve failed session metadata", metadataErr),
+		wrapOptionalError("preserve current session", currentErr),
+	)
+}
 
+// A reused PID is never signalled. Keep the attempt for a later Stop to reconcile its cleanup state.
+func failedStartSessionAlive(current CurrentSession) (bool, error) {
+	alive, err := failedStartProcessAliveOpenConnect(current.PID)
+	if err != nil || !alive {
+		return false, err
+	}
+	matches, err := sessionProcessMatches(current)
+	if err != nil {
+		return false, err
+	}
+	if !matches {
+		return false, fmt.Errorf("openconnect pid %d identity changed during failed-start cleanup", current.PID)
+	}
+	return true, nil
+}
+
+func cleanupFailedOpenConnectStart(current CurrentSession) error {
+	if current.PID <= 0 {
+		return nil
+	}
 	signals := []string{"-INT", "-TERM", "-KILL"}
 	phaseTimeout := failedStartCleanupTimeoutOpenConnect / time.Duration(len(signals))
 	if phaseTimeout <= 0 {
@@ -4093,15 +4110,22 @@ func cleanupFailedOpenConnectStart(pid int, privilegedMode, helperSocketPath str
 	}
 	var signalErrors []string
 	for _, signal := range signals {
-		if err := failedStartSignalOpenConnect(pid, signal, privilegedMode, helperSocketPath); err != nil {
+		alive, err := failedStartSessionAlive(current)
+		if err != nil {
+			return fmt.Errorf("inspect openconnect pid %d before failed-start cleanup: %w", current.PID, err)
+		}
+		if !alive {
+			return nil
+		}
+		if err := failedStartSignalOpenConnect(current.PID, signal, current.PrivilegedMode, current.HelperSocketPath); err != nil {
 			signalErrors = append(signalErrors, fmt.Sprintf("%s: %v", signal, err))
 		}
 
 		deadline := time.Now().Add(phaseTimeout)
 		for {
-			alive, err := failedStartProcessAliveOpenConnect(pid)
+			alive, err := failedStartSessionAlive(current)
 			if err != nil {
-				return fmt.Errorf("inspect openconnect pid %d during failed-start cleanup: %w", pid, err)
+				return fmt.Errorf("inspect openconnect pid %d during failed-start cleanup: %w", current.PID, err)
 			}
 			if !alive {
 				return nil
@@ -4117,7 +4141,7 @@ func cleanupFailedOpenConnectStart(pid int, privilegedMode, helperSocketPath str
 	if len(signalErrors) > 0 {
 		detail = "; signal errors: " + strings.Join(signalErrors, "; ")
 	}
-	return fmt.Errorf("openconnect pid %d remains alive after PID-scoped INT/TERM/KILL cleanup%s", pid, detail)
+	return fmt.Errorf("openconnect pid %d remains alive after PID-scoped INT/TERM/KILL cleanup%s", current.PID, detail)
 }
 
 func wrapOptionalError(action string, err error) error {
