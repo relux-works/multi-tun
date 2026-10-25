@@ -3,6 +3,7 @@
 package vpncore
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,4 +88,41 @@ func openACLTestPath(t *testing.T, path string, directory bool) int {
 	}
 	t.Cleanup(func() { _ = unix.Close(fd) })
 	return fd
+}
+
+func TestRuntimeQuarantineClearACLRemovesExtendedEntries(t *testing.T) {
+	// Descriptor ACL clearing removes planted read, write and deny ACLs from temporary directories; plain directories also succeed.
+	for _, rule := range []string{"", "everyone allow read", "everyone allow add_file", "everyone deny read"} {
+		t.Run(rule, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "quarantine")
+			if err := os.Mkdir(path, 0o711); err != nil {
+				t.Fatal(err)
+			}
+			fd := openACLTestPath(t, path, true)
+			t.Cleanup(func() { _ = clearRuntimeQuarantineACL(fd) })
+			if rule != "" {
+				if output, err := exec.Command("chmod", "+a", rule, path).CombinedOutput(); err != nil {
+					t.Fatalf("plant ACL: %v (%s)", err, output)
+				}
+				output, err := exec.Command("ls", "-lde", path).CombinedOutput()
+				if err != nil || !bytes.Contains(output, []byte("0:")) {
+					t.Fatalf("ACL control not planted: %v (%s)", err, output)
+				}
+			}
+			if err := clearRuntimeQuarantineACL(fd); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command("ls", "-lde", path).CombinedOutput()
+			if err != nil || bytes.Contains(output, []byte("0:")) {
+				t.Fatalf("ACL not empty: %v (%s)", err, output)
+			}
+			var stat unix.Stat_t
+			if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&0o777 != 0o711 {
+				t.Fatalf("mode changed: %#o %v", stat.Mode, err)
+			}
+		})
+	}
+	if err := clearRuntimeQuarantineACL(-1); err == nil {
+		t.Fatal("invalid descriptor accepted")
+	}
 }

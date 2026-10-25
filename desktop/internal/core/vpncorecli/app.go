@@ -60,6 +60,12 @@ func (a *App) Run(args []string) int {
 	}
 
 	switch args[0] {
+	case "_quarantine-runtime":
+		if err := vpncore.RunRuntimeQuarantineMove(args[1:], a.stdout); err != nil {
+			fmt.Fprintf(a.stderr, "runtime quarantine failed: %v\n", err)
+			return 1
+		}
+		return 0
 	case "install-digest":
 		return a.runInstallDigest(args[1:])
 	case "install":

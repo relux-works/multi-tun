@@ -110,25 +110,51 @@ func UninstallService(cfg ServiceConfig) error {
 	if err := ensureSudoCredentialsVPNCore(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
-	compatibilityErr := cleanupCompatibilityServices(cfg)
-	uninstallErr := uninstallExactService(cfg)
-	return errors.Join(compatibilityErr, uninstallErr)
+	var configs []ServiceConfig
+	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
+		configs = append(configs, compat.ServiceConfig)
+	}
+	return uninstallServiceConfigs(append(configs, cfg), "")
 }
 
 func cleanupCompatibilityServices(cfg ServiceConfig) error {
-	var errs []error
+	var configs []ServiceConfig
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
-		if err := uninstallExactService(compat.ServiceConfig); err != nil {
-			errs = append(errs, fmt.Errorf("uninstall compatibility service %s: %w", compat.Label, err))
+		configs = append(configs, compat.ServiceConfig)
+	}
+	// Installation has not forgotten the primary; never remove its runtime here.
+	return uninstallServiceConfigs(configs, cfg.RuntimeDir)
+}
+
+func uninstallServiceConfigs(configs []ServiceConfig, preservedRuntime string) error {
+	lastRuntimeUser := make(map[string]int)
+	for index, cfg := range configs {
+		lastRuntimeUser[cfg.RuntimeDir] = index
+	}
+	failedForget := make(map[string][]error)
+	var errs []error
+	for index, cfg := range configs {
+		runtime := cfg.RuntimeDir
+		if lastRuntimeUser[runtime] != index || runtime == preservedRuntime {
+			cfg.RuntimeDir = ""
+		}
+		forgetErr, err := uninstallExactService(cfg, errors.Join(failedForget[runtime]...))
+		if forgetErr != nil {
+			failedForget[runtime] = append(failedForget[runtime], fmt.Errorf("%s: %w", cfg.Label, forgetErr))
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("uninstall service %s: %w", cfg.Label, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func uninstallExactService(cfg ServiceConfig) error {
+// The first result records confirmed forget independently of path cleanup errors.
+func uninstallExactService(cfg ServiceConfig, earlierForgetErr error) (error, error) {
 	if cfg.HelperDir != "" {
 		if err := verifyHelperRemovalParent(cfg.HelperDir, installVerificationDepsVPNCore()); err != nil {
-			return fmt.Errorf("verify helper removal parent: %w", err)
+			err = fmt.Errorf("verify helper removal parent: %w", err)
+			return err, err
 		}
 	}
 	forgetErr := forgetLaunchdLabel(cfg.Label)
@@ -136,16 +162,26 @@ func uninstallExactService(cfg ServiceConfig) error {
 	if _, err := runPrivilegedCommandVPNCore("rm", "-f", cfg.PlistPath, cfg.SocketPath); err != nil {
 		removalErrs = append(removalErrs, fmt.Errorf("remove plist and socket: %w", err))
 	}
+	var runtimeErr error
+	if cfg.RuntimeDir != "" {
+		if usersErr := errors.Join(earlierForgetErr, forgetErr); usersErr != nil {
+			runtimeErr = fmt.Errorf("preserve runtime directory %s: not all services confirmed forget: %w", cfg.RuntimeDir, usersErr)
+		} else {
+			runtimeErr = removeServiceRuntimeDirectory(cfg)
+		}
+	}
+	// The running executable may be the installed helper. Keep it available for
+	// the privileged rename subcommand until runtime quarantine is complete.
 	if cfg.HelperDir != "" {
 		if _, err := runPrivilegedCommandVPNCore("rm", "-rf", cfg.HelperDir, privateSocketDir(cfg)); err != nil {
 			removalErrs = append(removalErrs, fmt.Errorf("remove helper directory: %w", err))
 		}
 	}
 	absentErr := verifyServicePathsAbsent(cfg)
-	if forgetErr == nil && absentErr == nil {
-		return nil
+	if forgetErr == nil && runtimeErr == nil && absentErr == nil {
+		return nil, nil
 	}
-	return errors.Join(forgetErr, errors.Join(removalErrs...), absentErr)
+	return forgetErr, errors.Join(forgetErr, errors.Join(removalErrs...), runtimeErr, absentErr)
 }
 
 func forgetLaunchdLabel(label string) error {
@@ -181,6 +217,9 @@ func verifyServicePathsAbsent(cfg ServiceConfig) error {
 	paths := []string{cfg.PlistPath, cfg.SocketPath, cfg.HelperDir}
 	if cfg.HelperDir != "" {
 		paths = append(paths, privateSocketDir(cfg))
+	}
+	if cfg.RuntimeDir != "" {
+		paths = append(paths, cfg.RuntimeDir)
 	}
 	for _, path := range paths {
 		if path == "" {

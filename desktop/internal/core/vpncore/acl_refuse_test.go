@@ -10,3 +10,10 @@ func TestCheckWriteACLRefusesUnsupportedBuild(t *testing.T) {
 		t.Fatal("checkWriteACL() error = nil")
 	}
 }
+
+func TestRuntimeQuarantineClearACLRefusesUnsupportedBuild(t *testing.T) {
+	// Unsupported builds refuse ACL clearing rather than claiming an unverified ACL-free quarantine.
+	if err := clearRuntimeQuarantineACL(-1); err == nil {
+		t.Fatal("ACL clearing unexpectedly available")
+	}
+}

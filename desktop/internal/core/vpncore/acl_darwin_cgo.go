@@ -6,6 +6,26 @@ package vpncore
 #include <errno.h>
 #include <sys/acl.h>
 
+static int vpncore_clear_quarantine_acl(int fd) {
+ acl_t empty = acl_init(0);
+ if (empty == NULL) return -errno;
+ int result = acl_set_fd_np(fd, empty, ACL_TYPE_EXTENDED);
+ int saved = errno;
+ acl_free(empty);
+ if (result != 0) return -saved;
+ // Verify the complete ACL is empty, including read-only and deny entries.
+ acl_t found = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+ if (found == NULL) return errno == ENOENT ? 0 : -errno;
+ ssize_t size = acl_size(found);
+ acl_t baseline = acl_init(0);
+ if (baseline == NULL) { saved = errno; acl_free(found); return -saved; }
+ ssize_t empty_size = acl_size(baseline);
+ acl_free(baseline);
+ acl_free(found);
+ if (size < 0 || empty_size < 0) return -EINVAL;
+ return size == empty_size ? 0 : -EINVAL;
+}
+
 static int vpncore_acl_has_write(int fd) {
 	acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
 	if (acl == NULL) {
@@ -75,4 +95,11 @@ func checkWriteACL(_ string, fd int) error {
 	default:
 		return fmt.Errorf("inspect ACL: %w", syscall.Errno(-result))
 	}
+}
+
+func clearRuntimeQuarantineACL(fd int) error {
+	if result := int(C.vpncore_clear_quarantine_acl(C.int(fd))); result != 0 {
+		return fmt.Errorf("clear/verify empty ACL: %w", syscall.Errno(-result))
+	}
+	return nil
 }

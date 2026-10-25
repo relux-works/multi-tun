@@ -14,6 +14,7 @@ import (
 	"multi-tun/desktop/internal/anyconnect/keychain"
 	"multi-tun/desktop/internal/anyconnect/openconnect"
 	"multi-tun/desktop/internal/anyconnect/openconnectcfg"
+	"multi-tun/desktop/internal/core/vpncore"
 )
 
 type App struct {
@@ -108,6 +109,12 @@ func (a *App) Run(args []string) int {
 	}
 
 	switch args[0] {
+	case "_quarantine-runtime":
+		if err := vpncore.RunRuntimeQuarantineMove(args[1:], a.stdout); err != nil {
+			fmt.Fprintf(a.stderr, "runtime quarantine failed: %v\n", err)
+			return 1
+		}
+		return 0
 	case "help", "-h", "--help":
 		a.printUsage()
 		return 0
