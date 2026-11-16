@@ -715,6 +715,11 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 	if options.secondFactorMode != "" {
 		fmt.Fprintf(a.stdout, "second_factor_mode: %s\n", options.secondFactorMode)
 	}
+	if options.pacURL != "" {
+		fmt.Fprintf(a.stdout, "pac: %s\n", options.pacURL)
+	} else if options.pacScript != "" {
+		fmt.Fprintf(a.stdout, "pac: local script (%d bytes) served on loopback\n", len(options.pacScript))
+	}
 	fmt.Fprintf(a.stdout, "command: %s\n", strings.Join(result.Command, " "))
 	if options.dryRun {
 		fmt.Fprintln(a.stdout, "dry_run: true")
