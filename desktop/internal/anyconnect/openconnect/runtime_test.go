@@ -943,7 +943,7 @@ func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
 }
 
 func TestScriptDiagnosticsWrapperScriptLogsDNSAndResolverState(t *testing.T) {
-	script := scriptDiagnosticsWrapperScript("/tmp/openconnect.log", "vpn-slice --domains-vpn-dns corp.example 10.0.0.0/8", nil, "/tmp/pycompat", []string{"10.0.0.0/8"})
+	script := scriptDiagnosticsWrapperScript("/tmp/openconnect.log", "vpn-slice --domains-vpn-dns corp.example 10.0.0.0/8", nil, "/tmp/pycompat", []string{"10.0.0.0/8"}, nil)
 
 	for _, needle := range []string{
 		"vpnc_wrapper_env_begin",
@@ -974,7 +974,7 @@ func TestScriptDiagnosticsWrapperScriptIncludesSupplementalDNSShim(t *testing.T)
 		SearchCleanupDomains: []string{"corp.example", "inside.corp.example"},
 		ProbeHosts:           []string{"gitlab.services.corp.example"},
 		RouteOverrides:       []string{"10.0.0.0/8"},
-	}, "", []string{"10.0.0.0/8"})
+	}, "", []string{"10.0.0.0/8"}, nil)
 
 	for _, needle := range []string{
 		"vpnc_wrapper_dns_shim: apply",
@@ -1022,7 +1022,7 @@ func TestScriptDiagnosticsWrapperScriptKeepsResolverShimForSplitInclude(t *testi
 		SearchCleanupDomains: []string{"corp.example"},
 		ProbeHosts:           []string{"gitlab.services.corp.example"},
 		ManageSearchResolver: true,
-	}, "/tmp/pycompat", []string{"10.23.16.4/32", "10.0.0.0/8"})
+	}, "/tmp/pycompat", []string{"10.23.16.4/32", "10.0.0.0/8"}, nil)
 
 	for _, needle := range []string{
 		"use_scutil_state='0'",

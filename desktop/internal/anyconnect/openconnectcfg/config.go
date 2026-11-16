@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,7 @@ type Config struct {
 	DefaultProfile string                  `json:"default_profile,omitempty"`
 	DefaultMode    string                  `json:"default_mode,omitempty"`
 	SplitInclude   *SplitIncludeConfig     `json:"split_include,omitempty"`
+	PAC            *PACConfig              `json:"pac,omitempty"`
 	Profiles       map[string]VPNConfig    `json:"profiles,omitempty"`
 	Servers        map[string]ServerConfig `json:"servers,omitempty"`
 	Auth           AuthConfig              `json:"auth,omitempty"`
@@ -55,6 +57,21 @@ type SplitIncludeConfig struct {
 
 type VPNConfig struct {
 	SplitInclude *SplitIncludeConfig `json:"split_include,omitempty"`
+	PAC          *PACConfig          `json:"pac,omitempty"`
+}
+
+// PACConfig selects a proxy auto-config (PAC) script that openconnect-tun sets
+// as the system auto-proxy URL while the tunnel is up and removes on disconnect.
+// At most one source may be set:
+// - URL: an http(s) URL of a PAC file, used as is (typically served inside the VPN);
+// - File: a PAC file on disk; a relative path is resolved against the config file directory;
+// - Script: the PAC JavaScript body inline in the config.
+// File and Script are served to the system from a loopback HTTP listener.
+// An empty object (or no "pac" key) leaves the system proxy settings untouched.
+type PACConfig struct {
+	URL    string `json:"url,omitempty"`
+	File   string `json:"file,omitempty"`
+	Script string `json:"script,omitempty"`
 }
 
 type ServerConfig struct {
@@ -63,6 +80,7 @@ type ServerConfig struct {
 	Auth          *AuthConfig              `json:"auth,omitempty"`
 	ClientMimicry *ClientMimicryConfig     `json:"client_mimicry,omitempty"`
 	SplitInclude  *SplitIncludeConfig      `json:"split_include,omitempty"`
+	PAC           *PACConfig               `json:"pac,omitempty"`
 	Profiles      map[string]ProfileConfig `json:"profiles,omitempty"`
 }
 
@@ -71,6 +89,7 @@ type ProfileConfig struct {
 	Profile      string              `json:"profile,omitempty"`
 	Mode         string              `json:"mode,omitempty"`
 	SplitInclude *SplitIncludeConfig `json:"split_include,omitempty"`
+	PAC          *PACConfig          `json:"pac,omitempty"`
 }
 
 type ClientMimicryConfig struct {
@@ -350,6 +369,63 @@ func (c Config) EffectiveSplitInclude(server string, profile string) SplitInclud
 	return result
 }
 
+// EffectivePAC returns the PAC selection for a server/profile pair. The most
+// specific "pac" object wins as a whole (top level, then server, then the server's
+// profile, then the top-level profile entry), so a profile can switch sources or
+// disable PAC with an empty object.
+func (c Config) EffectivePAC(server string, profile string) PACConfig {
+	result := PACConfig{}
+	pick := func(value *PACConfig) {
+		if value != nil {
+			result = *value
+		}
+	}
+	pick(c.PAC)
+	server = strings.TrimSpace(server)
+	profile = strings.TrimSpace(profile)
+	if _, override, _, ok, _ := c.resolveServerConfig(server); ok {
+		pick(override.PAC)
+		if _, profileOverride, _, ok, _ := resolveProfileConfig(override, profile); ok {
+			pick(profileOverride.PAC)
+		}
+	}
+	if override, ok := c.Profiles[profile]; ok {
+		pick(override.PAC)
+	}
+	return result
+}
+
+// Enabled reports whether any PAC source is set.
+func (p PACConfig) Enabled() bool {
+	return strings.TrimSpace(p.URL) != "" || strings.TrimSpace(p.File) != "" || strings.TrimSpace(p.Script) != ""
+}
+
+// Validate rejects ambiguous or unusable PAC selections.
+func (p PACConfig) Validate() error {
+	set := 0
+	for _, value := range []string{p.URL, p.File, p.Script} {
+		if strings.TrimSpace(value) != "" {
+			set++
+		}
+	}
+	if set > 1 {
+		return errors.New("pac: set only one of url, file or script")
+	}
+	if url := strings.TrimSpace(p.URL); url != "" {
+		parsed, err := neturl.Parse(url)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("pac: url must be an absolute http or https URL, got %q", url)
+		}
+		if strings.ContainsAny(url, "\n\r\t") {
+			return errors.New("pac: url must not contain control characters")
+		}
+	}
+	if strings.TrimSpace(p.File) != "" && !filepath.IsAbs(p.File) {
+		return fmt.Errorf("pac: file path %q is not absolute after config resolution", p.File)
+	}
+	return nil
+}
+
 func (c Config) EffectiveAuth(server string) AuthConfig {
 	result := c.Auth
 	server = strings.TrimSpace(server)
@@ -525,6 +601,31 @@ func (c *Config) resolveRelativePaths(baseDir string) {
 	if c.CacheDir != "" && !filepath.IsAbs(c.CacheDir) {
 		c.CacheDir = filepath.Join(baseDir, c.CacheDir)
 	}
+	c.PAC = resolvePACFilePath(c.PAC, baseDir)
+	for key, profile := range c.Profiles {
+		profile.PAC = resolvePACFilePath(profile.PAC, baseDir)
+		c.Profiles[key] = profile
+	}
+	for key, server := range c.Servers {
+		server.PAC = resolvePACFilePath(server.PAC, baseDir)
+		for profileKey, profile := range server.Profiles {
+			profile.PAC = resolvePACFilePath(profile.PAC, baseDir)
+			server.Profiles[profileKey] = profile
+		}
+		c.Servers[key] = server
+	}
+}
+
+func resolvePACFilePath(value *PACConfig, baseDir string) *PACConfig {
+	if value == nil {
+		return nil
+	}
+	resolved := *value
+	file := strings.TrimSpace(resolved.File)
+	if file != "" && !filepath.IsAbs(file) {
+		resolved.File = filepath.Join(baseDir, file)
+	}
+	return &resolved
 }
 
 func userConfigRoot() string {

@@ -118,6 +118,8 @@ type ConnectOptions struct {
 	VPNDomains          []string
 	BypassSuffixes      []string
 	VPNNameservers      []string
+	PACURL              string
+	PACScript           string
 	Credentials         Credentials
 	ClientMimicry       ClientMimicry
 	AuthFallbackServers []string
@@ -287,6 +289,10 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	if err != nil {
 		return ConnectResult{}, err
 	}
+	pacSpec, err := pacSpecForConnect(options)
+	if err != nil {
+		return ConnectResult{}, err
+	}
 
 	if options.DryRun {
 		privilegedMode, _, err := resolvePrivilegedModeOpenConnect(options.PrivilegedMode)
@@ -331,7 +337,19 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	pidFilePath := filepath.Join(RuntimeDir(cacheDir), "openconnect-"+sessionID+".pid")
 	scriptExec := script
 	scriptWrapperErr := error(nil)
-	if wrappedScript, err := prepareScriptDiagnosticsWrapper(cacheDir, sessionID, logPath, script, supplementalResolverSpecForConnect(mode, server, options)); err != nil {
+	pacErr := error(nil)
+	if pacSpec != nil && pacSpec.URL == "" {
+		helperDir := scriptHelperDir(cacheDir, sessionID)
+		if err := os.MkdirAll(helperDir, 0o755); err != nil {
+			pacErr = fmt.Errorf("create script helper dir: %w", err)
+		} else {
+			pacErr = materializePACScript(pacSpec, helperDir, options.PACScript)
+		}
+		if pacErr != nil {
+			pacSpec = nil
+		}
+	}
+	if wrappedScript, err := prepareScriptDiagnosticsWrapper(cacheDir, sessionID, logPath, script, supplementalResolverSpecForConnect(mode, server, options), pacSpec); err != nil {
 		scriptWrapperErr = err
 	} else if strings.TrimSpace(wrappedScript) != "" {
 		scriptExec = wrappedScript
@@ -355,6 +373,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		VPNDomains:     append([]string(nil), options.VPNDomains...),
 		BypassSuffixes: append([]string(nil), options.BypassSuffixes...),
 		VPNNameservers: append([]string(nil), options.VPNNameservers...),
+		PAC:            pacDescription(pacSpec),
 	}
 	if privilegedMode == PrivilegedModeHelper {
 		current.HelperSocketPath = helperCfg.SocketPath
@@ -367,6 +386,9 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	defer logFile.Close()
 
 	writeLogHeader(logFile, current)
+	if pacErr != nil {
+		writeLogf(logFile, "pac_error: %v", pacErr)
+	}
 	if scriptWrapperErr != nil {
 		writeLogf(logFile, "script_wrapper_error: %v", scriptWrapperErr)
 	} else if strings.TrimSpace(scriptExec) != "" && scriptExec != script {
@@ -525,12 +547,16 @@ func resolveScript(mode string, includeRoutes []string, vpnDomains []string) (st
 	}
 }
 
-func prepareScriptDiagnosticsWrapper(cacheDir, sessionID, logPath, baseScript string, supplemental *supplementalResolverSpec) (string, error) {
+func scriptHelperDir(cacheDir, sessionID string) string {
+	return filepath.Join(SessionsDir(cacheDir), logFilePrefix+sessionID+"-helpers")
+}
+
+func prepareScriptDiagnosticsWrapper(cacheDir, sessionID, logPath, baseScript string, supplemental *supplementalResolverSpec, pac *pacProxySpec) (string, error) {
 	baseScript = strings.TrimSpace(baseScript)
 	if baseScript == "" {
 		return "", nil
 	}
-	helperDir := filepath.Join(SessionsDir(cacheDir), logFilePrefix+sessionID+"-helpers")
+	helperDir := scriptHelperDir(cacheDir, sessionID)
 	if err := os.MkdirAll(helperDir, 0o755); err != nil {
 		return "", fmt.Errorf("create script helper dir: %w", err)
 	}
@@ -549,7 +575,7 @@ func prepareScriptDiagnosticsWrapper(cacheDir, sessionID, logPath, baseScript st
 		routeOverrides = append(routeOverrides, supplemental.RouteOverrides...)
 	}
 	wrapperPath := filepath.Join(helperDir, "script-wrapper.sh")
-	if err := writeExecutableFile(wrapperPath, scriptDiagnosticsWrapperScript(logPath, baseScript, supplemental, pyCompatDir, routeOverrides)); err != nil {
+	if err := writeExecutableFile(wrapperPath, scriptDiagnosticsWrapperScript(logPath, baseScript, supplemental, pyCompatDir, routeOverrides, pac)); err != nil {
 		return "", err
 	}
 	return wrapperPath, nil
@@ -795,7 +821,7 @@ func supplementalResolverServiceID(sessionID, label string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", token[0:8], token[8:12], token[12:16], token[16:20], token[20:32])
 }
 
-func scriptDiagnosticsWrapperScript(logPath, baseScript string, supplemental *supplementalResolverSpec, pyCompatDir string, routeOverrides []string) string {
+func scriptDiagnosticsWrapperScript(logPath, baseScript string, supplemental *supplementalResolverSpec, pyCompatDir string, routeOverrides []string, pac *pacProxySpec) string {
 	shimLabel := ""
 	shimNameservers := ""
 	shimDomains := ""
@@ -846,6 +872,7 @@ scutil_service_id=%s
 vpn_slice_pycompat=%s
 route_overrides=%s
 diag_probes_enabled="${OPENCONNECT_TUN_DIAG_PROBES:-0}"
+%s
 
 backup_search_resolver() {
   [ "$manage_search_resolver" = "1" ] || return 0
@@ -1437,6 +1464,7 @@ case "${reason:-}" in
     fi
     ;;
   disconnect)
+    restore_pac_proxy
     remove_vpn_gateway_route
     sync_probe_host_routes remove
     remove_public_bypass_shim
@@ -1454,6 +1482,7 @@ case "${reason:-}" in
       apply_dns_shim
       apply_public_bypass_shim
       launch_probe_host_route_warmup
+      [ "${reason:-}" = "connect" ] && apply_pac_proxy
     fi
     ;;
 esac
@@ -1467,7 +1496,7 @@ case "${reason:-}" in
     ;;
 esac
 exit "$rc"
-`, shellQuote(logPath), shellQuote(baseScript), shellQuote(shimLabel), shellQuote(shimNameservers), shellQuote(shimDomains), shellQuote(bypassDomains), shellQuote(shimSearchDomain), shellQuote(searchCleanupDomains), shellQuote(probeHosts), shellQuote(manageSearchResolver), shellQuote(useScutilState), shellQuote(scutilServiceID), shellQuote(pyCompatDir), shellQuote(routeOverrideLines))
+`, shellQuote(logPath), shellQuote(baseScript), shellQuote(shimLabel), shellQuote(shimNameservers), shellQuote(shimDomains), shellQuote(bypassDomains), shellQuote(shimSearchDomain), shellQuote(searchCleanupDomains), shellQuote(probeHosts), shellQuote(manageSearchResolver), shellQuote(useScutilState), shellQuote(scutilServiceID), shellQuote(pyCompatDir), shellQuote(routeOverrideLines), pacProxyShellBlock(pac, pacBackupPath, defaultNetworksetup))
 }
 
 const vpnSliceDistutilsCompatInit = `from .version import LooseVersion

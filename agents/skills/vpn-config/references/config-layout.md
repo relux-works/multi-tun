@@ -28,6 +28,7 @@ Start from `assets/openconnect-tun-config.template.json`.
 - `mode=split-include` uses the profile's `split_include` routes and domains.
 - `auth.*_keychain_account` fields contain Keychain account names, not values.
 - `auth.second_factor.mode=totp_auto` enables automatic TOTP retrieval from the configured Keychain account.
+- `pac` (top level, server, or profile) sets a PAC script as the macOS auto-proxy URL while connected: exactly one of `url`, `file` (relative to the config directory) or `script` (inline body). The most specific `pac` wins; `{}` disables it. Previous settings are restored on disconnect.
 
 The default macOS Keychain service used by this project is `multi-tun`. An account name such as `example-vpn/totp-secret` is safe to keep in config; the secret stored under that account is not.
 

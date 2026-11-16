@@ -1,13 +1,16 @@
 package openconnectcli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -144,6 +147,8 @@ func (a *App) Run(args []string) int {
 		return a.runProfiles(args[1:])
 	case "inspect-profiles":
 		return a.runInspectProfiles(args[1:])
+	case openconnect.PACServeCommand:
+		return a.runPACServe(args[1:])
 	case "_helper-daemon":
 		return a.runHelperDaemon(args[1:])
 	default:
@@ -352,6 +357,9 @@ func (a *App) runStatus(args []string) int {
 		if len(current.VPNNameservers) > 0 {
 			fmt.Fprintf(a.stdout, "vpn_nameservers: %s\n", strings.Join(current.VPNNameservers, ", "))
 		}
+		if current.PAC != "" {
+			fmt.Fprintf(a.stdout, "pac: %s\n", current.PAC)
+		}
 		if currentState == "starting" || currentState == "stale" {
 			if last := openconnect.LastRelevantLogLine(current.LogPath); last != "" {
 				fmt.Fprintf(a.stdout, "last_log_line: %s\n", last)
@@ -426,6 +434,8 @@ type runOptions struct {
 	bypassSuffixes      []string
 	vpnNameservers      []string
 	includeRoutes       []string
+	pacURL              string
+	pacScript           string
 	dryRun              bool
 }
 
@@ -604,6 +614,10 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		resolvedBypassSuffixes,
 	)
 	resolvedVPNNameservers := resolveSplitIncludeNameservers(resolvedMode, resolvedSplitInclude)
+	resolvedPACURL, resolvedPACScript, err := resolvePAC(cfg.EffectivePAC(effectiveServer, resolvedProfile))
+	if err != nil {
+		return runOptions{}, 1, err
+	}
 
 	return runOptions{
 		configPath:          *configPath,
@@ -623,6 +637,8 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		bypassSuffixes:      resolvedBypassSuffixes,
 		vpnNameservers:      resolvedVPNNameservers,
 		includeRoutes:       resolvedRoutes,
+		pacURL:              resolvedPACURL,
+		pacScript:           resolvedPACScript,
 		dryRun:              *dryRun,
 	}, 0, nil
 }
@@ -658,6 +674,8 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 		VPNDomains:     options.vpnDomains,
 		BypassSuffixes: options.bypassSuffixes,
 		VPNNameservers: options.vpnNameservers,
+		PACURL:         options.pacURL,
+		PACScript:      options.pacScript,
 		Credentials: openconnect.Credentials{
 			Username:       options.username,
 			Password:       options.password,
@@ -1316,4 +1334,59 @@ func currentSessionState(cacheDir string) (*openconnect.CurrentSession, string, 
 		return &current, "active", true, nil
 	}
 	return &current, "stale", false, nil
+}
+
+// pacScriptFileLimit bounds a PAC file read from disk; the runtime enforces the same limit.
+const pacScriptFileLimit = 1 << 20
+
+// resolvePAC turns the effective "pac" config into either a URL the system
+// fetches itself or a PAC body that the connect wrapper serves on loopback.
+func resolvePAC(cfg openconnectcfg.PACConfig) (string, string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", "", err
+	}
+	switch {
+	case strings.TrimSpace(cfg.URL) != "":
+		return strings.TrimSpace(cfg.URL), "", nil
+	case strings.TrimSpace(cfg.File) != "":
+		info, err := os.Stat(cfg.File)
+		if err != nil {
+			return "", "", fmt.Errorf("pac: file: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return "", "", fmt.Errorf("pac: file %s is not a regular file", cfg.File)
+		}
+		if info.Size() > pacScriptFileLimit {
+			return "", "", fmt.Errorf("pac: file %s is %d bytes, limit is %d", cfg.File, info.Size(), pacScriptFileLimit)
+		}
+		raw, err := os.ReadFile(cfg.File)
+		if err != nil {
+			return "", "", fmt.Errorf("pac: file: %w", err)
+		}
+		if strings.TrimSpace(string(raw)) == "" {
+			return "", "", fmt.Errorf("pac: file %s is empty", cfg.File)
+		}
+		return "", string(raw), nil
+	case strings.TrimSpace(cfg.Script) != "":
+		if len(cfg.Script) > pacScriptFileLimit {
+			return "", "", fmt.Errorf("pac: script is %d bytes, limit is %d", len(cfg.Script), pacScriptFileLimit)
+		}
+		return "", cfg.Script, nil
+	}
+	return "", "", nil
+}
+
+func (a *App) runPACServe(args []string) int {
+	options, err := openconnect.ParsePACServeArgs(args)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "%s: %v\n", openconnect.PACServeCommand, err)
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	if err := openconnect.ServePAC(ctx, options, a.stderr); err != nil {
+		fmt.Fprintf(a.stderr, "%v\n", err)
+		return 1
+	}
+	return 0
 }

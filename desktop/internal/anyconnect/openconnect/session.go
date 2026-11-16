@@ -64,6 +64,7 @@ type CurrentSession struct {
 	VPNDomains       []string  `json:"vpn_domains,omitempty"`
 	BypassSuffixes   []string  `json:"bypass_suffixes,omitempty"`
 	VPNNameservers   []string  `json:"vpn_nameservers,omitempty"`
+	PAC              string    `json:"pac,omitempty"`
 	HelperSocketPath string    `json:"helper_socket_path,omitempty"`
 }
 
@@ -976,6 +977,9 @@ func writeLogHeader(file *os.File, current CurrentSession) {
 	_, _ = fmt.Fprintf(file, "vpn_domains: %s\n", joinOrNone(current.VPNDomains))
 	_, _ = fmt.Fprintf(file, "bypass_suffixes: %s\n", joinOrNone(current.BypassSuffixes))
 	_, _ = fmt.Fprintf(file, "vpn_nameservers: %s\n", joinOrNone(current.VPNNameservers))
+	if current.PAC != "" {
+		_, _ = fmt.Fprintf(file, "pac: %s\n", current.PAC)
+	}
 	_, _ = fmt.Fprintf(file, "command: %s\n", joinOrNone(current.Command))
 	_, _ = fmt.Fprintf(file, "--- openconnect output follows ---\n")
 }

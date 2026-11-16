@@ -1,0 +1,453 @@
+package openconnect
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
+const (
+	// PACServeCommand is the hidden openconnect-tun subcommand the connect
+	// wrapper starts to serve a local PAC script on loopback.
+	PACServeCommand = "__pac-serve"
+
+	pacScriptFileName   = "proxy.pac"
+	pacMaxScriptBytes   = 1 << 20
+	pacContentType      = "application/x-ns-proxy-autoconfig"
+	defaultNetworksetup = "/usr/sbin/networksetup"
+)
+
+// pacBackupPath keeps the system auto-proxy settings that were active before
+// openconnect-tun replaced them. It lives in a root-owned directory so that it
+// survives reboots (the replaced settings are persistent too) and a crashed
+// session's original values are restored by the next disconnect.
+var pacBackupPath = "/var/db/openconnect-tun/pac-proxy-backup.tsv"
+
+// pacProxySpec is the PAC the connect wrapper sets as the system auto-proxy
+// URL while the tunnel is up. Exactly one of URL and ScriptPath is set.
+type pacProxySpec struct {
+	URL          string
+	ScriptPath   string
+	ServerBinary string
+}
+
+func pacSpecForConnect(options ConnectOptions) (*pacProxySpec, error) {
+	url := strings.TrimSpace(options.PACURL)
+	script := options.PACScript
+	if url != "" && strings.TrimSpace(script) != "" {
+		return nil, errors.New("pac: set only one of url and script")
+	}
+	if url != "" {
+		if strings.ContainsAny(url, "\n\r\t") {
+			return nil, errors.New("pac: url must not contain control characters")
+		}
+		return &pacProxySpec{URL: url}, nil
+	}
+	if strings.TrimSpace(script) == "" {
+		return nil, nil
+	}
+	if len(script) > pacMaxScriptBytes {
+		return nil, fmt.Errorf("pac: script is %d bytes, limit is %d", len(script), pacMaxScriptBytes)
+	}
+	return &pacProxySpec{}, nil
+}
+
+// materializePACScript writes the PAC body next to the wrapper and records the
+// binary that serves it.
+func materializePACScript(spec *pacProxySpec, helperDir string, script string) error {
+	if spec == nil || spec.URL != "" {
+		return nil
+	}
+	path := filepath.Join(helperDir, pacScriptFileName)
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		return fmt.Errorf("write pac script: %w", err)
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate openconnect-tun binary for pac server: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(binary); err == nil {
+		binary = resolved
+	}
+	spec.ScriptPath = path
+	spec.ServerBinary = binary
+	return nil
+}
+
+// pacProxyShellBlock returns the wrapper variables and functions that set the
+// PAC on every enabled network service on connect and restore the previous
+// auto-proxy settings on disconnect. Restore also runs when this session has no
+// PAC, so a backup left by a crashed session is put back.
+func pacProxyShellBlock(spec *pacProxySpec, backupPath string, networksetup string) string {
+	url, scriptPath, serverBinary := "", "", ""
+	if spec != nil {
+		url, scriptPath, serverBinary = spec.URL, spec.ScriptPath, spec.ServerBinary
+	}
+	return `pac_url=` + shellQuote(url) + `
+pac_script_file=` + shellQuote(scriptPath) + `
+pac_server_bin=` + shellQuote(serverBinary) + `
+pac_backup_file=` + shellQuote(backupPath) + `
+pac_networksetup=` + shellQuote(networksetup) + `
+pac_port_file="$helper_dir/pac-port"
+pac_pid_file="$helper_dir/pac-server.pid"
+pac_services_file="$helper_dir/pac-services"
+pac_tab=$(printf '\t')
+pac_effective_url=""
+
+pac_log() {
+  printf 'vpnc_wrapper_pac: %s\n' "$*" >> "$log_file" 2>&1
+}
+
+pac_services() {
+  "$pac_networksetup" -listallnetworkservices < /dev/null 2>/dev/null | sed -e 1d -e '/^\*/d' -e '/^$/d'
+}
+
+pac_service_present() {
+  pac_services > "$pac_services_file.check" 2>/dev/null
+  while IFS= read -r pac_present_svc; do
+    if [ "$pac_present_svc" = "$1" ]; then
+      rm -f "$pac_services_file.check"
+      return 0
+    fi
+  done < "$pac_services_file.check"
+  rm -f "$pac_services_file.check"
+  return 1
+}
+
+pac_backup() {
+  if [ -s "$pac_backup_file" ]; then
+    pac_log "backup_kept $pac_backup_file"
+    return 0
+  fi
+  mkdir -p "$(dirname "$pac_backup_file")" || return 1
+  chmod 700 "$(dirname "$pac_backup_file")" 2>/dev/null
+  pac_tmp="$pac_backup_file.tmp.$$"
+  rm -f "$pac_tmp"
+  pac_services > "$pac_services_file" || return 1
+  : > "$pac_tmp" || return 1
+  while IFS= read -r pac_svc; do
+    [ -n "$pac_svc" ] || continue
+    if ! pac_out=$("$pac_networksetup" -getautoproxyurl "$pac_svc" < /dev/null 2>/dev/null); then
+      rm -f "$pac_tmp"
+      return 1
+    fi
+    pac_prev_url=$(printf '%s\n' "$pac_out" | sed -n 's/^URL: //p' | head -n 1)
+    pac_prev_enabled=$(printf '%s\n' "$pac_out" | sed -n 's/^Enabled: //p' | head -n 1)
+    printf '%s\t%s\t%s\n' "$pac_svc" "${pac_prev_enabled:-No}" "${pac_prev_url:-(null)}" >> "$pac_tmp" || return 1
+  done < "$pac_services_file"
+  rm -f "$pac_services_file"
+  mv -f "$pac_tmp" "$pac_backup_file" || return 1
+  pac_log "backup_saved $pac_backup_file"
+}
+
+pac_stop_server() {
+  [ -f "$pac_pid_file" ] || return 0
+  pac_pid=$(cat "$pac_pid_file" 2>/dev/null)
+  case "$pac_pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      case "$(ps -p "$pac_pid" -o command= 2>/dev/null)" in
+        *` + PACServeCommand + `*) kill "$pac_pid" 2>/dev/null && pac_log "server_stopped $pac_pid" ;;
+      esac
+      ;;
+  esac
+  rm -f "$pac_pid_file" "$pac_port_file"
+}
+
+pac_start_server() {
+  pac_stop_server
+  [ -x "$pac_server_bin" ] || return 1
+  [ -f "$pac_script_file" ] || return 1
+  "$pac_server_bin" ` + PACServeCommand + ` --file "$pac_script_file" --port-file "$pac_port_file" --watch-pid "${VPNPID:-0}" < /dev/null >> "$log_file" 2>&1 &
+  printf '%s\n' "$!" > "$pac_pid_file"
+  pac_i=0
+  while [ "$pac_i" -lt 50 ]; do
+    if [ -s "$pac_port_file" ]; then
+      pac_port=$(cat "$pac_port_file" 2>/dev/null)
+      case "$pac_port" in
+        ''|*[!0-9]*) return 1 ;;
+      esac
+      pac_effective_url="http://127.0.0.1:$pac_port/` + pacScriptFileName + `"
+      return 0
+    fi
+    sleep 0.1
+    pac_i=$((pac_i + 1))
+  done
+  return 1
+}
+
+apply_pac_proxy() {
+  pac_effective_url="$pac_url"
+  if [ -n "$pac_script_file" ]; then
+    if ! pac_start_server; then
+      pac_log "server_failed"
+      pac_stop_server
+      return 0
+    fi
+  fi
+  [ -n "$pac_effective_url" ] || return 0
+  if ! pac_backup; then
+    pac_log "backup_failed; system proxy left unchanged"
+    rm -f "$pac_services_file"
+    pac_stop_server
+    return 0
+  fi
+  pac_services > "$pac_services_file"
+  while IFS= read -r pac_svc; do
+    [ -n "$pac_svc" ] || continue
+    if "$pac_networksetup" -setautoproxyurl "$pac_svc" "$pac_effective_url" < /dev/null >> "$log_file" 2>&1; then
+      pac_log "set $pac_svc $pac_effective_url"
+    else
+      pac_log "set_failed $pac_svc"
+    fi
+  done < "$pac_services_file"
+  rm -f "$pac_services_file"
+}
+
+restore_pac_proxy() {
+  pac_stop_server
+  [ -s "$pac_backup_file" ] || return 0
+  pac_failed=0
+  while IFS="$pac_tab" read -r pac_svc pac_prev_enabled pac_prev_url; do
+    [ -n "$pac_svc" ] || continue
+    if ! pac_service_present "$pac_svc"; then
+      pac_log "restore_skip_missing $pac_svc"
+      continue
+    fi
+    if [ -n "$pac_prev_url" ] && [ "$pac_prev_url" != "(null)" ]; then
+      "$pac_networksetup" -setautoproxyurl "$pac_svc" "$pac_prev_url" < /dev/null >> "$log_file" 2>&1 || pac_failed=1
+    fi
+    case "$pac_prev_enabled" in
+      Yes) pac_state=on ;;
+      *) pac_state=off ;;
+    esac
+    "$pac_networksetup" -setautoproxystate "$pac_svc" "$pac_state" < /dev/null >> "$log_file" 2>&1 || pac_failed=1
+    pac_log "restore $pac_svc $pac_state"
+  done < "$pac_backup_file"
+  if [ "$pac_failed" = 0 ]; then
+    rm -f "$pac_backup_file"
+    pac_log "restored"
+  else
+    pac_log "restore_incomplete; backup kept at $pac_backup_file"
+  fi
+}
+`
+}
+
+// PACServeOptions configures the loopback PAC server.
+type PACServeOptions struct {
+	File     string
+	PortFile string
+	WatchPID int
+	Listen   string
+}
+
+// ParsePACServeArgs parses the arguments of the hidden PAC serve subcommand.
+func ParsePACServeArgs(args []string) (PACServeOptions, error) {
+	options := PACServeOptions{Listen: "127.0.0.1:0"}
+	for i := 0; i < len(args); i++ {
+		if i+1 >= len(args) {
+			return options, fmt.Errorf("missing value for %s", args[i])
+		}
+		value := args[i+1]
+		switch args[i] {
+		case "--file":
+			options.File = value
+		case "--port-file":
+			options.PortFile = value
+		case "--watch-pid":
+			pid, err := strconv.Atoi(value)
+			if err != nil || pid < 0 {
+				return options, fmt.Errorf("invalid --watch-pid %q", value)
+			}
+			options.WatchPID = pid
+		default:
+			return options, fmt.Errorf("unknown argument %s", args[i])
+		}
+		i++
+	}
+	if options.File == "" || options.PortFile == "" {
+		return options, errors.New("--file and --port-file are required")
+	}
+	return options, nil
+}
+
+var (
+	pacWatchInterval = time.Second
+	pacEffectiveUID  = os.Geteuid
+	pacProcessAlive  = func(pid int) bool {
+		err := syscall.Kill(pid, 0)
+		return err == nil || errors.Is(err, syscall.EPERM)
+	}
+	pacDropPrivileges = dropPrivilegesToNobody
+)
+
+// ServePAC reads the PAC file, listens on loopback, publishes the port and
+// serves the file until ctx ends or the watched process exits. When started as
+// root it drops to the nobody account after binding.
+func ServePAC(ctx context.Context, options PACServeOptions, logw io.Writer) error {
+	body, err := readPACScript(options.File)
+	if err != nil {
+		return err
+	}
+	listen := options.Listen
+	if listen == "" {
+		listen = "127.0.0.1:0"
+	}
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("pac serve: invalid listen address %q: %w", listen, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("pac serve: listen address %q is not loopback", listen)
+	}
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("pac serve: listen: %w", err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	// Open the port file before dropping privileges (its directory may not be
+	// writable by nobody) but publish the port only after the drop succeeded, so
+	// the wrapper never points the system at a server that is about to exit.
+	_ = os.Remove(options.PortFile)
+	portFile, err := os.OpenFile(options.PortFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("pac serve: open port file: %w", err)
+	}
+	if pacEffectiveUID() == 0 {
+		if err := pacDropPrivileges(); err != nil {
+			_ = portFile.Close()
+			_ = os.Remove(options.PortFile)
+			return fmt.Errorf("pac serve: drop privileges: %w", err)
+		}
+	}
+	_, writeErr := portFile.WriteString(strconv.Itoa(port) + "\n")
+	closeErr := portFile.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(options.PortFile)
+		return fmt.Errorf("pac serve: publish port: %v", errors.Join(writeErr, closeErr))
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if options.WatchPID > 0 {
+		go func() {
+			ticker := time.NewTicker(pacWatchInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if !pacProcessAlive(options.WatchPID) {
+						fmt.Fprintf(logw, "vpnc_wrapper_pac: server_exit watched pid %d gone\n", options.WatchPID)
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	server := &http.Server{
+		Handler:           pacHandler(body),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	fmt.Fprintf(logw, "vpnc_wrapper_pac: server_listening 127.0.0.1:%d\n", port)
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("pac serve: %w", err)
+	}
+	return nil
+}
+
+func readPACScript(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("pac serve: %w", err)
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, pacMaxScriptBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("pac serve: read %s: %w", path, err)
+	}
+	if len(body) > pacMaxScriptBytes {
+		return nil, fmt.Errorf("pac serve: %s exceeds %d bytes", path, pacMaxScriptBytes)
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		return nil, fmt.Errorf("pac serve: %s is empty", path)
+	}
+	return body, nil
+}
+
+func pacHandler(body []byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", pacContentType)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(body)
+	})
+}
+
+func dropPrivilegesToNobody() error {
+	account, err := user.Lookup("nobody")
+	if err != nil {
+		return err
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(account.Gid)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Setgroups([]int{gid}); err != nil {
+		return err
+	}
+	if err := syscall.Setgid(gid); err != nil {
+		return err
+	}
+	if err := syscall.Setuid(uid); err != nil {
+		return err
+	}
+	if os.Geteuid() == 0 || os.Getuid() == 0 {
+		return errors.New("still root after setuid")
+	}
+	return nil
+}
+
+func pacDescription(spec *pacProxySpec) string {
+	switch {
+	case spec == nil:
+		return ""
+	case spec.URL != "":
+		return spec.URL
+	default:
+		return "local script served on loopback"
+	}
+}

@@ -428,6 +428,13 @@ Field reference:
 - `split_include.bypass_suffixes` semantics: on macOS `openconnect-tun` implements bypasses by writing a more specific public `/etc/resolver/<suffix>` entry over the broader VPN-scoped resolver, so `bypass.corp.example` can stay public while `corp.example` still uses VPN DNS
 - split-DNS cleanup: when `search.tailscale` already contains search domains covered by `split_include.vpn_domains`, `openconnect-tun` removes both exact and covered subdomain entries from that search resolver while preserving anything covered by `split_include.bypass_suffixes`, so macOS does not bounce between public and VPN search paths
 - built-in example augmentation: for the anonymized `/outside` example targets `openconnect-tun` still augments split DNS with the extra official Cisco suffix set (`inside.corp.example`, `region.corp.example`, `branch.example`, `workspace.example`, and related domains), so the config can stay minimal without manually restating every covered subdomain
+- `pac` (top level, `servers.<alias>`, `servers.<alias>.profiles.<profile_alias>`, or `profiles.<name>`): an optional proxy auto-config (PAC) script that `openconnect-tun` sets as the macOS auto-proxy URL on every enabled network service while the tunnel is up. The most specific `pac` object wins as a whole, and `{}` disables an inherited one. Set exactly one source:
+  - `"pac": {"url": "http://pac.corp.example/proxy.pac"}`: the system fetches this URL itself, usually from a host reachable only through the tunnel
+  - `"pac": {"file": "corp.pac"}`: a PAC file on disk; a relative path is resolved against the config file's directory
+  - `"pac": {"script": "function FindProxyForURL(url, host) { ... }"}`: the PAC body inline
+  - `file` and `script` are served on `127.0.0.1` by a small server that runs as `nobody` and exits with the tunnel
+  - on connect the previous auto-proxy URL and on/off state of each service are saved in `/var/db/openconnect-tun/pac-proxy-backup.tsv` and restored on disconnect. If a session dies without disconnecting, the next disconnect restores the saved values. If the current settings cannot be read, nothing is changed
+  - without `pac` the system proxy settings stay untouched
 
 ### `vless-tun setup`
 
