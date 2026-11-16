@@ -117,6 +117,29 @@ func checkShellSyntax(t *testing.T, script string) {
 	}
 }
 
+// Claim (review N3): a local PAC that cannot be written stops the connect
+// with an error; a URL or no PAC needs no helper directory.
+func TestPreparePACScriptFailsClosed(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	helperDir := filepath.Join(blocker, "helpers")
+	if err := preparePACScript(&pacProxySpec{}, helperDir, "function FindProxyForURL() {}"); err == nil {
+		t.Fatal("preparePACScript = nil, want an error when the helper dir cannot be created")
+	}
+	for _, spec := range []*pacProxySpec{nil, {URL: testPACURL}} {
+		if err := preparePACScript(spec, helperDir, ""); err != nil {
+			t.Fatalf("preparePACScript(%+v) = %v, want nil", spec, err)
+		}
+	}
+	ok := t.TempDir()
+	spec := &pacProxySpec{}
+	if err := preparePACScript(spec, filepath.Join(ok, "helpers"), "function FindProxyForURL() {}"); err != nil || spec.ScriptPath == "" {
+		t.Fatalf("preparePACScript positive = %v, spec %+v", err, spec)
+	}
+}
+
 // fakeProxyHost is a fake networksetup with three services: two enabled
 // ("Wi-Fi" with a PAC already on, "USB 10/100/1000 LAN" with none) and a
 // disabled "*Bluetooth PAN" that must never be touched.
@@ -134,6 +157,13 @@ printf '%s\n' "$*" >> "$state/calls.log"
 key() { printf '%s' "$1" | cksum | cut -d' ' -f1; }
 case "$1" in
   -listallnetworkservices)
+    [ -f "$state/fail-list" ] && exit 1
+    if [ -f "$state/fail-list-once" ]; then rm -f "$state/fail-list-once"; exit 1; fi
+    if [ -f "$state/fail-list-partial" ]; then
+      echo "An asterisk (*) denotes that a network service is disabled."
+      head -n 1 "$state/services"
+      exit 1
+    fi
     echo "An asterisk (*) denotes that a network service is disabled."
     cat "$state/services"
     ;;
@@ -146,12 +176,14 @@ case "$1" in
   -setautoproxyurl)
     k=$(key "$2")
     [ -f "$state/$k.url" ] || exit 4
+    [ -f "$state/fail-set-$k" ] && exit 1
     printf '%s' "$3" > "$state/$k.url"
     printf 'Yes' > "$state/$k.enabled"
     ;;
   -setautoproxystate)
     k=$(key "$2")
     [ -f "$state/$k.url" ] || exit 4
+    [ -f "$state/fail-set-$k" ] && exit 1
     case "$3" in on) printf 'Yes' ;; *) printf 'No' ;; esac > "$state/$k.enabled"
     ;;
   *) exit 64 ;;
@@ -219,6 +251,27 @@ func (h *fakeProxyHost) state(service string) string {
 	return string(url) + "|" + string(enabled)
 }
 
+// flag creates or removes a fault flag file in the fake's state directory.
+func (h *fakeProxyHost) flag(name string, on bool) {
+	h.t.Helper()
+	path := filepath.Join(h.dir, name)
+	if !on {
+		_ = os.Remove(path)
+		return
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *fakeProxyHost) backupText() string {
+	raw, err := os.ReadFile(h.backup)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
 func (h *fakeProxyHost) calls() string {
 	raw, _ := os.ReadFile(filepath.Join(h.dir, "calls.log"))
 	return string(raw)
@@ -269,8 +322,10 @@ func (h *fakeProxyHost) assertOriginals() {
 }
 
 // Claim: connect sets the PAC URL on every enabled service and never on a
-// disabled one; disconnect puts back each service's previous URL and on/off
-// state and removes the backup.
+// disabled one; disconnect puts back each service's on/off state, puts back
+// the previous URL where the service had one, and removes the backup. A
+// service that had no URL is only switched off, so its turned-off URL field
+// keeps the PAC URL (documented behaviour).
 func TestPACShellApplyAndRestoreURL(t *testing.T) {
 	h := newFakeProxyHost(t)
 	spec := &pacProxySpec{URL: testPACURL}
@@ -295,8 +350,150 @@ func TestPACShellApplyAndRestoreURL(t *testing.T) {
 
 	h.wrapper(spec, "restore_pac_proxy")
 	h.assertOriginals()
+	if got := h.state(usb); got != testPACURL+"|No" {
+		t.Fatalf("USB after restore = %q, want the PAC URL left in the turned-off field", got)
+	}
 	if _, err := os.Stat(h.backup); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("backup must be removed after a full restore, stat err=%v", err)
+	}
+}
+
+// Claim (regression, review B1): when the services cannot be listed at
+// disconnect (networksetup fails with no output, or fails after printing part
+// of the list), restore changes nothing, keeps the backup byte for byte and
+// does not report "restored"; the next disconnect with a working listing
+// restores the originals.
+func TestPACShellRestoreKeepsBackupWhenListingFails(t *testing.T) {
+	for _, fault := range []string{"fail-list", "fail-list-partial"} {
+		h := newFakeProxyHost(t)
+		h.wrapper(&pacProxySpec{URL: testPACURL}, "apply_pac_proxy")
+		saved := h.backupText()
+		if saved == "" {
+			t.Fatalf("%s: no backup after apply", fault)
+		}
+
+		h.resetCalls()
+		h.flag(fault, true)
+		h.wrapper(nil, "restore_pac_proxy")
+		if strings.Contains(h.calls(), "-set") {
+			t.Fatalf("%s: restore changed settings without a full service listing:\n%s", fault, h.calls())
+		}
+		if got := h.backupText(); got != saved {
+			t.Fatalf("%s: backup changed after a failed listing: %q, want %q", fault, got, saved)
+		}
+		if strings.Contains(h.log(), "restored") || !strings.Contains(h.log(), "restore_deferred") {
+			t.Fatalf("%s: log must record restore_deferred and no restored:\n%s", fault, h.log())
+		}
+		if got := h.state(usb); got != testPACURL+"|Yes" {
+			t.Fatalf("%s: USB after deferred restore = %q, want the PAC still set", fault, got)
+		}
+
+		// Positive control: the listing works again.
+		h.flag(fault, false)
+		h.wrapper(nil, "restore_pac_proxy")
+		h.assertOriginals()
+		if h.backupText() != "" {
+			t.Fatalf("%s: backup must be removed after the later full restore", fault)
+		}
+	}
+}
+
+// Claim (regression, review B2): when the service listing fails once while
+// the backup is taken, or lists no enabled service, connect sets nothing and
+// writes no backup, even if a later listing would succeed.
+func TestPACShellListingFailureDuringBackupChangesNothing(t *testing.T) {
+	for _, fault := range []string{"fail-list-once", "no-enabled"} {
+		h := newFakeProxyHost(t)
+		if fault == "no-enabled" {
+			h.setServices("*Bluetooth PAN")
+		} else {
+			h.flag(fault, true)
+		}
+		h.wrapper(&pacProxySpec{URL: testPACURL}, "apply_pac_proxy")
+		if strings.Contains(h.calls(), "-setautoproxy") {
+			t.Fatalf("%s: proxy changed without a usable backup:\n%s", fault, h.calls())
+		}
+		if !strings.Contains(h.log(), "backup_failed") {
+			t.Fatalf("%s: log must record backup_failed:\n%s", fault, h.log())
+		}
+		if _, err := os.Stat(h.backup); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: a failed backup must not leave a backup file", fault)
+		}
+		h.assertOriginals()
+	}
+}
+
+// Claim (regression, review B2): after a crashed PAC session, a service that
+// appeared since is added to the kept backup with its own settings before the
+// PAC is set on it, so disconnect restores it too; the older entries keep the
+// true originals.
+func TestPACShellNewServiceAfterCrashIsSavedAndRestored(t *testing.T) {
+	const phone = "iPhone USB"
+	h := newFakeProxyHost(t)
+	h.wrapper(&pacProxySpec{URL: testPACURL}, "apply_pac_proxy") // session 1 crashes
+	h.setServices(wifi, usb, phone, "*Bluetooth PAN")
+	h.seed(phone, "http://phone.example/own.pac", "Yes")
+
+	h.wrapper(&pacProxySpec{URL: testPACURL}, "apply_pac_proxy")
+	want := "Wi-Fi\tYes\thttp://wpad/wpad.dat\nUSB 10/100/1000 LAN\tNo\t(null)\n" + phone + "\tYes\thttp://phone.example/own.pac\n"
+	if got := h.backupText(); got != want {
+		t.Fatalf("backup = %q, want %q", got, want)
+	}
+	if got := h.state(phone); got != testPACURL+"|Yes" {
+		t.Fatalf("new service after apply = %q", got)
+	}
+
+	h.wrapper(nil, "restore_pac_proxy")
+	h.assertOriginals()
+	if got := h.state(phone); got != "http://phone.example/own.pac|Yes" {
+		t.Fatalf("new service after restore = %q, want its own PAC back", got)
+	}
+}
+
+// Claim (review N1): when one service fails to restore, only that service
+// stays in the backup; the next disconnect retries it and does not overwrite
+// a setting the user changed on a service that was already restored.
+func TestPACShellPartialRestoreKeepsOnlyFailedService(t *testing.T) {
+	h := newFakeProxyHost(t)
+	h.wrapper(&pacProxySpec{URL: testPACURL}, "apply_pac_proxy")
+	h.flag("fail-set-"+h.key(usb), true)
+	h.wrapper(nil, "restore_pac_proxy")
+	if got := h.state(wifi); got != "http://wpad/wpad.dat|Yes" {
+		t.Fatalf("Wi-Fi after partial restore = %q", got)
+	}
+	if got, want := h.backupText(), "USB 10/100/1000 LAN\tNo\t(null)\n"; got != want {
+		t.Fatalf("backup after partial restore = %q, want only the failed service %q", got, want)
+	}
+	if !strings.Contains(h.log(), "restore_failed "+usb) {
+		t.Fatalf("log must record the failed service:\n%s", h.log())
+	}
+
+	h.seed(wifi, "http://user.example/new.pac", "Yes") // the user changes Wi-Fi by hand
+	h.flag("fail-set-"+h.key(usb), false)
+	h.wrapper(nil, "restore_pac_proxy")
+	if got := h.state(wifi); got != "http://user.example/new.pac|Yes" {
+		t.Fatalf("Wi-Fi = %q, a later disconnect overwrote the user's setting", got)
+	}
+	if got := h.state(usb); !strings.HasSuffix(got, "|No") {
+		t.Fatalf("USB after retry = %q, want turned off", got)
+	}
+	if h.backupText() != "" {
+		t.Fatal("backup must be removed once the retry succeeds")
+	}
+}
+
+// Claim: a service that was disabled while connected is still present, so
+// restore puts back its settings instead of dropping it as removed.
+func TestPACShellRestoresServiceDisabledWhileConnected(t *testing.T) {
+	h := newFakeProxyHost(t)
+	h.wrapper(&pacProxySpec{URL: testPACURL}, "apply_pac_proxy")
+	h.setServices("*Wi-Fi", usb, "*Bluetooth PAN")
+	h.wrapper(nil, "restore_pac_proxy")
+	if got := h.state(wifi); got != "http://wpad/wpad.dat|Yes" {
+		t.Fatalf("disabled Wi-Fi after restore = %q, want the original", got)
+	}
+	if strings.Contains(h.log(), "restore_skip_missing") {
+		t.Fatalf("a disabled service was treated as removed:\n%s", h.log())
 	}
 }
 
@@ -426,16 +623,23 @@ func TestPACShellLocalScriptServer(t *testing.T) {
 		t.Fatalf("server pid %d still running after restore", pid)
 	}
 
-	// Negative: the server never publishes a port.
-	h.resetCalls()
-	h.wrapper(spec, "apply_pac_proxy", "FAKE_PAC_FAIL=1")
-	if strings.Contains(h.calls(), "-setautoproxyurl") {
-		t.Fatalf("proxy changed although the server failed:\n%s", h.calls())
+	// Negative: the server never publishes a port, or openconnect gave no
+	// VPNPID to watch (review N4).
+	for _, env := range [][]string{{"FAKE_PAC_FAIL=1", "VPNPID=1"}, {"FAKE_PAC_PORT=45123", "VPNPID="}} {
+		h.resetCalls()
+		_ = os.Remove(filepath.Join(h.dir, "wrapper.log"))
+		h.wrapper(spec, "apply_pac_proxy", env...)
+		if strings.Contains(h.calls(), "-setautoproxyurl") {
+			t.Fatalf("%v: proxy changed although the server did not start:\n%s", env, h.calls())
+		}
+		if !strings.Contains(h.log(), "server_failed") {
+			t.Fatalf("%v: log must record server_failed:\n%s", env, h.log())
+		}
+		h.assertOriginals()
 	}
-	if !strings.Contains(h.log(), "server_failed") {
-		t.Fatalf("log must record server_failed:\n%s", h.log())
+	if _, err := os.Stat(filepath.Join(h.helperDir, "pac-server.pid")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("no server pid file may remain after a failed start")
 	}
-	h.assertOriginals()
 }
 
 func processRunning(pid int) bool {
@@ -558,11 +762,19 @@ func TestServePACExitsWhenWatchedProcessEnds(t *testing.T) {
 	}
 }
 
-// Claim: bad input (missing, empty or oversized file; non-loopback address)
-// fails before any port is published, so the wrapper never sets a dead URL.
+// Claim: bad input (missing, empty or oversized file; a symlink or a
+// directory instead of a regular file; non-loopback address) fails before any
+// port is published, so the wrapper never sets a dead URL and the root server
+// never reads through a link.
 func TestServePACRejectsBadInput(t *testing.T) {
 	dir := t.TempDir()
+	link := filepath.Join(dir, "link.pac")
+	if err := os.Symlink(writePAC(t, "function FindProxyForURL() {}"), link); err != nil {
+		t.Fatal(err)
+	}
 	cases := map[string]PACServeOptions{
+		"symlink":      {File: link},
+		"directory":    {File: dir},
 		"missing":      {File: filepath.Join(dir, "absent.pac")},
 		"empty":        {File: writePAC(t, " \n")},
 		"oversized":    {File: writePAC(t, strings.Repeat("x", pacMaxScriptBytes+1))},
@@ -606,8 +818,8 @@ func TestServePACFailsClosedWhenPrivilegeDropFails(t *testing.T) {
 	}
 }
 
-// Claim: the serve subcommand needs --file and --port-file and rejects unknown
-// or malformed arguments.
+// Claim: the serve subcommand needs --file, --port-file and a positive
+// --watch-pid, and rejects unknown or malformed arguments.
 func TestParsePACServeArgs(t *testing.T) {
 	options, err := ParsePACServeArgs([]string{"--file", "/x/proxy.pac", "--port-file", "/x/port", "--watch-pid", "42"})
 	if err != nil || options.File != "/x/proxy.pac" || options.PortFile != "/x/port" || options.WatchPID != 42 || options.Listen != "127.0.0.1:0" {
@@ -616,6 +828,8 @@ func TestParsePACServeArgs(t *testing.T) {
 	for _, args := range [][]string{
 		{"--file", "/x/proxy.pac"},
 		{"--port-file", "/x/port"},
+		{"--file", "/x/proxy.pac", "--port-file", "/x/port"},
+		{"--file", "/x/proxy.pac", "--port-file", "/x/port", "--watch-pid", "0"},
 		{"--file", "/x/proxy.pac", "--port-file", "/x/port", "--watch-pid", "-1"},
 		{"--file", "/x/proxy.pac", "--port-file", "/x/port", "--listen", "0.0.0.0:80"},
 		{"--file"},

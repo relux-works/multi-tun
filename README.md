@@ -433,7 +433,9 @@ Field reference:
   - `"pac": {"file": "corp.pac"}`: a PAC file on disk; a relative path is resolved against the config file's directory
   - `"pac": {"script": "function FindProxyForURL(url, host) { ... }"}`: the PAC body inline
   - `file` and `script` are served on `127.0.0.1` by a small server that runs as `nobody` and exits with the tunnel
-  - on connect the previous auto-proxy URL and on/off state of each service are saved in `/var/db/openconnect-tun/pac-proxy-backup.tsv` and restored on disconnect. If a session dies without disconnecting, the next disconnect restores the saved values. If the current settings cannot be read, nothing is changed
+  - on connect the previous auto-proxy URL and on/off state of each enabled service are saved in `/var/db/openconnect-tun/pac-proxy-backup.tsv`, and the PAC is set only on the services in that file. Disconnect restores them. If the services or their current settings cannot be read at connect, nothing is changed
+  - if a session dies without disconnecting, the backup stays: the next connect keeps it and only adds services that appeared since, and the next disconnect restores the saved values. If the services cannot be listed at disconnect, nothing is changed and the backup waits for the next disconnect. A service that fails to restore stays in the backup alone and is retried later; a removed service is dropped
+  - a service that had no auto-proxy URL before is only switched off on restore, so its turned-off URL field keeps the PAC URL
   - without `pac` the system proxy settings stay untouched
 
 ### `vless-tun setup`

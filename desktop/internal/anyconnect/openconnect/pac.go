@@ -62,6 +62,19 @@ func pacSpecForConnect(options ConnectOptions) (*pacProxySpec, error) {
 	return &pacProxySpec{}, nil
 }
 
+// preparePACScript creates the session helper directory and writes the local
+// PAC there. An error stops the connect: an unusable pac never starts a tunnel
+// without it.
+func preparePACScript(spec *pacProxySpec, helperDir string, script string) error {
+	if spec == nil || spec.URL != "" {
+		return nil
+	}
+	if err := os.MkdirAll(helperDir, 0o755); err != nil {
+		return fmt.Errorf("create script helper dir: %w", err)
+	}
+	return materializePACScript(spec, helperDir, script)
+}
+
 // materializePACScript writes the PAC body next to the wrapper and records the
 // binary that serves it.
 func materializePACScript(spec *pacProxySpec, helperDir string, script string) error {
@@ -108,45 +121,79 @@ pac_log() {
   printf 'vpnc_wrapper_pac: %s\n' "$*" >> "$log_file" 2>&1
 }
 
-pac_services() {
-  "$pac_networksetup" -listallnetworkservices < /dev/null 2>/dev/null | sed -e 1d -e '/^\*/d' -e '/^$/d'
+pac_listing() {
+  pac_listed=$("$pac_networksetup" -listallnetworkservices < /dev/null 2>/dev/null) || return 1
+  printf '%s\n' "$pac_listed" | sed -e 1d -e '/^$/d'
 }
 
-pac_service_present() {
-  pac_services > "$pac_services_file.check" 2>/dev/null
-  while IFS= read -r pac_present_svc; do
-    if [ "$pac_present_svc" = "$1" ]; then
-      rm -f "$pac_services_file.check"
+# pac_services prints the enabled services. It fails when networksetup fails,
+# so a failed listing is never read as "no services".
+pac_services() {
+  pac_listing > "$pac_services_file.raw" || { rm -f "$pac_services_file.raw"; return 1; }
+  sed -e '/^\*/d' "$pac_services_file.raw"
+  rm -f "$pac_services_file.raw"
+}
+
+# pac_all_services prints every service, disabled ones without their "*".
+pac_all_services() {
+  pac_listing > "$pac_services_file.raw" || { rm -f "$pac_services_file.raw"; return 1; }
+  sed -e 's/^\*//' "$pac_services_file.raw"
+  rm -f "$pac_services_file.raw"
+}
+
+pac_in_list() {
+  while IFS= read -r pac_item; do
+    if [ "$pac_item" = "$1" ]; then
       return 0
     fi
-  done < "$pac_services_file.check"
-  rm -f "$pac_services_file.check"
+  done < "$2"
   return 1
 }
 
+pac_in_backup() {
+  while IFS="$pac_tab" read -r pac_item pac_rest; do
+    if [ "$pac_item" = "$1" ]; then
+      return 0
+    fi
+  done < "$2"
+  return 1
+}
+
+# pac_backup records the current settings of every enabled service in the
+# backup and leaves that service list in $pac_services_file for apply. A
+# backup left by a crashed session is kept as is; services that are not in it
+# yet are appended with their current settings.
 pac_backup() {
-  if [ -s "$pac_backup_file" ]; then
-    pac_log "backup_kept $pac_backup_file"
-    return 0
-  fi
   mkdir -p "$(dirname "$pac_backup_file")" || return 1
   chmod 700 "$(dirname "$pac_backup_file")" 2>/dev/null
+  pac_services > "$pac_services_file" || return 1
+  if [ ! -s "$pac_services_file" ]; then
+    pac_log "backup_no_services"
+    return 1
+  fi
   pac_tmp="$pac_backup_file.tmp.$$"
   rm -f "$pac_tmp"
-  pac_services > "$pac_services_file" || return 1
-  : > "$pac_tmp" || return 1
+  if [ -s "$pac_backup_file" ]; then
+    cp "$pac_backup_file" "$pac_tmp" || { rm -f "$pac_tmp"; return 1; }
+    pac_log "backup_kept $pac_backup_file"
+  else
+    : > "$pac_tmp" || return 1
+  fi
   while IFS= read -r pac_svc; do
     [ -n "$pac_svc" ] || continue
+    if pac_in_backup "$pac_svc" "$pac_tmp"; then
+      continue
+    fi
     if ! pac_out=$("$pac_networksetup" -getautoproxyurl "$pac_svc" < /dev/null 2>/dev/null); then
       rm -f "$pac_tmp"
       return 1
     fi
     pac_prev_url=$(printf '%s\n' "$pac_out" | sed -n 's/^URL: //p' | head -n 1)
     pac_prev_enabled=$(printf '%s\n' "$pac_out" | sed -n 's/^Enabled: //p' | head -n 1)
-    printf '%s\t%s\t%s\n' "$pac_svc" "${pac_prev_enabled:-No}" "${pac_prev_url:-(null)}" >> "$pac_tmp" || return 1
+    printf '%s\t%s\t%s\n' "$pac_svc" "${pac_prev_enabled:-No}" "${pac_prev_url:-(null)}" >> "$pac_tmp" || { rm -f "$pac_tmp"; return 1; }
+    pac_log "backup_add $pac_svc"
   done < "$pac_services_file"
-  rm -f "$pac_services_file"
-  mv -f "$pac_tmp" "$pac_backup_file" || return 1
+  mv -f "$pac_tmp" "$pac_backup_file" || { rm -f "$pac_tmp"; return 1; }
   pac_log "backup_saved $pac_backup_file"
 }
 
@@ -168,7 +215,13 @@ pac_start_server() {
   pac_stop_server
   [ -x "$pac_server_bin" ] || return 1
   [ -f "$pac_script_file" ] || return 1
-  "$pac_server_bin" ` + PACServeCommand + ` --file "$pac_script_file" --port-file "$pac_port_file" --watch-pid "${VPNPID:-0}" < /dev/null >> "$log_file" 2>&1 &
+  case "${VPNPID:-}" in
+    ''|0|*[!0-9]*)
+      pac_log "server_skip: VPNPID is not set"
+      return 1
+      ;;
+  esac
+  "$pac_server_bin" ` + PACServeCommand + ` --file "$pac_script_file" --port-file "$pac_port_file" --watch-pid "$VPNPID" < /dev/null >> "$log_file" 2>&1 &
   printf '%s\n' "$!" > "$pac_pid_file"
   pac_i=0
   while [ "$pac_i" -lt 50 ]; do
@@ -186,6 +239,8 @@ pac_start_server() {
   return 1
 }
 
+# apply_pac_proxy sets the PAC only on services whose previous settings are in
+# the backup, using the same service list the backup was taken from.
 apply_pac_proxy() {
   pac_effective_url="$pac_url"
   if [ -n "$pac_script_file" ]; then
@@ -202,9 +257,12 @@ apply_pac_proxy() {
     pac_stop_server
     return 0
   fi
-  pac_services > "$pac_services_file"
   while IFS= read -r pac_svc; do
     [ -n "$pac_svc" ] || continue
+    if ! pac_in_backup "$pac_svc" "$pac_backup_file"; then
+      pac_log "set_skip_unsaved $pac_svc"
+      continue
+    fi
     if "$pac_networksetup" -setautoproxyurl "$pac_svc" "$pac_effective_url" < /dev/null >> "$log_file" 2>&1; then
       pac_log "set $pac_svc $pac_effective_url"
     else
@@ -214,30 +272,54 @@ apply_pac_proxy() {
   rm -f "$pac_services_file"
 }
 
+# restore_pac_proxy puts back the saved settings. When the services cannot be
+# listed it changes nothing and keeps the backup for the next disconnect. A
+# service that is gone is dropped; a service that fails to restore stays in
+# the backup on its own, so later disconnects never re-apply entries that
+# were already restored.
 restore_pac_proxy() {
   pac_stop_server
   [ -s "$pac_backup_file" ] || return 0
+  if ! pac_all_services > "$pac_services_file.all" || [ ! -s "$pac_services_file.all" ]; then
+    rm -f "$pac_services_file.all"
+    pac_log "restore_deferred: network services could not be listed; backup kept at $pac_backup_file"
+    return 0
+  fi
+  pac_keep="$pac_backup_file.keep.$$"
+  rm -f "$pac_keep"
   pac_failed=0
+  pac_keep_ok=1
   while IFS="$pac_tab" read -r pac_svc pac_prev_enabled pac_prev_url; do
     [ -n "$pac_svc" ] || continue
-    if ! pac_service_present "$pac_svc"; then
+    if ! pac_in_list "$pac_svc" "$pac_services_file.all"; then
       pac_log "restore_skip_missing $pac_svc"
       continue
     fi
+    pac_ok=1
     if [ -n "$pac_prev_url" ] && [ "$pac_prev_url" != "(null)" ]; then
-      "$pac_networksetup" -setautoproxyurl "$pac_svc" "$pac_prev_url" < /dev/null >> "$log_file" 2>&1 || pac_failed=1
+      "$pac_networksetup" -setautoproxyurl "$pac_svc" "$pac_prev_url" < /dev/null >> "$log_file" 2>&1 || pac_ok=0
     fi
     case "$pac_prev_enabled" in
       Yes) pac_state=on ;;
       *) pac_state=off ;;
     esac
-    "$pac_networksetup" -setautoproxystate "$pac_svc" "$pac_state" < /dev/null >> "$log_file" 2>&1 || pac_failed=1
-    pac_log "restore $pac_svc $pac_state"
+    "$pac_networksetup" -setautoproxystate "$pac_svc" "$pac_state" < /dev/null >> "$log_file" 2>&1 || pac_ok=0
+    if [ "$pac_ok" = 1 ]; then
+      pac_log "restore $pac_svc $pac_state"
+    else
+      pac_failed=1
+      printf '%s\t%s\t%s\n' "$pac_svc" "$pac_prev_enabled" "$pac_prev_url" >> "$pac_keep" || pac_keep_ok=0
+      pac_log "restore_failed $pac_svc"
+    fi
   done < "$pac_backup_file"
+  rm -f "$pac_services_file.all"
   if [ "$pac_failed" = 0 ]; then
-    rm -f "$pac_backup_file"
+    rm -f "$pac_backup_file" "$pac_keep"
     pac_log "restored"
+  elif [ "$pac_keep_ok" = 1 ] && [ -s "$pac_keep" ] && mv -f "$pac_keep" "$pac_backup_file"; then
+    pac_log "restore_incomplete; failed services kept at $pac_backup_file"
   else
+    rm -f "$pac_keep"
     pac_log "restore_incomplete; backup kept at $pac_backup_file"
   fi
 }
@@ -267,7 +349,7 @@ func ParsePACServeArgs(args []string) (PACServeOptions, error) {
 			options.PortFile = value
 		case "--watch-pid":
 			pid, err := strconv.Atoi(value)
-			if err != nil || pid < 0 {
+			if err != nil || pid <= 0 {
 				return options, fmt.Errorf("invalid --watch-pid %q", value)
 			}
 			options.WatchPID = pid
@@ -276,8 +358,8 @@ func ParsePACServeArgs(args []string) (PACServeOptions, error) {
 		}
 		i++
 	}
-	if options.File == "" || options.PortFile == "" {
-		return options, errors.New("--file and --port-file are required")
+	if options.File == "" || options.PortFile == "" || options.WatchPID == 0 {
+		return options, errors.New("--file, --port-file and --watch-pid are required")
 	}
 	return options, nil
 }
@@ -377,12 +459,21 @@ func ServePAC(ctx context.Context, options PACServeOptions, logw io.Writer) erro
 	return nil
 }
 
+// readPACScript runs before the privilege drop, so it opens only a regular
+// file and never follows a symlink at the last path component.
 func readPACScript(path string) ([]byte, error) {
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("pac serve: %w", err)
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("pac serve: stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("pac serve: %s is not a regular file", path)
+	}
 	body, err := io.ReadAll(io.LimitReader(file, pacMaxScriptBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("pac serve: read %s: %w", path, err)

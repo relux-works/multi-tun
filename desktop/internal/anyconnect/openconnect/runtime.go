@@ -337,17 +337,8 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	pidFilePath := filepath.Join(RuntimeDir(cacheDir), "openconnect-"+sessionID+".pid")
 	scriptExec := script
 	scriptWrapperErr := error(nil)
-	pacErr := error(nil)
-	if pacSpec != nil && pacSpec.URL == "" {
-		helperDir := scriptHelperDir(cacheDir, sessionID)
-		if err := os.MkdirAll(helperDir, 0o755); err != nil {
-			pacErr = fmt.Errorf("create script helper dir: %w", err)
-		} else {
-			pacErr = materializePACScript(pacSpec, helperDir, options.PACScript)
-		}
-		if pacErr != nil {
-			pacSpec = nil
-		}
+	if err := preparePACScript(pacSpec, scriptHelperDir(cacheDir, sessionID), options.PACScript); err != nil {
+		return ConnectResult{}, fmt.Errorf("pac: %w", err)
 	}
 	if wrappedScript, err := prepareScriptDiagnosticsWrapper(cacheDir, sessionID, logPath, script, supplementalResolverSpecForConnect(mode, server, options), pacSpec); err != nil {
 		scriptWrapperErr = err
@@ -386,9 +377,6 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	defer logFile.Close()
 
 	writeLogHeader(logFile, current)
-	if pacErr != nil {
-		writeLogf(logFile, "pac_error: %v", pacErr)
-	}
 	if scriptWrapperErr != nil {
 		writeLogf(logFile, "script_wrapper_error: %v", scriptWrapperErr)
 	} else if strings.TrimSpace(scriptExec) != "" && scriptExec != script {
