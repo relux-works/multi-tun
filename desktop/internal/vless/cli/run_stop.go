@@ -101,17 +101,17 @@ func restoreRenderedTarget(target string, previous []byte, existed bool) error {
 
 // restorePreviousSession brings the stopped session back after a refused
 // replacement start. It restarts the single stopped sing-box session with its
-// own recorded options (mode, launch mode, interface, bypass list, log
-// limit, resolution) and its own cache dir; options a session record does not
-// keep (TUN addresses, overlay DNS, system DNS servers) come from the current
-// config. Anything else is reported for a manual start.
-func (a *App) restorePreviousSession(cfg config.ProjectConfig, base session.StartOptions, stopped []stopSessionResult, previousTarget string, previousConfig []byte, previousExisted bool) {
+// own recorded start options (mode, launch mode, interface, bypass list, TUN
+// addresses, overlay and system DNS, log limit, resolution) in its own cache
+// dir. A record without recorded start options (written by an older build),
+// sidecars or several sessions are reported for a manual start.
+func (a *App) restorePreviousSession(cfg config.ProjectConfig, stopped []stopSessionResult, previousTarget string, previousConfig []byte, previousExisted bool) {
 	if len(stopped) == 0 {
 		fmt.Fprintln(a.stderr, "no previous session was running")
 		return
 	}
 	prev := stopped[0].stopped
-	if len(stopped) != 1 || prev == nil || prev.Engine != config.EngineSingbox || prev.ConfigPath != previousTarget || !previousExisted || len(prev.Sidecars) != 0 {
+	if len(stopped) != 1 || prev == nil || prev.Engine != config.EngineSingbox || prev.ConfigPath != previousTarget || !previousExisted || len(prev.Sidecars) != 0 || !prev.StartOptionsRecorded {
 		fmt.Fprintln(a.stderr, "the previous session was stopped and could not be restored automatically; start it with `vless-tun start`")
 		return
 	}
@@ -124,7 +124,7 @@ func (a *App) restorePreviousSession(cfg config.ProjectConfig, base session.Star
 		profile.Host = host
 		profile.Port, _ = strconv.Atoi(port)
 	}
-	opts := restoreStartOptions(cfg, base, prev)
+	opts := restoreStartOptions(cfg, prev)
 	restored, err := startSessionFunc(stopped[0].target.cacheDir, previousTarget, profile, opts)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "restore of the previous session failed: %v; start it with `vless-tun start`\n", err)
@@ -133,22 +133,23 @@ func (a *App) restorePreviousSession(cfg config.ProjectConfig, base session.Star
 	fmt.Fprintf(a.stderr, "previous session restored as %s (pid=%d, profile %s)\n", restored.ID, restored.PID, restored.ProfileName)
 }
 
-// restoreStartOptions builds the restart options from the stopped session's
-// record, falling back to base only for what the record does not keep.
-func restoreStartOptions(cfg config.ProjectConfig, base session.StartOptions, prev *session.CurrentSession) session.StartOptions {
+// restoreStartOptions builds the restart options entirely from the stopped
+// session's record (callers require StartOptionsRecorded); only the
+// privileged launch label and plist come from the config.
+func restoreStartOptions(cfg config.ProjectConfig, prev *session.CurrentSession) session.StartOptions {
 	launch := cfg.LaunchOrDefault()
 	if prev.LaunchMode != "" {
 		launch.Mode = prev.LaunchMode
 	}
 	return session.StartOptions{
-		Mode:              firstNonEmptyLocal(prev.Mode, base.Mode),
+		Mode:              prev.Mode,
 		Engine:            config.EngineSingbox,
 		BypassSuffixes:    append([]string(nil), prev.BypassSuffixes...),
-		InterfaceName:     firstNonEmptyLocal(prev.InterfaceName, base.InterfaceName),
-		TunAddresses:      base.TunAddresses,
-		OverlayDNSActive:  base.OverlayDNSActive,
-		OverlayDNSDomains: base.OverlayDNSDomains,
-		SystemDNSServers:  base.SystemDNSServers,
+		InterfaceName:     prev.InterfaceName,
+		TunAddresses:      append([]string(nil), prev.TunAddresses...),
+		OverlayDNSActive:  prev.OverlayDNSActive,
+		OverlayDNSDomains: append([]string(nil), prev.OverlayDNSDomains...),
+		SystemDNSServers:  append([]string(nil), prev.SystemDNSServers...),
 		PrivilegedLaunch:  launch,
 		LogMaxLines:       prev.LogMaxLines,
 		ResolvedServer:    prev.ResolvedServer,
@@ -327,9 +328,13 @@ func (a *App) runReconnect(args []string) int {
 	// config past the schema check.
 	launch := cfg.LaunchOrDefault()
 	launchMode, launchModeErr := resolveLaunchModeCLI(cfg.NetworkMode(), launch)
-	if launchModeErr == nil {
-		launch.Mode = launchMode
+	if launchModeErr != nil {
+		// Without a resolved mode the helper check cannot be done; stop nothing.
+		fmt.Fprintf(a.stderr, "reconnect failed: cannot resolve the launch mode: %v\n", launchModeErr)
+		fmt.Fprintln(a.stderr, "running sessions were left untouched")
+		return 1
 	}
+	launch.Mode = launchMode
 
 	// Prepare the replacement before stopping anything: a refresh that drops the
 	// selected profile, or any render error, must leave the running tunnel alone.
@@ -398,7 +403,7 @@ func (a *App) runReconnect(args []string) int {
 	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, startOpts)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		a.restorePreviousSession(cfg, startOpts, stoppedSessions, previousTarget, previousConfig, previousExisted)
+		a.restorePreviousSession(cfg, stoppedSessions, previousTarget, previousConfig, previousExisted)
 		return 1
 	}
 

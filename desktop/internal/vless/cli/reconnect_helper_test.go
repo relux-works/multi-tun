@@ -50,7 +50,7 @@ func setupHelperReconnect(t *testing.T, h *helperReconnect, launchMode string, v
 	}
 	stopCurrentSessionFunc = func(string, config.PrivilegedLaunchConfig, bool, time.Duration) (*session.CurrentSession, string, error) {
 		h.events = append(h.events, "stop")
-		prev := &session.CurrentSession{ID: "previous", PID: 4242, Engine: engine, ConfigPath: target, ProfileID: "old-id", ProfileName: "old", ProfileEndpoint: "203.0.113.10:443"}
+		prev := &session.CurrentSession{ID: "previous", PID: 4242, Engine: engine, ConfigPath: target, ProfileID: "old-id", ProfileName: "old", ProfileEndpoint: "203.0.113.10:443", StartOptionsRecorded: true}
 		if h.prevRecord != nil {
 			copyRec := *h.prevRecord
 			copyRec.ConfigPath = target
@@ -204,26 +204,82 @@ func TestReconnectPinsLaunchModeAcrossStop(t *testing.T) {
 	}
 }
 
-// Claim: the restore restarts the previous session in its own cache dir with its own recorded mode,
-// launch mode, interface, bypass list, log limit and resolution, not the replacement's.
+// Claim: the restore restarts the previous session with its own recorded start options (mode, launch
+// mode, interface, bypass list, TUN addresses, overlay and system DNS, log limit, resolution), which
+// differ here from the replacement's, so values taken from the replacement would fail the test.
 func TestReconnectRestoreUsesStoppedSessionContext(t *testing.T) {
 	h := &helperReconnect{startErrs: []error{errors.New("refused")}, prevRecord: &session.CurrentSession{
 		ID: "previous", PID: 4242, Engine: config.EngineSingbox, ProfileID: "old-id", ProfileName: "old", ProfileEndpoint: "203.0.113.10:443",
 		Mode: "tun", LaunchMode: config.LaunchModeSudo, InterfaceName: "utun9", BypassSuffixes: []string{"a.example"},
 		LogMaxLines: 7, ResolvedProfileID: "old-resolved", ResolvedProfileName: "Old",
+		StartOptionsRecorded: true, TunAddresses: []string{"172.20.9.1/30"}, OverlayDNSActive: true,
+		OverlayDNSDomains: []string{"corp.example"}, SystemDNSServers: []string{"9.9.9.9"},
 	}}
 	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
 	var out, errb bytes.Buffer
 	if code := New(&out, &errb).Run([]string{"reconnect", "--config", path}); code != 1 || len(h.startOpts) != 2 {
 		t.Fatalf("exit %d starts %d: %s", code, len(h.startOpts), errb.String())
 	}
-	got := h.startOpts[1]
+	replacement, got := h.startOpts[0], h.startOpts[1]
+	if strings.Join(replacement.TunAddresses, ",") == "172.20.9.1/30" || strings.Join(replacement.SystemDNSServers, ",") == "9.9.9.9" {
+		t.Fatalf("fixture: replacement must differ from the stopped record: %+v", replacement)
+	}
 	if got.PrivilegedLaunch.Mode != config.LaunchModeSudo || got.InterfaceName != "utun9" || got.Mode != "tun" ||
-		strings.Join(got.BypassSuffixes, ",") != "a.example" || got.LogMaxLines != 7 || got.ResolvedID != "old-resolved" || got.ResolvedName != "Old" {
+		strings.Join(got.BypassSuffixes, ",") != "a.example" || got.LogMaxLines != 7 || got.ResolvedID != "old-resolved" || got.ResolvedName != "Old" ||
+		strings.Join(got.TunAddresses, ",") != "172.20.9.1/30" || !got.OverlayDNSActive ||
+		strings.Join(got.OverlayDNSDomains, ",") != "corp.example" || strings.Join(got.SystemDNSServers, ",") != "9.9.9.9" {
 		t.Fatalf("restore options = %+v", got)
 	}
-	if h.startDirs[1] == "" || h.startDirs[1] != h.startDirs[0] {
-		t.Fatalf("restore cache dir %q, want the stopped target's %q", h.startDirs[1], h.startDirs[0])
+}
+
+// Claim: the restore starts in the stopped target's cache dir, not the current config's (the two differ
+// here).
+func TestRestorePreviousSessionUsesStoppedTargetCacheDir(t *testing.T) {
+	var dirs []string
+	prevStart, prevWrite := startSessionFunc, writeRestoredConfigCLI
+	startSessionFunc = func(dir, _ string, _ model.Profile, _ session.StartOptions) (session.CurrentSession, error) {
+		dirs = append(dirs, dir)
+		return session.CurrentSession{ID: "r"}, nil
+	}
+	writeRestoredConfigCLI = func(string, []byte) error { return nil }
+	t.Cleanup(func() { startSessionFunc, writeRestoredConfigCLI = prevStart, prevWrite })
+	cfg := config.Default()
+	cfg.CacheDir = "/replacement/cache"
+	rec := &session.CurrentSession{Engine: config.EngineSingbox, ConfigPath: "/x", StartOptionsRecorded: true}
+	var out, errb bytes.Buffer
+	New(&out, &errb).restorePreviousSession(cfg, []stopSessionResult{{target: sessionTarget{cacheDir: "/stopped/cache"}, stopped: rec}}, "/x", []byte("{}"), true)
+	if len(dirs) != 1 || dirs[0] != "/stopped/cache" {
+		t.Fatalf("restore cache dirs = %v: %s", dirs, errb.String())
+	}
+}
+
+// Claim: a stopped record written without recorded start options (an older build) is not restored
+// with guessed DNS or TUN settings; the user is told to start it and no start is attempted.
+func TestRestorePreviousSessionRefusesRecordWithoutStartOptions(t *testing.T) {
+	starts := 0
+	prevStart := startSessionFunc
+	startSessionFunc = func(string, string, model.Profile, session.StartOptions) (session.CurrentSession, error) {
+		starts++
+		return session.CurrentSession{}, nil
+	}
+	t.Cleanup(func() { startSessionFunc = prevStart })
+	rec := &session.CurrentSession{Engine: config.EngineSingbox, ConfigPath: "/x"}
+	var out, errb bytes.Buffer
+	New(&out, &errb).restorePreviousSession(config.Default(), []stopSessionResult{{stopped: rec}}, "/x", []byte("{}"), true)
+	if starts != 0 || !strings.Contains(errb.String(), "could not be restored automatically") {
+		t.Fatalf("starts %d stderr %q", starts, errb.String())
+	}
+}
+
+// Claim: when the launch mode cannot be resolved, reconnect refuses before stopping anything.
+func TestReconnectRefusesWhenLaunchModeUnresolved(t *testing.T) {
+	h := &helperReconnect{}
+	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
+	resolveLaunchModeCLI = func(string, config.PrivilegedLaunchConfig) (string, error) { return "", errors.New("probe failed") }
+	var out, errb bytes.Buffer
+	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
+	if code != 1 || len(h.events) != 0 || !strings.Contains(errb.String(), "cannot resolve the launch mode") {
+		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 }
 
@@ -292,7 +348,8 @@ func TestRestorePreviousSessionRefusesMultipleSessions(t *testing.T) {
 	rec := &session.CurrentSession{Engine: config.EngineSingbox, ConfigPath: "/x"}
 	var out, errb bytes.Buffer
 	a := New(&out, &errb)
-	a.restorePreviousSession(config.Default(), session.StartOptions{}, []stopSessionResult{{stopped: rec}, {stopped: rec}}, "/x", []byte("{}"), true)
+	rec.StartOptionsRecorded = true
+	a.restorePreviousSession(config.Default(), []stopSessionResult{{stopped: rec}, {stopped: rec}}, "/x", []byte("{}"), true)
 	if starts != 0 || !strings.Contains(errb.String(), "could not be restored automatically") {
 		t.Fatalf("starts %d stderr %q", starts, errb.String())
 	}

@@ -153,6 +153,13 @@ type CurrentSession struct {
 	DNSHandoffServers        []string         `json:"dns_handoff_servers,omitempty"`
 	DNSHandoffRestoreServers []string         `json:"dns_handoff_restore_servers,omitempty"`
 	DNSHandoffRestoreAuto    bool             `json:"dns_handoff_restore_auto,omitempty"`
+	// Start options a restart needs that are not otherwise recorded. Older
+	// records lack them; StartOptionsRecorded says whether they are present.
+	StartOptionsRecorded bool     `json:"start_options_recorded,omitempty"`
+	TunAddresses         []string `json:"tun_addresses,omitempty"`
+	OverlayDNSActive     bool     `json:"overlay_dns_active,omitempty"`
+	OverlayDNSDomains    []string `json:"overlay_dns_domains,omitempty"`
+	SystemDNSServers     []string `json:"system_dns_servers,omitempty"`
 }
 
 type SidecarSession struct {
@@ -211,6 +218,12 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		BypassSuffixes:      append([]string(nil), options.BypassSuffixes...),
 		Command:             command,
 		LaunchMode:          launchMode,
+
+		StartOptionsRecorded: true,
+		TunAddresses:         append([]string(nil), options.TunAddresses...),
+		OverlayDNSActive:     options.OverlayDNSActive,
+		OverlayDNSDomains:    append([]string(nil), options.OverlayDNSDomains...),
+		SystemDNSServers:     append([]string(nil), options.SystemDNSServers...),
 	}
 	if launchMode == config.LaunchModeLaunchd {
 		session.LaunchLabel = options.PrivilegedLaunch.Label
