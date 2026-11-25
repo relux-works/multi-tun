@@ -174,12 +174,19 @@ func (a *App) restorePreviousSession(cfg config.ProjectConfig, stopped []stopSes
 		profile.Port, _ = strconv.Atoi(port)
 	}
 	opts := restoreStartOptions(cfg, prev)
+	// The restored tunnel gets the same fail-closed protection as any start: the policy is applied
+	// before it starts and refreshed after.
+	a.applyFailClosedBeforeStart(cfg)
 	restored, err := startSessionFunc(stopped[0].target.cacheDir, previousTarget, profile, opts)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "restore of the previous session failed: %v; start it with `vless-tun start`\n", err)
 		return
 	}
 	fmt.Fprintf(a.stderr, "previous session restored as %s (pid=%d, profile %s)\n", restored.ID, restored.PID, restored.ProfileName)
+	if usesVPNCoreHelper(restored.LaunchMode) {
+		policy, perr := cfg.FailClosedPolicy()
+		a.refreshFailClosedAfterStart(policy, perr, opts.TunAddresses)
+	}
 }
 
 // restoreStartOptions builds the restart options entirely from the stopped

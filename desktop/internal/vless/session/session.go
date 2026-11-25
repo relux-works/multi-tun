@@ -389,7 +389,12 @@ func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, tim
 	if err != nil {
 		return CurrentSession{}, "", err
 	}
+	return stopResolved(cacheDir, current, force, timeout, func() error { return ClearCurrent(cacheDir) })
+}
 
+// stopResolved stops the given session and then calls clear to drop its record. It never reads
+// the current record again, so a caller can bind the stop to a session it has already checked.
+func stopResolved(cacheDir string, current CurrentSession, force bool, timeout time.Duration, clear func() error) (CurrentSession, string, error) {
 	alive, pid, err := SessionAlive(current)
 	if err != nil {
 		return CurrentSession{}, "", err
@@ -404,7 +409,7 @@ func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, tim
 		if err := restoreSystemDNSHandoff(current); err != nil {
 			return CurrentSession{}, "", err
 		}
-		if err := ClearCurrent(cacheDir); err != nil {
+		if err := clear(); err != nil {
 			return CurrentSession{}, "", err
 		}
 		return current, "stale", nil
@@ -421,7 +426,7 @@ func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, tim
 		if err := restoreSystemDNSHandoff(current); err != nil {
 			return CurrentSession{}, "", err
 		}
-		if err := ClearCurrent(cacheDir); err != nil {
+		if err := clear(); err != nil {
 			return CurrentSession{}, "", err
 		}
 		return current, "stopped", nil
@@ -435,12 +440,12 @@ func Stop(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, tim
 		if err := restoreSystemDNSHandoff(current); err != nil {
 			return CurrentSession{}, "", err
 		}
-		if err := ClearCurrent(cacheDir); err != nil {
+		if err := clear(); err != nil {
 			return CurrentSession{}, "", err
 		}
 		return current, "stopped", nil
 	default:
-		return stopProcessSession(cacheDir, current, force, timeout)
+		return stopProcessSession(cacheDir, current, force, timeout, clear)
 	}
 }
 
@@ -965,7 +970,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func stopProcessSession(cacheDir string, current CurrentSession, force bool, timeout time.Duration) (CurrentSession, string, error) {
+func stopProcessSession(cacheDir string, current CurrentSession, force bool, timeout time.Duration, clear func() error) (CurrentSession, string, error) {
 	if err := signalGroup(current.PID, syscall.SIGTERM); err != nil {
 		return CurrentSession{}, "", err
 	}
@@ -983,7 +988,7 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 			if err := restoreSystemDNSHandoff(current); err != nil {
 				return CurrentSession{}, "", err
 			}
-			if err := ClearCurrent(cacheDir); err != nil {
+			if err := clear(); err != nil {
 				return CurrentSession{}, "", err
 			}
 			return current, "stopped", nil
@@ -1010,7 +1015,7 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 			if err := restoreSystemDNSHandoff(current); err != nil {
 				return CurrentSession{}, "", err
 			}
-			if err := ClearCurrent(cacheDir); err != nil {
+			if err := clear(); err != nil {
 				return CurrentSession{}, "", err
 			}
 			return current, "killed", nil
@@ -1108,7 +1113,8 @@ func SaveCurrentIfAbsent(cacheDir string, current CurrentSession) error {
 }
 
 // StopIfCurrent stops the current session only when its record names the expected session ID; a
-// record of another session is left alone and reported.
+// record of another session is left alone and reported. The stop acts on the checked record, not
+// on whatever record is current when the signal goes out.
 func StopIfCurrent(cacheDir, expectedID string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (CurrentSession, string, error) {
 	current, err := LoadCurrent(cacheDir)
 	if err != nil {
@@ -1117,7 +1123,25 @@ func StopIfCurrent(cacheDir, expectedID string, launch config.PrivilegedLaunchCo
 	if current.ID != expectedID {
 		return CurrentSession{}, "", fmt.Errorf("the current record is session %s, not %s; left alone", current.ID, expectedID)
 	}
-	return Stop(cacheDir, launch, force, timeout)
+	// Stop exactly the checked session, never a record read again later, and drop the record only
+	// while it still names that session: a start that replaced it meanwhile keeps its record.
+	return stopResolved(cacheDir, current, force, timeout, func() error { return clearCurrentIfID(cacheDir, expectedID) })
+}
+
+// clearCurrentIfID removes the current record only while it names the given session. Limit: the
+// read and the remove are two steps, so a record written between them can still be removed.
+func clearCurrentIfID(cacheDir, id string) error {
+	current, err := LoadCurrent(cacheDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.ID != id {
+		return nil
+	}
+	return ClearCurrent(cacheDir)
 }
 
 func stopStartedSession(current CurrentSession) error {

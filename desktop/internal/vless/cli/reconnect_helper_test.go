@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/session"
@@ -457,6 +458,40 @@ func TestReconnectRefusalRemovesPreviouslyAbsentXrayConfig(t *testing.T) {
 		if removalFails && !reported {
 			t.Fatalf("failed removal not reported: %q", errb.String())
 		}
+	}
+}
+
+// Claim: when the replacement start is refused and the previous session is restored, the restored
+// start is preceded by the fail-closed apply just like the replacement start, and followed by a
+// refresh: the order is apply, start (refused), apply, start (restored), apply. Limit: the helper,
+// the pf calls and name resolution are fakes.
+func TestFailClosedAppliedBeforeRestoredStart(t *testing.T) {
+	h := &helperReconnect{startErrs: []error{errors.New("refused")}}
+	f := &fcFakes{}
+	withFailClosedFakes(t, f, upIfs, map[string][]string{"chatgpt.com": {"104.18.32.47"}})
+	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
+	var order []string
+	prevApply, prevReady, fixtureStart := failClosedApplyCLI, failClosedHelperReadyCLI, startSessionFunc
+	failClosedApplyCLI = func(c vpncore.ServiceConfig, i, tb []string) error {
+		order = append(order, "apply")
+		return prevApply(c, i, tb)
+	}
+	failClosedHelperReadyCLI = func() bool { return true }
+	startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
+		order = append(order, "start")
+		s, err := fixtureStart(cacheDir, configPath, profile, options)
+		if err == nil {
+			s.LaunchMode = config.LaunchModeHelper
+		}
+		return s, err
+	}
+	t.Cleanup(func() {
+		failClosedApplyCLI, failClosedHelperReadyCLI, startSessionFunc = prevApply, prevReady, fixtureStart
+	})
+	var out, errb bytes.Buffer
+	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
+	if code != 1 || !strings.Contains(errb.String(), "previous session restored") || strings.Join(order, ",") != "apply,start,apply,start,apply" {
+		t.Fatalf("exit %d order %v stderr %q", code, order, errb.String())
 	}
 }
 

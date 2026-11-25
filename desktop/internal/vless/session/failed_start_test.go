@@ -213,3 +213,61 @@ func TestStopReturnedUsesOwnHandleOnly(t *testing.T) {
 		t.Fatalf("direct stop of a gone process err %v signals %v", err, handles)
 	}
 }
+
+// Claim: StopIfCurrent acts on the record it checked even when another start replaces the current
+// record right after the ID check: the other session gets no signal and keeps its record
+// byte-for-byte, whether the checked session is still running (stopped through its own handle) or
+// already gone (stale path, no signal at all). The replacement happens deterministically inside
+// the first liveness probe, which runs after the ID check. Limit: signals, liveness and process
+// identity are fakes; a write between clearCurrentIfID's read and remove is not modeled.
+func TestStopIfCurrentBindsToTheCheckedRecord(t *testing.T) {
+	started := time.Now()
+	for _, checkedAlive := range []bool{true, false} {
+		name := "checked session running"
+		if !checkedAlive {
+			name = "checked session already gone"
+		}
+		t.Run(name, func(t *testing.T) {
+			cache := t.TempDir()
+			own := CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started}
+			other := CurrentSession{ID: "other", PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started}
+			if err := SaveCurrent(cache, own); err != nil {
+				t.Fatal(err)
+			}
+			var otherBytes []byte
+			prevSignal, prevAlive := vpnCoreSignalSession, processAliveSession
+			var signals []string
+			vpnCoreSignalSession = func(handle, signal string) error { signals = append(signals, handle+" "+signal); return nil }
+			probes := 0
+			processAliveSession = func(pid int) (bool, error) {
+				probes++
+				if probes == 1 {
+					// Another start records itself right after the ID check.
+					if err := SaveCurrent(cache, other); err != nil {
+						t.Fatal(err)
+					}
+					otherBytes, _ = os.ReadFile(CurrentPath(cache))
+					return checkedAlive, nil
+				}
+				return false, nil
+			}
+			t.Cleanup(func() { vpnCoreSignalSession, processAliveSession = prevSignal, prevAlive })
+			withProcessIdentity(t, "sing-box", started, nil)
+			stopped, _, err := StopIfCurrent(cache, "replacement", config.PrivilegedLaunchConfig{Mode: config.LaunchModeHelper}, true, time.Second)
+			if err != nil || stopped.ID != "replacement" {
+				t.Fatalf("stop of the checked session: %+v err %v", stopped, err)
+			}
+			for _, sig := range signals {
+				if !strings.HasPrefix(sig, "own-handle ") {
+					t.Fatalf("signal to another session: %v", signals)
+				}
+			}
+			if checkedAlive != (len(signals) > 0) {
+				t.Fatalf("checked alive=%v but signals %v", checkedAlive, signals)
+			}
+			if after, err := os.ReadFile(CurrentPath(cache)); err != nil || !bytes.Equal(after, otherBytes) {
+				t.Fatalf("other session's record changed or removed: %v\n%s", err, after)
+			}
+		})
+	}
+}
