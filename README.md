@@ -610,6 +610,10 @@ vless-tun failclosed off      # rollback in one command: clear the anchor, relea
 - `off` never stops, restarts or reconfigures sing-box, its routes or DNS, and stays off after reboot.
   To keep it off when the policy is applied again, set `"fail_closed": {"enabled": false}`.
 - If the helper does not answer: `sudo pfctl -a com.apple/works.relux.vpn-core.failclosed -F all`.
+- The helper checks every 5 s that pf is enabled and its anchor rules and table are loaded. If another
+  party reloads `/etc/pf.conf`, reloads the `com.apple` anchor or disables pf (the work VPN's vpn-slice
+  can do this), it re-applies, re-enabling pf only through its own token, and `status` shows
+  `last_recovery`.
 - A blocked connection fails at once with "connection refused" or "no route" instead of leaving
   through another egress.
 - Services on shared CDN addresses take those addresses into the table, so during an outage other

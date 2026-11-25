@@ -245,3 +245,141 @@ func TestFailClosedRequestShape(t *testing.T) {
 		t.Error("diagnostics hides the fail-closed action name")
 	}
 }
+
+// statefulPF models pf enough for the watchdog: enable references, our anchor's rules and table, and
+// what other parties do to them.
+type statefulPF struct {
+	enabled bool
+	tokens  map[string]bool
+	next    int
+	rules   string
+	table   string
+	calls   []string
+}
+
+func (p *statefulPF) run(args []string, stdin string) ([]byte, error) {
+	j := strings.Join(args, " ")
+	p.calls = append(p.calls, j)
+	if p.tokens == nil {
+		p.tokens = map[string]bool{}
+	}
+	switch {
+	case j == "-E":
+		p.next++
+		tok := "7" + string(rune('0'+p.next))
+		p.tokens[tok], p.enabled = true, true
+		return []byte("Token : " + tok + "\n"), nil
+	case strings.HasPrefix(j, "-X "):
+		delete(p.tokens, strings.TrimPrefix(j, "-X "))
+		if len(p.tokens) == 0 {
+			p.enabled = false
+		}
+	case j == "-s info":
+		if p.enabled {
+			return []byte("Status: Enabled for 0 days 00:01:00\n"), nil
+		}
+		return []byte("Status: Disabled\n"), nil
+	case strings.HasSuffix(j, " -f -") && !strings.Contains(j, "-T"):
+		p.rules = stdin
+	case strings.Contains(j, "-T replace"):
+		p.table = stdin
+	case strings.HasSuffix(j, "-s rules"):
+		return []byte(p.rules), nil
+	case strings.HasSuffix(j, "-T show"):
+		return []byte(p.table), nil
+	case strings.HasSuffix(j, "-F all"):
+		p.rules, p.table = "", ""
+	}
+	return nil, nil
+}
+
+// Other parties' acts (not our calls).
+func (p *statefulPF) reloadPFConf()      { p.rules, p.table = "", "" }
+func (p *statefulPF) reloadAppleAnchor() { p.rules = "" }
+func (p *statefulPF) disableByOther()    { p.enabled = false; p.tokens = map[string]bool{} }
+
+// Claim: after each external act (pf.conf reload, com.apple anchor reload, pfctl -d by another party)
+// one Check detects it, re-applies so the anchor rules, table and pf enable are back, re-enables pf
+// only through a fresh token of its own, and status names the finding. Negative control: without a
+// Check, the same act leaves the block missing, so the restore comes from the watchdog.
+func TestFailClosedWatchdogRecovers(t *testing.T) {
+	acts := map[string]func(*statefulPF){
+		"anchor table missing":         (*statefulPF).reloadPFConf,
+		"anchor rules missing":         (*statefulPF).reloadAppleAnchor,
+		"pf disabled by another party": (*statefulPF).disableByOther,
+	}
+	for want, act := range acts {
+		p := &statefulPF{}
+		m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: func() time.Time { return time.Date(2026, 11, 25, 14, 0, 0, 0, time.UTC) }}
+		if err := m.Apply(goodReq); err != nil {
+			t.Fatal(err)
+		}
+		if finding, err := m.Check(); finding != "" || err != nil {
+			t.Fatalf("%s: healthy check = %q, %v", want, finding, err)
+		}
+		act(p)
+		// Negative control: the act really removed the block.
+		if p.enabled && strings.Contains(p.rules, "block return") && p.table != "" {
+			t.Fatalf("%s: simulated act did not remove the block", want)
+		}
+		if want == "anchor table missing" {
+			// pf.conf reload empties rules too; the check reports the first missing piece.
+			want = "anchor rules missing"
+		}
+		finding, err := m.Check()
+		if err != nil || finding != want {
+			t.Fatalf("check after act = %q, %v; want %q", finding, err, want)
+		}
+		if !p.enabled || !strings.Contains(p.rules, "block return out quick") || p.table == "" {
+			t.Fatalf("%s: not restored: enabled=%v rules=%q table=%q", want, p.enabled, p.rules, p.table)
+		}
+		if len(p.tokens) != 1 {
+			t.Fatalf("%s: tokens = %v, want exactly our one", want, p.tokens)
+		}
+		st, _ := m.Status()
+		if st.LastRecovery != want || st.RecoveredAt.IsZero() {
+			t.Fatalf("%s: status = %+v", want, st)
+		}
+	}
+}
+
+// Claim: Check does nothing when the policy is off (no pf calls), so 'off' is never undone by the watchdog.
+func TestFailClosedWatchdogIdleWhenOff(t *testing.T) {
+	p := &statefulPF{}
+	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+	_ = m.Apply(goodReq)
+	_ = m.Clear()
+	p.calls = nil
+	if finding, err := m.Check(); finding != "" || err != nil || len(p.calls) != 0 {
+		t.Fatalf("check while off = %q, %v, calls %q", finding, err, p.calls)
+	}
+}
+
+// Claim: the watch loop runs Check on its interval and stops when told; a disable is repaired within
+// one interval.
+func TestFailClosedWatchLoopBounded(t *testing.T) {
+	p := &statefulPF{}
+	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+	_ = m.Apply(goodReq)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { m.watch(20*time.Millisecond, stop, func(string, ...any) {}); close(done) }()
+	m.mu.Lock()
+	p.disableByOther()
+	m.mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		ok := p.enabled
+		m.mu.Unlock()
+		if ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(stop)
+	<-done
+	if !p.enabled {
+		t.Fatal("watch loop did not repair a disabled pf within 2 s")
+	}
+}

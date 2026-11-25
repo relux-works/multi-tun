@@ -216,6 +216,9 @@ func (a *App) printFailClosedStatus(policy failclosed.Policy, tunnelUp bool) int
 	if st.LastError != "" {
 		fmt.Fprintf(a.stdout, "last_error: %s\n", st.LastError)
 	}
+	if st.LastRecovery != "" {
+		fmt.Fprintf(a.stdout, "last_recovery: %s at %s\n", st.LastRecovery, st.RecoveredAt.Format(time.RFC3339))
+	}
 	fmt.Fprintf(a.stdout, "blocking: %t\n", st.Enabled && !tunnelUp)
 	return 0
 }

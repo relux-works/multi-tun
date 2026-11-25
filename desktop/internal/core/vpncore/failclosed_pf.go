@@ -31,9 +31,15 @@ type FailClosedRequest struct {
 	Table      []string `json:"table,omitempty"`
 }
 
+// failClosedWatchIntervalVPNCore bounds how long a lost anchor or a disabled pf
+// goes unnoticed. pf offers no change notification, so the helper polls.
+var failClosedWatchIntervalVPNCore = 5 * time.Second
+
 // FailClosedStatus is the public fail-closed state; the pf token stays private.
 type FailClosedStatus struct {
 	Enabled      bool      `json:"enabled"`
+	LastRecovery string    `json:"last_recovery,omitempty"`
+	RecoveredAt  time.Time `json:"recovered_at,omitempty"`
 	Interfaces   []string  `json:"interfaces,omitempty"`
 	TableEntries int       `json:"table_entries"`
 	TokenHeld    bool      `json:"token_held"`
@@ -48,6 +54,9 @@ type failClosedState struct {
 	Token      string    `json:"token,omitempty"`
 	AppliedAt  time.Time `json:"applied_at,omitempty"`
 	LastError  string    `json:"last_error,omitempty"`
+	// LastRecovery names what the watchdog found and repaired.
+	LastRecovery string    `json:"last_recovery,omitempty"`
+	RecoveredAt  time.Time `json:"recovered_at,omitempty"`
 }
 
 // failClosedManager owns the pf anchor and the pf enable token. It never
@@ -230,5 +239,87 @@ func (m *failClosedManager) Status() (FailClosedStatus, error) {
 	return FailClosedStatus{
 		Enabled: st.Enabled, Interfaces: st.Interfaces, TableEntries: len(st.Table),
 		TokenHeld: st.Token != "", AppliedAt: st.AppliedAt, LastError: st.LastError,
+		LastRecovery: st.LastRecovery, RecoveredAt: st.RecoveredAt,
 	}, nil
+}
+
+var pfStatusEnabledRE = regexp.MustCompile(`(?m)^Status:\s*Enabled\b`)
+
+// Check verifies that an enabled policy is still in force: pf enabled, our
+// anchor rules loaded and our table populated. Another party may reload
+// /etc/pf.conf, reload the com.apple anchor or run pfctl -d (the work VPN's
+// vpn-slice does such things). On a finding it re-applies, re-enabling pf only
+// through a fresh token of its own, and records what happened. It returns the
+// finding ("" when everything was in force).
+func (m *failClosedManager) Check() (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, err := m.load()
+	if err != nil || !st.Enabled {
+		return "", err
+	}
+	finding := ""
+	info, err := m.run([]string{"-s", "info"}, "")
+	switch {
+	case err != nil:
+		return "", err
+	case !pfStatusEnabledRE.Match(info):
+		finding = "pf disabled by another party"
+	default:
+		rules, err := m.run([]string{"-a", failclosed.AnchorName, "-s", "rules"}, "")
+		if err != nil {
+			return "", err
+		}
+		if !strings.Contains(string(rules), "block return out quick") {
+			finding = "anchor rules missing"
+		} else {
+			entries, err := m.run([]string{"-a", failclosed.AnchorName, "-t", failclosed.TableName, "-T", "show"}, "")
+			if err != nil || strings.TrimSpace(string(entries)) == "" {
+				finding = "anchor table missing"
+			}
+		}
+	}
+	if finding == "" {
+		return "", nil
+	}
+	if finding == "pf disabled by another party" {
+		// pfctl -d drops every enable reference, ours included.
+		st.Token = ""
+	}
+	anchor, err := failclosed.RenderAnchor(st.Interfaces)
+	if err != nil {
+		return finding, err
+	}
+	table, err := failclosed.ValidateTable(st.Table)
+	if err != nil {
+		return finding, err
+	}
+	if err := m.applyLocked(st, st.Interfaces, table, anchor); err != nil {
+		return finding, err
+	}
+	st, err = m.load()
+	if err != nil {
+		return finding, err
+	}
+	st.LastRecovery, st.RecoveredAt = finding, m.now().UTC()
+	return finding, m.save(st)
+}
+
+// watch runs Check every interval until stop is closed.
+func (m *failClosedManager) watch(interval time.Duration, stop <-chan struct{}, logf func(string, ...any)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			finding, err := m.Check()
+			if finding != "" {
+				logf("vpn core: fail-closed watchdog: %s; re-applied (err=%v)\n", finding, err)
+			} else if err != nil {
+				logf("vpn core: fail-closed watchdog: %v\n", err)
+			}
+		}
+	}
 }

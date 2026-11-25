@@ -466,6 +466,11 @@ func (d *serviceDaemon) serve() error {
 		if err := d.failClosed.ReapplyAtStart(); err != nil {
 			fmt.Fprintf(os.Stderr, "vpn core: fail-closed re-apply at start: %v\n", err)
 		}
+		watchStop := make(chan struct{})
+		defer close(watchStop)
+		go d.failClosed.watch(failClosedWatchIntervalVPNCore, watchStop, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format, args...)
+		})
 	}
 	publishedSocket, err := d.preparePublishedSocket()
 	if err != nil {
