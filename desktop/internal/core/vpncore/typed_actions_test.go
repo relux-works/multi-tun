@@ -87,12 +87,17 @@ func TestSingBoxConfigValidationAcceptsEveryRendererVariant(t *testing.T) {
 		SocksListen: "127.0.0.1", SocksPort: 21808, ProcessNames: []string{"xray"},
 	}}
 
-	gvisorStack := config.Default()
-	gvisorStack.Network.TUN.Stack = "gvisor"
+	withStack := func(stack string) config.ProjectConfig {
+		c := config.Default()
+		c.Network.TUN.Stack = stack
+		return c
+	}
 
 	cases := map[string]func() ([]byte, error){
 		"vless tcp reality": func() ([]byte, error) { return singbox.Render(config.Default(), realityTCP) },
-		"tun stack gvisor":  func() ([]byte, error) { return singbox.Render(gvisorStack, realityTCP) },
+		"tun stack system":  func() ([]byte, error) { return singbox.Render(withStack("system"), realityTCP) },
+		"tun stack gvisor":  func() ([]byte, error) { return singbox.Render(withStack("gvisor"), realityTCP) },
+		"tun stack mixed":   func() ([]byte, error) { return singbox.Render(withStack("mixed"), realityTCP) },
 		"vless grpc tls":    func() ([]byte, error) { return singbox.Render(config.Default(), grpcTLS) },
 		"vless flow":        func() ([]byte, error) { return singbox.Render(config.Default(), withFlow) },
 		"overlay and routes": func() ([]byte, error) {

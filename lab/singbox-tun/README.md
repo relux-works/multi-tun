@@ -37,22 +37,33 @@ colima start --profile multi-tun --activate=false --mount-inotify=false \
   --mount "$R/out:w" --cpus 4 --memory 4
 export DOCKER_CONTEXT=colima-multi-tun
 docker build -t sblab:1.13.3 .
+# Start from a clean state every run: no leftover server or network from an earlier run.
+docker rm -f sblab-srv >/dev/null 2>&1; docker network rm sblab >/dev/null 2>&1
 docker network create --subnet 10.77.0.0/24 sblab
 docker run -d --name sblab-srv --network sblab --ip 10.77.0.10 --cap-add NET_ADMIN \
   -v "$R/out:/out" sblab:1.13.3 \
-  sh -c 'ip addr add 203.0.113.10/32 dev lo && exec labserver --ca-out /out/ca.pem'
+  sh -ec 'ip addr add 203.0.113.10/32 dev lo; exec labserver --ca-out /out/ca.pem'
 
 STACK=system   # or gvisor, mixed
-docker run --rm --network sblab --privileged --device /dev/net/tun -v "$R/out:/out" sblab:1.13.3 sh -c "
-  sing-box run -c /etc/lab/singbox-$STACK.json > /out/singbox-$STACK.log 2>&1 &
-  for i in 1 2 3 4 5 6 7 8 9 10; do ip link show tun0 >/dev/null 2>&1 && break; sleep 0.5; done
+# Every step fails the run: a config sing-box rejects, sing-box exiting, a missing tun0, a bench
+# route that does not use tun0, or sing-box dying during the run. Only then is the summary valid.
+docker run --rm --network sblab --privileged --device /dev/net/tun -v "$R/out:/out" sblab:1.13.3 sh -ec "
+  sing-box check -c /etc/lab/singbox-$STACK.json
+  sing-box run -c /etc/lab/singbox-$STACK.json > /out/singbox-$STACK.log 2>&1 & SB=\$!
+  for i in \$(seq 1 20); do ip link show tun0 >/dev/null 2>&1 && break; kill -0 \$SB 2>/dev/null || { echo 'sing-box exited' >&2; exit 3; }; sleep 0.5; done
+  ip link show tun0 >/dev/null 2>&1 || { echo 'tun0 did not appear' >&2; exit 4; }
   ip route add 203.0.113.0/24 dev tun0 metric 10
   ip route add 203.0.113.0/24 via 10.77.0.10 dev eth0 metric 20
-  labclient --label tun-$STACK --streams 8 --duration 90s --churn 32"
+  ip route get 203.0.113.10 | grep -q 'dev tun0' || { echo 'bench route does not use tun0' >&2; exit 5; }
+  labclient --label tun-$STACK --streams 8 --duration 90s --churn 32
+  kill -0 \$SB 2>/dev/null || { echo 'sing-box died during the run' >&2; exit 6; }"
 ```
 
 The client prints one JSON summary and exits 1 when any stream failed or mismatched. The
 sing-box `direct` outbound is bound to `eth0`, so it reaches the server over the metric-20
 route while the client's own traffic takes the TUN route.
 
-Stop the VM when done: `colima stop --profile multi-tun`.
+Clean up when done: `docker rm -f sblab-srv; docker network rm sblab; colima stop --profile multi-tun`.
+
+Negative control: `STACK=missing` (no such config) must end with a non-zero exit from `sing-box
+check` and print no client summary.

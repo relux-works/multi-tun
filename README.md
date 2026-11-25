@@ -871,8 +871,9 @@ Field reference:
 - `network.mode`: currently `tun`
 - `network.tun.interface_name`: TUN interface name for `tun` mode
 - `network.tun.addresses`: TUN addresses for `tun` mode
-- `network.tun.stack`: optional sing-box TUN stack, one of `system`, `gvisor` or `mixed`; omit it to keep the sing-box default (`mixed` in builds with gVisor, where TCP goes through the system-stack NAT)
+- `network.tun.stack`: optional sing-box TUN stack, one of `system`, `gvisor` or `mixed`. When omitted, sing-box picks its own default, which depends on its version: through 1.14 it is `mixed` in builds with gVisor (TCP through the system-stack NAT) and `system` otherwise; from 1.15 it is sing-tun's own stack. sing-box 1.15 deprecates the field and plans to remove it in 1.17, so leave it unset with 1.17 or newer. The shared `vpn-core` helper ships sing-box 1.13.3; a Homebrew `sing-box` used outside the helper may be newer.
   - In helper launch mode the installed `vpn-core` helper must be at least the version that admits `stack` in its sing-box schema; an older helper refuses the start. Install the helper first, then set the option.
+  - Rollback: remove `stack` and reconnect. To return to the previous helper build (and the sing-box it bundles), reinstall that build with `vpn-core install --expect-sha256 <its digest>`; keep its digest before upgrading.
 - `routing` may exist globally, per server, or per profile; ordinary settings such as `routes` use the more-specific override rule
 - `routing.bypass_suffixes`: domains that should go `direct`. Non-empty values are additive across global, server, and profile scopes, so a machine-wide bypass cannot be suppressed by a selected server/profile. Set an explicit `[]` at a more-specific scope for a deliberate full-tunnel reset.
 - `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists

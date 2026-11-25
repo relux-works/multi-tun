@@ -152,7 +152,10 @@ type TUNConfig struct {
 	InterfaceName string   `json:"interface_name,omitempty"`
 	Addresses     []string `json:"addresses,omitempty"`
 	// Stack selects the sing-box TUN stack: "system", "gvisor" or "mixed".
-	// Empty keeps sing-box's own default (mixed when built with gVisor).
+	// Empty keeps sing-box's own default, which depends on its version: up to
+	// 1.14 it is mixed in builds with gVisor (system otherwise); from 1.15 it is
+	// sing-tun's own stack, and the field is deprecated (removal planned for
+	// 1.17, where it must stay empty). The vpn-core helper bundles 1.13.3.
 	Stack string `json:"stack,omitempty"`
 }
 
