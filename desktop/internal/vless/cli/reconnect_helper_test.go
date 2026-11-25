@@ -296,7 +296,7 @@ func TestReconnectReportsFailedConfigRollback(t *testing.T) {
 	t.Cleanup(func() { writeRestoredConfigCLI = prevWrite })
 	var out, errb bytes.Buffer
 	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-	if code != 1 || len(h.events) != 0 || !strings.Contains(errb.String(), "previous content failed: disk full") {
+	if code != 1 || len(h.events) != 0 || !strings.Contains(errb.String(), "restoring the previous config files failed") || !strings.Contains(errb.String(), "disk full") {
 		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 }
