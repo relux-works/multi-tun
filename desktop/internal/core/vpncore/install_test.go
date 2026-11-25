@@ -791,6 +791,10 @@ func TestUninstallServiceToleratesVerifiedAbsentState(t *testing.T) {
 		if name == "launchctl" && args[0] == "print" {
 			return nil, launchctlTestError(113, nil)
 		}
+		if name == "cat" {
+			// The fail-closed state is absent too, as cat reports it.
+			return []byte("cat: " + args[0] + ": No such file or directory"), errors.New("exit status 1")
+		}
 		return nil, errors.New("already absent")
 	})
 	if err := UninstallService(cfg); err != nil {

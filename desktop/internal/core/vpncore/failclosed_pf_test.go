@@ -621,10 +621,14 @@ func TestFailClosedStatusIsLive(t *testing.T) {
 }
 
 // fightingPF reports pf disabled on every check, as a tool that keeps disabling it would.
-type fightingPF struct{ statefulPF }
+type fightingPF struct {
+	statefulPF
+	infoChecks int
+}
 
 func (f *fightingPF) run(args []string, stdin string) ([]byte, error) {
 	if strings.Join(args, " ") == "-s info" {
+		f.infoChecks++
 		return []byte("Status: Disabled\n"), nil
 	}
 	return f.statefulPF.run(args, stdin)
@@ -642,12 +646,7 @@ func TestFailClosedWatchKeepsBoundUnderFight(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	m.mu.Lock()
 	note := m.backoffNote
-	calls := 0
-	for _, c := range p.calls {
-		if c == "-s info" {
-			calls++
-		}
-	}
+	calls := p.infoChecks
 	m.mu.Unlock()
 	close(stop)
 	<-done
