@@ -41,6 +41,8 @@ type Request struct {
 	Filter      []string `json:"filter,omitempty"`
 	ApplePCAPNG bool     `json:"apple_pcapng,omitempty"`
 	RunAsUser   bool     `json:"run_as_user,omitempty"`
+	// FailClosed is accepted only by failclosed.apply.
+	FailClosed *FailClosedRequest `json:"fail_closed,omitempty"`
 }
 
 type Response struct {
@@ -53,6 +55,7 @@ type Response struct {
 	Path             string                 `json:"path,omitempty"`
 	HelperSnapshot   *HelperSnapshot        `json:"helper_snapshot,omitempty"`
 	MaintenanceDrain *MaintenanceDrainState `json:"maintenance_drain,omitempty"`
+	FailClosed       *FailClosedStatus      `json:"fail_closed,omitempty"`
 }
 
 // MaintenanceDrainState is public status only; ownership tokens stay private.

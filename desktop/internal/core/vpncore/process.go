@@ -65,6 +65,33 @@ func CleanupResolvers(cfg ServiceConfig) error {
 	return err
 }
 
+// ApplyFailClosed asks the helper to enforce the fail-closed anchor.
+func ApplyFailClosed(cfg ServiceConfig, interfaces, table []string) error {
+	_, err := callActive(cfg, Request{Action: "failclosed.apply", FailClosed: &FailClosedRequest{
+		Interfaces: append([]string(nil), interfaces...), Table: append([]string(nil), table...),
+	}})
+	return err
+}
+
+// ClearFailClosed removes the fail-closed anchor and keeps it off after reboot.
+// It never touches the tunnel.
+func ClearFailClosed(cfg ServiceConfig) error {
+	_, err := callActive(cfg, Request{Action: "failclosed.clear"})
+	return err
+}
+
+// FailClosedState reports the helper's fail-closed state without changing it.
+func FailClosedState(cfg ServiceConfig) (FailClosedStatus, error) {
+	response, err := callActive(cfg, Request{Action: "failclosed.status"})
+	if err != nil {
+		return FailClosedStatus{}, err
+	}
+	if response.FailClosed == nil {
+		return FailClosedStatus{}, errors.New("vpn core did not return fail-closed status")
+	}
+	return *response.FailClosed, nil
+}
+
 func StartTCPDump(cfg ServiceConfig, interfaceName string, filter []string, applePCAPNG, runAsUser bool) (int, string, error) {
 	response, err := callActive(cfg, Request{Action: "tcpdump.start", Interface: interfaceName, Filter: append([]string(nil), filter...), ApplePCAPNG: applePCAPNG, RunAsUser: runAsUser})
 	if err != nil {

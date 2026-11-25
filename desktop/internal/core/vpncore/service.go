@@ -288,6 +288,7 @@ type serviceDaemon struct {
 	drainUntil   time.Time // Writes require mutation and drainStateMu; ping reads with drainStateMu.
 	drainStateMu sync.RWMutex
 	leaseFiles   maintenanceLeaseFiles
+	failClosed   *failClosedManager
 }
 
 func newServiceDaemon(cfg ServiceConfig, clientUID, clientGID int) *serviceDaemon {
@@ -299,6 +300,7 @@ func newServiceDaemon(cfg ServiceConfig, clientUID, clientGID int) *serviceDaemo
 		connections: make(chan struct{}, maxConcurrentConnections),
 		children:    newChildRegistry(),
 		leaseFiles:  productionMaintenanceLeaseFiles(),
+		failClosed:  newFailClosedManager(),
 
 		socketVerification: productionVerificationDependencies(),
 		listenUnix:         net.ListenUnix,
@@ -457,6 +459,14 @@ func (d *serviceDaemon) serve() error {
 		return errors.New("peer credential verification is not configured")
 	}
 	d.restoreMaintenanceLease()
+	// Fail-closed rules come back before the socket is served, so a listed
+	// service is refused from the first moment after boot. Errors keep any
+	// rules already loaded and are reported, never fatal.
+	if d.failClosed != nil {
+		if err := d.failClosed.ReapplyAtStart(); err != nil {
+			fmt.Fprintf(os.Stderr, "vpn core: fail-closed re-apply at start: %v\n", err)
+		}
+	}
 	publishedSocket, err := d.preparePublishedSocket()
 	if err != nil {
 		return err
@@ -533,7 +543,7 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 		defer logFile.Close()
 	}
 
-	mutating := request.Action != "ping"
+	mutating := request.Action != "ping" && request.Action != "failclosed.status"
 	if mutating {
 		d.mutation.Lock()
 		defer d.mutation.Unlock()
@@ -589,6 +599,14 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 			response.PID = pid
 			response.Handle = handle
 		}
+	case "failclosed.apply":
+		responseError(&response, d.failClosed.Apply(*request.FailClosed))
+	case "failclosed.clear":
+		responseError(&response, d.failClosed.Clear())
+	case "failclosed.status":
+		status, err := d.failClosed.Status()
+		responseError(&response, err)
+		response.FailClosed = &status
 	case "signal":
 		path, err := d.handleSignal(request)
 		if err != nil {
@@ -773,7 +791,21 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 
 func validateRequestShape(request Request) error {
 	unexpected := false
+	if request.FailClosed != nil && request.Action != "failclosed.apply" {
+		return fmt.Errorf("vpn core action %q contains fields outside its typed schema", request.Action)
+	}
+	onlyAction := len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
 	switch request.Action {
+	case "failclosed.apply":
+		if request.FailClosed == nil {
+			return errors.New("failclosed.apply needs fail_closed interfaces and table")
+		}
+		if len(request.FailClosed.Interfaces) > 16 || len(request.FailClosed.Table) > 4096 {
+			return errors.New("failclosed.apply fields exceed their size limits")
+		}
+		unexpected = onlyAction
+	case "failclosed.clear", "failclosed.status":
+		unexpected = onlyAction
 	case "maintenance.undrain", "maintenance.renew":
 		if !validMaintenanceToken(request.Token) {
 			return errors.New("maintenance token is required and must be 64 lowercase hex characters")
@@ -809,7 +841,8 @@ func validateRequestShape(request Request) error {
 
 func knownAction(action string) bool {
 	switch action {
-	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal":
+	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal",
+		"failclosed.apply", "failclosed.clear", "failclosed.status":
 		return true
 	default:
 		return false

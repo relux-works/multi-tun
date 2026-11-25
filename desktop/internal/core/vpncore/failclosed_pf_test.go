@@ -208,3 +208,40 @@ func TestFailClosedCorruptState(t *testing.T) {
 		t.Fatalf("clear calls = %q", f.calls)
 	}
 }
+
+// Claim: the three fail-closed actions are known; failclosed.apply needs its payload and accepts no
+// other field; clear and status accept no payload; no other action may carry a fail_closed payload.
+func TestFailClosedRequestShape(t *testing.T) {
+	for _, a := range []string{"failclosed.apply", "failclosed.clear", "failclosed.status"} {
+		if !knownAction(a) {
+			t.Fatalf("%s not known", a)
+		}
+	}
+	payload := &FailClosedRequest{Interfaces: []string{"en0"}, Table: []string{"1.1.1.1/32"}}
+	if err := validateRequestShape(Request{Action: "failclosed.apply", FailClosed: payload}); err != nil {
+		t.Fatalf("valid apply refused: %v", err)
+	}
+	for _, a := range []string{"failclosed.clear", "failclosed.status"} {
+		if err := validateRequestShape(Request{Action: a}); err != nil {
+			t.Fatalf("valid %s refused: %v", a, err)
+		}
+	}
+	bad := map[string]Request{
+		"apply without payload": {Action: "failclosed.apply"},
+		"apply with stdin":      {Action: "failclosed.apply", FailClosed: payload, Stdin: "x"},
+		"apply with interface":  {Action: "failclosed.apply", FailClosed: payload, Interface: "en0"},
+		"clear with payload":    {Action: "failclosed.clear", FailClosed: payload},
+		"status with handle":    {Action: "failclosed.status", Handle: "h"},
+		"ping with payload":     {Action: "ping", FailClosed: payload},
+		"singbox with payload":  {Action: "singbox.start", ConfigJSON: []byte("{}"), FailClosed: payload},
+		"apply oversized table": {Action: "failclosed.apply", FailClosed: &FailClosedRequest{Interfaces: []string{"en0"}, Table: make([]string, 4097)}},
+	}
+	for name, r := range bad {
+		if err := validateRequestShape(r); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if safeRequestAction("failclosed.apply") != "failclosed.apply" {
+		t.Error("diagnostics hides the fail-closed action name")
+	}
+}
