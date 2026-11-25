@@ -1022,6 +1022,12 @@ func stopStartedSession(current CurrentSession) error {
 	return nil
 }
 
+// ResolveLaunchMode returns the launch mode a start would use (auto resolves
+// to helper when the shared vpn-core helper is installed).
+func ResolveLaunchMode(renderMode string, launch config.PrivilegedLaunchConfig) (string, error) {
+	return resolveLaunchMode(renderMode, launch)
+}
+
 func resolveLaunchMode(renderMode string, launch config.PrivilegedLaunchConfig) (string, error) {
 	if renderMode != config.RenderModeTun {
 		return "", fmt.Errorf("unsupported render mode %q", renderMode)

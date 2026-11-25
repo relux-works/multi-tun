@@ -165,6 +165,13 @@ var singBoxSchemas = map[string]singBoxSchemaNode{
 // keys collide ignoring case are refused, and the re-encoded tree (not the
 // client bytes) is what gets written, so duplicate keys cannot make the
 // validator and sing-box see different values.
+// ValidateSingBoxConfig reports whether the helper's sing-box schema accepts
+// data. Clients use it to refuse a config before stopping a running session.
+func ValidateSingBoxConfig(data []byte) error {
+	_, err := validateSingBoxConfig(data)
+	return err
+}
+
 func validateSingBoxConfig(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, errors.New("config_json is required")

@@ -10,9 +10,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
+	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/session"
@@ -56,6 +58,67 @@ var currentSessionStateForSelection = currentSessionState
 // without touching the network or the running tunnel, so reconnect fails
 // before it stops anything. Route checks cannot run here: while the old
 // tunnel is up the new upstream legitimately routes through it.
+var (
+	resolveLaunchModeCLI    = session.ResolveLaunchMode
+	validateHelperConfigCLI = vpncore.ValidateSingBoxConfig
+	readFileCLI             = os.ReadFile
+	writeRestoredConfigCLI  = func(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }
+)
+
+// preflightHelperSchema refuses, before anything is stopped, a sing-box config
+// that the vpn-core helper would refuse to start.
+func preflightHelperSchema(cfg config.ProjectConfig, prepared preparedStart) error {
+	if prepared.engine != config.EngineSingbox {
+		return nil
+	}
+	mode, err := resolveLaunchModeCLI(cfg.NetworkMode(), cfg.LaunchOrDefault())
+	if err != nil || mode != config.LaunchModeHelper {
+		return nil
+	}
+	data, err := readFileCLI(prepared.target)
+	if err != nil {
+		return fmt.Errorf("read rendered config for the helper check: %w", err)
+	}
+	if err := validateHelperConfigCLI(data); err != nil {
+		return fmt.Errorf("the vpn-core helper would refuse the new config: %w", err)
+	}
+	return nil
+}
+
+// restorePreviousSession brings the stopped session back after a refused
+// replacement start: it writes the previous config back and starts it again
+// with the stopped session's profile. It covers the single sing-box session
+// case; anything else is reported for a manual start.
+func (a *App) restorePreviousSession(cfg config.ProjectConfig, prepared preparedStart, opts session.StartOptions, stopped []stopSessionResult, previousTarget string, previousConfig []byte, previousConfigErr error) {
+	if len(stopped) == 0 {
+		fmt.Fprintln(a.stderr, "no previous session was running")
+		return
+	}
+	prev := stopped[0].stopped
+	if len(stopped) != 1 || prev == nil || prev.Engine != config.EngineSingbox || prev.ConfigPath != previousTarget || previousConfigErr != nil || len(prev.Sidecars) != 0 {
+		fmt.Fprintln(a.stderr, "the previous session was stopped and could not be restored automatically; start it with `vless-tun start`")
+		return
+	}
+	if err := writeRestoredConfigCLI(previousTarget, previousConfig); err != nil {
+		fmt.Fprintf(a.stderr, "restore previous config failed: %v; start it with `vless-tun start`\n", err)
+		return
+	}
+	profile := model.Profile{ID: prev.ProfileID, Name: prev.ProfileName}
+	if host, port, err := net.SplitHostPort(prev.ProfileEndpoint); err == nil {
+		profile.Host = host
+		profile.Port, _ = strconv.Atoi(port)
+	}
+	opts.Engine = config.EngineSingbox
+	opts.Sidecars = nil
+	opts.ResolvedID, opts.ResolvedName = prev.ResolvedProfileID, prev.ResolvedProfileName
+	restored, err := startSessionFunc(cfg.CacheDir, previousTarget, profile, opts)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "restore of the previous session failed: %v; start it with `vless-tun start`\n", err)
+		return
+	}
+	fmt.Fprintf(a.stderr, "previous session restored as %s (pid=%d, profile %s)\n", restored.ID, restored.PID, restored.ProfileName)
+}
+
 func preflightReplacement(prepared preparedStart) error {
 	if _, err := lookPathFunc("sing-box"); err != nil {
 		return fmt.Errorf("sing-box executable not found: %w", err)
@@ -203,6 +266,15 @@ func (a *App) runReconnect(args []string) int {
 		fmt.Fprintf(a.stderr, "warning: %s\n", warning)
 	}
 
+	// Keep the config the running session was started from: rendering the
+	// replacement overwrites that file, and a refused start must be able to
+	// bring the previous session back.
+	previousTarget := cfg.SingboxConfigPath()
+	if *outputPath != "" {
+		previousTarget = *outputPath
+	}
+	previousConfig, previousConfigErr := readFileCLI(previousTarget)
+
 	// Prepare the replacement before stopping anything: a refresh that drops the
 	// selected profile, or any render error, must leave the running tunnel alone.
 	prepared, err := a.prepareStart(cfg, startOptions{
@@ -225,6 +297,14 @@ func (a *App) runReconnect(args []string) int {
 		fmt.Fprintln(a.stderr, "running sessions were left untouched")
 		return 1
 	}
+	if err := preflightHelperSchema(cfg, prepared); err != nil {
+		if previousConfigErr == nil && previousTarget == prepared.target {
+			_ = writeRestoredConfigCLI(previousTarget, previousConfig)
+		}
+		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		fmt.Fprintln(a.stderr, "running sessions were left untouched")
+		return 1
+	}
 
 	stoppedSessions, err := stopConfiguredSessions(*configPath, *force, *timeout)
 	if err != nil {
@@ -238,7 +318,7 @@ func (a *App) runReconnect(args []string) int {
 	}
 
 	a.applyFailClosedBeforeStart(cfg)
-	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
+	startOpts := session.StartOptions{
 		Mode:              cfg.NetworkMode(),
 		Engine:            prepared.engine,
 		BypassSuffixes:    cfg.BypassSuffixes(),
@@ -256,9 +336,11 @@ func (a *App) runReconnect(args []string) int {
 		ResolvedID:        prepared.resolvedID(),
 		ResolutionReason:  prepared.resolution.Reason,
 		SnapshotFetchedAt: prepared.snapshotFetchedAt,
-	})
+	}
+	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, startOpts)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		a.restorePreviousSession(cfg, prepared, startOpts, stoppedSessions, previousTarget, previousConfig, previousConfigErr)
 		return 1
 	}
 
