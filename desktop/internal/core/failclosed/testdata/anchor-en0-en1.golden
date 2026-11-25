@@ -1,0 +1,3 @@
+# works.relux.vpn-core/failclosed: refuse listed services outside the tunnel (managed by vpn-core)
+table <failclosed> persist
+block return out quick on { en0 en1 } to <failclosed>
