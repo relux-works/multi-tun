@@ -247,6 +247,7 @@ func (a *App) runStatus(args []string) int {
 
 	status, err := inspectServiceVPNCoreCLI(vpncore.DefaultServiceConfig())
 	if err != nil {
+		fmt.Fprintln(a.stdout, "maintenance_drain: unknown")
 		fmt.Fprintf(a.stderr, "status failed: %v\n", err)
 		return 1
 	}

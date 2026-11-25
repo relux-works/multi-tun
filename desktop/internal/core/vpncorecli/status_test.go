@@ -10,7 +10,7 @@ import (
 )
 
 func TestStatusMaintenanceCapability(t *testing.T) {
-	// Status distinguishes advertised support, legacy omission and absence; RPC errors never produce a capability verdict.
+	// Status distinguishes support, legacy omission and absence; RPC errors print only unknown and retain failure.
 	previousInspect, previousDrift := inspectServiceVPNCoreCLI, toolDriftVPNCoreCLI
 	t.Cleanup(func() { inspectServiceVPNCoreCLI = previousInspect; toolDriftVPNCoreCLI = previousDrift })
 	toolDriftVPNCoreCLI = func(vpncore.ServiceConfig) ([]string, error) { return nil, nil }
@@ -24,14 +24,14 @@ func TestStatusMaintenanceCapability(t *testing.T) {
 		{"active", vpncore.ServiceStatus{Reachable: true, MaintenanceDrain: &vpncore.MaintenanceDrainState{Active: true, ExpiresAt: "PRIVATE_EXPIRY"}}, nil, "maintenance_drain: supported\nmaintenance_active: true\n"},
 		{"legacy", vpncore.ServiceStatus{Reachable: true}, nil, "maintenance_drain: unadvertised\n"},
 		{"missing", vpncore.ServiceStatus{}, nil, "maintenance_drain: unknown\n"},
-		{"refused", vpncore.ServiceStatus{Reachable: true}, errors.New("peer uid refused"), ""},
+		{"refused", vpncore.ServiceStatus{Reachable: true}, errors.New("peer uid refused"), "maintenance_drain: unknown\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inspectServiceVPNCoreCLI = func(vpncore.ServiceConfig) (vpncore.ServiceStatus, error) { return tc.status, tc.err }
 			var stdout, stderr bytes.Buffer
 			code := New(&stdout, &stderr).Run([]string{"status"})
 			if tc.err != nil {
-				if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "peer uid refused") {
+				if code != 1 || stdout.String() != tc.want || !strings.Contains(stderr.String(), "peer uid refused") {
 					t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 				}
 				return
