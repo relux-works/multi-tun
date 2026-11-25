@@ -174,13 +174,13 @@ type SidecarSession struct {
 func Start(cacheDir, configPath string, profile model.Profile, options StartOptions) (CurrentSession, error) {
 	launchMode, err := resolveLaunchMode(options.Mode, options.PrivilegedLaunch)
 	if err != nil {
-		return CurrentSession{}, err
+		return CurrentSession{}, notStarted(err)
 	}
 	executable := "sing-box"
 	if launchMode != config.LaunchModeHelper {
 		executable, err = execLookPath("sing-box")
 		if err != nil {
-			return CurrentSession{}, err
+			return CurrentSession{}, notStarted(err)
 		}
 	}
 
@@ -190,10 +190,10 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	metadataPath := filepath.Join(SessionsDir(cacheDir), metadataFilePrefix+sessionID+".json")
 
 	if err := os.MkdirAll(SessionsDir(cacheDir), 0o755); err != nil {
-		return CurrentSession{}, err
+		return CurrentSession{}, notStarted(err)
 	}
 	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
-		return CurrentSession{}, err
+		return CurrentSession{}, notStarted(err)
 	}
 
 	command := logicalCommand(executable, configPath, launchMode)
@@ -235,13 +235,13 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	}
 	if err != nil {
-		return CurrentSession{}, err
+		return CurrentSession{}, notStarted(err)
 	}
 	writeLogHeader(logFile, session, profile)
 	if err := guardNestedTunnelStartup(profile, options.Mode); err != nil {
 		writeSessionLog(logFile, logLevelError, "startup_guard_failed: %v\n", err)
 		_ = logFile.Close()
-		return CurrentSession{}, err
+		return CurrentSession{}, notStarted(err)
 	}
 
 	if err := cleanupOrphanSidecars(options.Sidecars, logFile, 1500*time.Millisecond); err != nil {
@@ -253,11 +253,16 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	sidecars, err := startSidecars(cacheDir, sessionID, options.Sidecars)
 	if err != nil {
 		writeSessionLog(logFile, logLevelError, "sidecar_start_failed: %v\n", err)
-		if cleanupErr := cleanupOrphanSidecars(options.Sidecars, logFile, 1500*time.Millisecond); cleanupErr != nil {
+		cleanupErr := cleanupOrphanSidecars(options.Sidecars, logFile, 1500*time.Millisecond)
+		if cleanupErr != nil {
 			writeSessionLog(logFile, logLevelError, "sidecar_start_cleanup_failed: %v\n", cleanupErr)
 		}
 		_ = logFile.Close()
-		return CurrentSession{}, err
+		if cleanupErr != nil {
+			// A sidecar may have started and may still run: this start cannot say what is left.
+			return CurrentSession{}, errors.Join(err, fmt.Errorf("cleaning up after the failed sidecar start also failed: %w", cleanupErr))
+		}
+		return CurrentSession{}, notStarted(err)
 	}
 	session.Sidecars = sidecars
 
@@ -267,8 +272,16 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		_ = logFile.Close()
 		pid, handle, err := startWithVPNCore(session)
 		if err != nil {
-			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
-			return CurrentSession{}, err
+			stopErr := stopSidecars(sidecars, true, 1500*time.Millisecond)
+			var refused *vpncore.RefusedError
+			if stopErr == nil && errors.As(err, &refused) {
+				// The helper answered with a refusal, so it holds no child for this request.
+				return CurrentSession{}, notStarted(err)
+			}
+			// Without the helper's answer (a lost or late reply) it may have started sing-box and
+			// still hold it. This start has no PID or handle for it, so it returns no session and
+			// no ErrNothingStarted: the caller must treat the outcome as unknown.
+			return CurrentSession{}, errors.Join(err, stopErr)
 		}
 		session.PID = pid
 		session.Handle = handle
@@ -282,8 +295,14 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		cmd, err := startProcessSession(processLogFile, executable, configPath, launchMode)
 		_ = logFile.Close()
 		if err != nil {
-			_ = stopSidecars(sidecars, true, 1500*time.Millisecond)
-			return CurrentSession{}, err
+			stopErr := stopSidecars(sidecars, true, 1500*time.Millisecond)
+			if stopErr == nil && launchMode != config.LaunchModeLaunchd {
+				// The process failed to start, so nothing of this start runs.
+				return CurrentSession{}, notStarted(err)
+			}
+			// launchd may have loaded the job before failing; sidecars may still run.
+			session.Sidecars = sidecars
+			return session, errors.Join(err, stopErr)
 		}
 		session.PID = cmd.Process.Pid
 		release = cmd.Process.Release
@@ -1002,14 +1021,103 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 	return current, "timeout", fmt.Errorf("failed to stop sing-box pid %d", current.PID)
 }
 
-// failedStart reports a start that failed after its process was launched and stopped again. When
-// that stop failed too, the process may still run, so the session comes back with both errors and
-// the caller must reconcile it before starting anything else; otherwise the caller gets no session.
+// failedStart reports a start that failed after its process was launched and then stopped. The
+// session always comes back, so the caller can confirm that the process and its sidecars are gone
+// before it starts anything else; a failed stop is joined to the error.
 func failedStart(session CurrentSession, stopErr, err error) (CurrentSession, error) {
 	if stopErr != nil {
 		return session, errors.Join(err, fmt.Errorf("stopping the failed start also failed: %w", stopErr))
 	}
-	return CurrentSession{}, err
+	return session, err
+}
+
+// ErrNothingStarted marks a Start error that proves nothing of that start is left running: it
+// failed before any process was launched, the helper refused the start, or the process failed
+// to launch and every sidecar was stopped. Any other Start error, with or without a returned
+// session, may have left a process running.
+var ErrNothingStarted = errors.New("nothing of the failed start is running")
+
+type notStartedError struct{ err error }
+
+func (e notStartedError) Error() string        { return e.err.Error() }
+func (e notStartedError) Unwrap() error        { return e.err }
+func (e notStartedError) Is(target error) bool { return target == ErrNothingStarted }
+
+func notStarted(err error) error { return notStartedError{err: err} }
+
+// SessionStopped reports whether a session's main process and every sidecar are gone. Any
+// identity or liveness lookup error is returned, never read as gone.
+func SessionStopped(current CurrentSession) (bool, error) {
+	alive, _, err := SessionAlive(current)
+	if err != nil {
+		return false, err
+	}
+	if alive {
+		return false, nil
+	}
+	for _, sidecar := range current.Sidecars {
+		alive, err := sidecarAlive(sidecar)
+		if err != nil {
+			return false, fmt.Errorf("sidecar %s: %w", sidecar.Name, err)
+		}
+		if alive {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// StopReturned stops a session that a failed Start returned, through what that start recorded: the
+// helper's opaque handle, or the process group only while the recorded process identity still
+// matches; then its sidecars. It never reads or writes the current-session record.
+func StopReturned(current CurrentSession) error {
+	if current.LaunchMode != config.LaunchModeHelper {
+		alive, _, err := SessionAlive(current)
+		if err != nil {
+			return err
+		}
+		if !alive {
+			return stopSidecars(current.Sidecars, true, 1500*time.Millisecond)
+		}
+	} else if current.Handle == "" {
+		return errors.New("the helper returned no handle for this start; it cannot be stopped from here")
+	}
+	return stopStartedSession(current)
+}
+
+// SaveCurrentIfAbsent records the session as current only when no current record exists, so it
+// never overwrites another session's record.
+func SaveCurrentIfAbsent(cacheDir string, current CurrentSession) error {
+	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(CurrentPath(cacheDir), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		_ = f.Close()
+		_ = os.Remove(CurrentPath(cacheDir))
+		return err
+	}
+	return f.Close()
+}
+
+// StopIfCurrent stops the current session only when its record names the expected session ID; a
+// record of another session is left alone and reported.
+func StopIfCurrent(cacheDir, expectedID string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (CurrentSession, string, error) {
+	current, err := LoadCurrent(cacheDir)
+	if err != nil {
+		return CurrentSession{}, "", err
+	}
+	if current.ID != expectedID {
+		return CurrentSession{}, "", fmt.Errorf("the current record is session %s, not %s; left alone", current.ID, expectedID)
+	}
+	return Stop(cacheDir, launch, force, timeout)
 }
 
 func stopStartedSession(current CurrentSession) error {

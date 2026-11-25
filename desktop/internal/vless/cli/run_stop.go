@@ -50,8 +50,13 @@ type stopSessionResult struct {
 
 var stopCurrentSessionFunc = stopCurrentSession
 var startSessionFunc = session.Start
-var sessionAliveFunc = session.SessionAlive
-var saveCurrentFunc = session.SaveCurrent
+var (
+	sessionStoppedFunc      = session.SessionStopped
+	loadCurrentFunc         = session.LoadCurrent
+	stopCurrentIfFunc       = session.StopIfCurrent
+	stopReturnedFunc        = session.StopReturned
+	saveCurrentIfAbsentFunc = session.SaveCurrentIfAbsent
+)
 var lookPathFunc = exec.LookPath
 var profileProbeDialContext = (&net.Dialer{}).DialContext
 var currentSessionStateForSelection = currentSessionState
@@ -449,7 +454,7 @@ func (a *App) runReconnect(args []string) int {
 		// example when its liveness is unknown). Stop whatever it left before
 		// bringing the previous session back; if that cannot be confirmed, do not
 		// start a second session.
-		if serr := stopFailedReplacement(cfg.CacheDir, launch, started, *timeout); serr != nil {
+		if serr := stopFailedReplacement(cfg.CacheDir, launch, started, err, *timeout); serr != nil {
 			fmt.Fprintf(a.stderr, "the replacement may still be running (%v); the previous session was not restored; inspect with `vless-tun status`\n", serr)
 			return 1
 		}
@@ -853,44 +858,54 @@ func effectiveStartRefresh(cfg config.ProjectConfig, options startOptions) bool 
 	return true
 }
 
-// stopFailedReplacement stops what a failed start left behind and confirms that the replacement
-// session it returned, if any, is gone. A clean stop of the current record proves that only when
-// the record is that replacement: when the start could not save its record, the stop finds no
-// session and reports success, so the returned replacement is then checked directly. If it may
-// still run, it is recorded and stopped through that record; the record also lets the operator
-// stop it later with `vless-tun stop`. Anything short of a confirmed stop is an error, and the
-// caller must not start the previous session next to a possibly live replacement.
-func stopFailedReplacement(cacheDir string, launch config.PrivilegedLaunchConfig, replacement session.CurrentSession, timeout time.Duration) error {
-	stopped, _, err := stopCurrentSessionFunc(cacheDir, launch, true, timeout)
+// stopFailedReplacement decides whether the previous session may start again after the
+// replacement start failed, and stops what that start left when it can do so safely. It returns
+// nil only when nothing of the replacement can still run:
+//   - the start error carries session.ErrNothingStarted; or
+//   - the start returned its session, and that session's main process and sidecars are confirmed
+//     gone, at once or after stopping them through the replacement's own record or its own handle.
+//
+// A start that returned no session without that marker (for example a lost helper reply after
+// the helper may have started sing-box) has an unknown outcome and blocks the restore. A current
+// record of another session is never stopped or overwritten. When the replacement cannot be
+// stopped here, it is recorded only if no record exists, so `vless-tun stop` can stop it later.
+func stopFailedReplacement(cacheDir string, launch config.PrivilegedLaunchConfig, replacement session.CurrentSession, startErr error, timeout time.Duration) error {
+	if replacement.ID == "" && replacement.PID == 0 && len(replacement.Sidecars) == 0 {
+		if errors.Is(startErr, session.ErrNothingStarted) {
+			return nil
+		}
+		return errors.New("the failed start returned no session, so whether it left a process running is unknown; check `vless-tun status` and `vpn-core status`")
+	}
+	if stopped, err := sessionStoppedFunc(replacement); err == nil && stopped {
+		return nil
+	}
+	record, err := loadCurrentFunc(cacheDir)
+	recorded := err == nil && record.ID == replacement.ID
+	switch {
+	case recorded:
+		_, _, err = stopCurrentIfFunc(cacheDir, replacement.ID, launch, true, timeout)
+	case err == nil:
+		return fmt.Errorf("replacement session %s may still be running, and the current record belongs to session %s, which is left alone", replacement.ID, record.ID)
+	case errors.Is(err, os.ErrNotExist):
+		err = stopReturnedFunc(replacement)
+	}
 	if err != nil {
-		return err
+		if recorded {
+			return fmt.Errorf("replacement session %s (pid %d) may still be running and could not be stopped (%v); it is recorded, stop it with `vless-tun stop`", replacement.ID, replacement.PID, err)
+		}
+		if saveErr := saveCurrentIfAbsentFunc(cacheDir, replacement); saveErr == nil {
+			return fmt.Errorf("replacement session %s (pid %d) may still be running and could not be stopped (%v); it is now recorded, stop it with `vless-tun stop`", replacement.ID, replacement.PID, err)
+		}
+		return fmt.Errorf("replacement session %s (pid %d) may still be running and could not be stopped (%v)", replacement.ID, replacement.PID, err)
 	}
-	if replacement.ID == "" && replacement.PID == 0 {
-		// The start returned no session: it stopped its own process before failing.
-		return nil
+	stopped, err := sessionStoppedFunc(replacement)
+	if err != nil {
+		return fmt.Errorf("replacement session %s (pid %d) was stopped, but whether it and its sidecars are gone is unknown: %w", replacement.ID, replacement.PID, err)
 	}
-	if stopped != nil && stopped.ID == replacement.ID {
-		return nil
+	if !stopped {
+		return fmt.Errorf("replacement session %s (pid %d) or one of its sidecars is still running after the stop", replacement.ID, replacement.PID)
 	}
-	alive, pid, aliveErr := sessionAliveFunc(replacement)
-	if aliveErr == nil && !alive {
-		return nil
-	}
-	state := fmt.Sprintf("is still running without a saved record (pid %d)", pid)
-	if aliveErr != nil {
-		state = fmt.Sprintf("has no saved record and its liveness is unknown (pid %d: %v)", replacement.PID, aliveErr)
-	}
-	if err := saveCurrentFunc(cacheDir, replacement); err != nil {
-		return fmt.Errorf("replacement session %s %s, and saving its record failed (%v); stop that process by its pid", replacement.ID, state, err)
-	}
-	stopped, _, err = stopCurrentSessionFunc(cacheDir, launch, true, timeout)
-	if err == nil && stopped != nil && stopped.ID == replacement.ID {
-		return nil
-	}
-	if err == nil {
-		err = errors.New("the stop did not name it")
-	}
-	return fmt.Errorf("replacement session %s %s; it is now recorded but stopping it failed (%v); stop it with `vless-tun stop`", replacement.ID, state, err)
+	return nil
 }
 
 func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {

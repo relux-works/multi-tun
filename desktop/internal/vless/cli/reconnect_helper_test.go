@@ -15,6 +15,13 @@ import (
 	"multi-tun/desktop/internal/vless/subscription"
 )
 
+// refusedStart marks a fixture start error as one that proves nothing was left running, the way
+// session.Start marks a helper refusal; its message is the wrapped error's.
+type refusedStart struct{ error }
+
+func (e refusedStart) Unwrap() error        { return e.error }
+func (e refusedStart) Is(target error) bool { return target == session.ErrNothingStarted }
+
 type helperReconnect struct {
 	events      []string
 	starts      []string // config path per start
@@ -68,7 +75,8 @@ func setupHelperReconnect(t *testing.T, h *helperReconnect, launchMode string, v
 		h.startDirs = append(h.startDirs, cacheDir)
 		h.startOpts = append(h.startOpts, options)
 		if n < len(h.startErrs) && h.startErrs[n] != nil {
-			return session.CurrentSession{}, h.startErrs[n]
+			// A fixture start error is a refusal that left nothing running (session.ErrNothingStarted).
+			return session.CurrentSession{}, refusedStart{h.startErrs[n]}
 		}
 		return session.CurrentSession{ID: "s" + string(rune('1'+n)), PID: 5000 + n, ProfileName: profile.Name}, nil
 	}
@@ -129,7 +137,7 @@ func TestReconnectRestoresPreviousSessionAfterRefusedStart(t *testing.T) {
 	path, target := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
 	var out, errb bytes.Buffer
 	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-	if code != 1 || strings.Join(h.events, ",") != "stop,start,stop,start" {
+	if code != 1 || strings.Join(h.events, ",") != "stop,start,start" {
 		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 	if h.starts[1] != target || !strings.Contains(errb.String(), "previous session restored as s2") {
@@ -147,7 +155,7 @@ func TestReconnectDoesNotGuessRestoreForSidecarSession(t *testing.T) {
 	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
 	var out, errb bytes.Buffer
 	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-	if code != 1 || strings.Join(h.events, ",") != "stop,start,stop" || !strings.Contains(errb.String(), "could not be restored automatically") {
+	if code != 1 || strings.Join(h.events, ",") != "stop,start" || !strings.Contains(errb.String(), "could not be restored automatically") {
 		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 }
@@ -158,7 +166,7 @@ func TestReconnectReportsFailedRestore(t *testing.T) {
 	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
 	var out, errb bytes.Buffer
 	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-	if code != 1 || strings.Join(h.events, ",") != "stop,start,stop,start" || !strings.Contains(errb.String(), "restore of the previous session failed") {
+	if code != 1 || strings.Join(h.events, ",") != "stop,start,start" || !strings.Contains(errb.String(), "restore of the previous session failed") {
 		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 }
@@ -404,115 +412,258 @@ func TestReconnectPreStopRefusalRestoresBothConfigFiles(t *testing.T) {
 	}
 }
 
-// Claim: when the replacement start returns a session together with an error (liveness unknown),
-// reconnect starts the previous session again only after that replacement is confirmed gone: the
-// stop removed the replacement's own record; or, with no record saved, a direct liveness check says
-// it is not running; or the replacement is recorded and a second stop through that record names it.
-// A failed stop, a failed record write, a failed second stop, and unknown liveness without a stop
-// all leave the previous session unstarted and say the replacement may be running; a recorded but
-// unstopped replacement points the operator to `vless-tun stop`. Limit: stop, liveness and record
-// writes are fakes; the real session.Stop, SessionAlive and SaveCurrent are covered in the session
-// package.
-func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
-	replacement := session.CurrentSession{ID: "replacement", PID: 9999}
-	stopNamed := func(id string) func() (*session.CurrentSession, string, error) {
-		return func() (*session.CurrentSession, string, error) {
-			return &session.CurrentSession{ID: id, PID: 1}, "stopped", nil
+// Claim: when the Xray config did not exist before a refused reconnect, the refusal removes the
+// Xray file the render wrote and keeps the sing-box config's previous bytes; when that removal fails,
+// the failure is reported with the Xray path. Nothing is stopped in either case. Positive control:
+// the same fixture with removal working leaves no Xray file and reports no rollback failure.
+func TestReconnectRefusalRemovesPreviouslyAbsentXrayConfig(t *testing.T) {
+	for _, removalFails := range []bool{false, true} {
+		h := &helperReconnect{}
+		path, target := setupHelperReconnect(t, h, config.LaunchModeHelper, refuseStack)
+		data, _ := os.ReadFile(path)
+		os.WriteFile(path, []byte(strings.Replace(string(data), `"engine": {"type": "sing-box"}`, `"engine": {"type": "xray", "xray": {"socks_listen": "127.0.0.1", "socks_port": 21808}}`, 1)), 0o600)
+		cfg, _, err := loadEffectiveConfig(path, config.SelectionOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		xrayPath := cfg.XrayConfigPath()
+		if xrayPath == "" || xrayPath == target {
+			t.Fatalf("fixture xray path %q", xrayPath)
+		}
+		os.Remove(xrayPath)
+		var removed []string
+		prevRemove := removeRenderedConfigCLI
+		removeRenderedConfigCLI = func(p string) error {
+			removed = append(removed, p)
+			if removalFails && p == xrayPath {
+				return errors.New("read-only file system")
+			}
+			return prevRemove(p)
+		}
+		var out, errb bytes.Buffer
+		code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
+		removeRenderedConfigCLI = prevRemove
+		if code != 1 || len(h.events) != 0 || strings.Join(removed, ",") != xrayPath {
+			t.Fatalf("removalFails=%v: exit %d events %v removed %v stderr %q", removalFails, code, h.events, removed, errb.String())
+		}
+		if got, _ := os.ReadFile(target); string(got) != `{"previous":true}` {
+			t.Fatalf("removalFails=%v: sing-box config not restored: %s", removalFails, got)
+		}
+		_, statErr := os.Stat(xrayPath)
+		reported := strings.Contains(errb.String(), "restoring the previous config files failed") && strings.Contains(errb.String(), xrayPath)
+		if !removalFails && (!errors.Is(statErr, os.ErrNotExist) || reported) {
+			t.Fatalf("xray file left behind (%v) or failure reported: %q", statErr, errb.String())
+		}
+		if removalFails && !reported {
+			t.Fatalf("failed removal not reported: %q", errb.String())
 		}
 	}
-	noRecord := func() (*session.CurrentSession, string, error) { return nil, "none", nil }
-	stopFails := func() (*session.CurrentSession, string, error) { return nil, "", errors.New("replacement still alive") }
-	running := func(session.CurrentSession) (bool, int, error) { return true, 9999, nil }
+}
+
+// Claim: after the replacement start fails, reconnect starts the previous session again only when
+// nothing of the replacement can still run: the start error carries session.ErrNothingStarted, or
+// the replacement it returned (main process and sidecars) is confirmed gone, at once or after a stop
+// through its own record or its own handle. A start with no session and no marker (a lost helper
+// reply), a replacement still running or of unknown state after the stop, and a current record of
+// another session all block the restore; another session's record is never stopped or written.
+// A replacement that cannot be stopped is recorded only when no record exists, and the operator is
+// pointed to `vless-tun stop`. Limit: every session operation is a fake here; the session package
+// tests cover the real marker, SessionStopped, StopIfCurrent, StopReturned and SaveCurrentIfAbsent.
+func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
+	replacement := session.CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper}
+	lostReply := errors.New("vpn core singbox.start: unexpected EOF")
+	type outcome struct {
+		stopped bool
+		err     error
+	}
+	gone, running, unknown := outcome{true, nil}, outcome{false, nil}, outcome{false, errors.New("lookup denied")}
+	noRecord := func(string) (session.CurrentSession, error) { return session.CurrentSession{}, os.ErrNotExist }
+	ownRecord := func(string) (session.CurrentSession, error) { return replacement, nil }
+	otherRecord := func(string) (session.CurrentSession, error) {
+		return session.CurrentSession{ID: "other", PID: 7777}, nil
+	}
 	cases := []struct {
 		name       string
-		stops      []func() (*session.CurrentSession, string, error) // reconcile stops, in order
-		alive      func(session.CurrentSession) (bool, int, error)
+		returned   session.CurrentSession
+		startErr   error
+		checks     []outcome // SessionStopped results, in order
+		record     func(string) (session.CurrentSession, error)
+		stopErr    error // from the record stop or the handle stop
 		saveErr    error
 		wantEvents string
-		wantAlive  int
 		wantSaves  int
 		wantErr    string
 	}{
-		{name: "record of the replacement stopped", stops: []func() (*session.CurrentSession, string, error){stopNamed("replacement")},
-			wantEvents: "stop,start,stop,start"},
-		{name: "no record, replacement confirmed not running", stops: []func() (*session.CurrentSession, string, error){noRecord},
-			alive: func(session.CurrentSession) (bool, int, error) { return false, 9999, nil }, wantAlive: 1,
-			wantEvents: "stop,start,stop,start"},
-		{name: "no record, running, recorded and stopped", stops: []func() (*session.CurrentSession, string, error){noRecord, stopNamed("replacement")},
-			alive: running, wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop,stop,start"},
-		{name: "stop fails", stops: []func() (*session.CurrentSession, string, error){stopFails},
-			wantEvents: "stop,start,stop", wantErr: "replacement still alive"},
-		{name: "no record, running, record write fails", stops: []func() (*session.CurrentSession, string, error){noRecord},
-			alive: running, saveErr: errors.New("disk full"), wantAlive: 1, wantSaves: 1,
-			wantEvents: "stop,start,stop", wantErr: "saving its record failed"},
-		{name: "no record, running, recorded, second stop fails", stops: []func() (*session.CurrentSession, string, error){noRecord, stopFails},
-			alive: running, wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop,stop", wantErr: "vless-tun stop"},
-		{name: "no record, running, recorded, second stop names another session", stops: []func() (*session.CurrentSession, string, error){noRecord, stopNamed("other")},
-			alive: running, wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop,stop", wantErr: "the stop did not name it"},
-		{name: "no record, liveness unknown, record write fails", stops: []func() (*session.CurrentSession, string, error){noRecord},
-			alive: func(session.CurrentSession) (bool, int, error) { return false, 9999, errors.New("ps failed") }, saveErr: errors.New("disk full"),
-			wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop", wantErr: "liveness is unknown"},
-		{name: "record of another session stopped, replacement running, record write fails", stops: []func() (*session.CurrentSession, string, error){stopNamed("other")},
-			alive: running, saveErr: errors.New("disk full"), wantAlive: 1, wantSaves: 1,
-			wantEvents: "stop,start,stop", wantErr: "still running without a saved record"},
+		{name: "nothing started (helper refusal)", startErr: refusedStart{errors.New("refused")}, wantEvents: "stop,start,start"},
+		{name: "B1 no session, no marker (lost helper reply)", startErr: lostReply,
+			wantEvents: "stop,start", wantErr: "unknown"},
+		{name: "returned replacement already gone", returned: replacement, startErr: errors.New("exited"), checks: []outcome{gone},
+			wantEvents: "stop,start,start"},
+		{name: "own record stopped, then gone", returned: replacement, startErr: errors.New("liveness unknown"), checks: []outcome{unknown, gone},
+			record: ownRecord, wantEvents: "stop,start,stop-record,start"},
+		{name: "B2 sidecar still alive after the stop", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running, running},
+			record: noRecord, wantEvents: "stop,start,stop-handle", wantErr: "still running after the stop"},
+		{name: "B2 state unknown after the stop", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running, unknown},
+			record: noRecord, wantEvents: "stop,start,stop-handle", wantErr: "is unknown"},
+		{name: "B3 another session's record is left alone", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
+			record: otherRecord, wantEvents: "stop,start", wantErr: "left alone"},
+		{name: "B4 no record, stopped through its own handle", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running, gone},
+			record: noRecord, wantEvents: "stop,start,stop-handle,start"},
+		{name: "B4 handle stop fails, recorded for vless-tun stop", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
+			record: noRecord, stopErr: errors.New("helper refused the signal"), wantSaves: 1,
+			wantEvents: "stop,start,stop-handle", wantErr: "it is now recorded, stop it with `vless-tun stop`"},
+		{name: "B4 handle stop and record write fail", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
+			record: noRecord, stopErr: errors.New("helper refused the signal"), saveErr: errors.New("disk full"), wantSaves: 1,
+			wantEvents: "stop,start,stop-handle", wantErr: "could not be stopped (helper refused the signal)"},
+		{name: "own record, its stop fails", returned: replacement, startErr: errors.New("liveness unknown"), checks: []outcome{unknown},
+			record: ownRecord, stopErr: errors.New("timeout"), wantEvents: "stop,start,stop-record", wantErr: "it is recorded, stop it with `vless-tun stop`"},
 	}
-	guardAlive, guardSave := sessionAliveFunc, saveCurrentFunc
-	t.Cleanup(func() { sessionAliveFunc, saveCurrentFunc = guardAlive, guardSave })
+	guards := []any{sessionStoppedFunc, loadCurrentFunc, stopCurrentIfFunc, stopReturnedFunc, saveCurrentIfAbsentFunc}
+	t.Cleanup(func() {
+		sessionStoppedFunc = guards[0].(func(session.CurrentSession) (bool, error))
+		loadCurrentFunc = guards[1].(func(string) (session.CurrentSession, error))
+		stopCurrentIfFunc = guards[2].(func(string, string, config.PrivilegedLaunchConfig, bool, time.Duration) (session.CurrentSession, string, error))
+		stopReturnedFunc = guards[3].(func(session.CurrentSession) error)
+		saveCurrentIfAbsentFunc = guards[4].(func(string, session.CurrentSession) error)
+	})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &helperReconnect{startErrs: []error{errors.New("liveness unknown")}}
+			h := &helperReconnect{}
 			path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
-			fixtureStart, fixtureStop := startSessionFunc, stopCurrentSessionFunc
+			fixtureStart := startSessionFunc
+			starts := 0
 			startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
-				s, err := fixtureStart(cacheDir, configPath, profile, options)
-				if err != nil {
-					return replacement, err
+				starts++
+				if starts == 1 {
+					h.events = append(h.events, "start")
+					return tc.returned, tc.startErr
 				}
-				return s, nil
+				return fixtureStart(cacheDir, configPath, profile, options)
 			}
-			stops := 0
-			stopCurrentSessionFunc = func(c string, l config.PrivilegedLaunchConfig, f bool, d time.Duration) (*session.CurrentSession, string, error) {
-				stops++
-				if stops == 1 {
-					return fixtureStop(c, l, f, d)
+			checks := 0
+			sessionStoppedFunc = func(c session.CurrentSession) (bool, error) {
+				if c.ID != replacement.ID || checks >= len(tc.checks) {
+					t.Fatalf("unexpected stopped check %d of %+v", checks+1, c)
 				}
-				h.events = append(h.events, "stop")
-				if stops-2 >= len(tc.stops) {
-					t.Fatalf("unexpected reconcile stop %d", stops-1)
-				}
-				return tc.stops[stops-2]()
+				checks++
+				return tc.checks[checks-1].stopped, tc.checks[checks-1].err
 			}
-			var aliveCalls []session.CurrentSession
-			sessionAliveFunc = func(c session.CurrentSession) (bool, int, error) {
-				aliveCalls = append(aliveCalls, c)
-				if tc.alive == nil {
-					t.Fatal("unexpected liveness check")
+			loadCurrentFunc = func(dir string) (session.CurrentSession, error) {
+				if tc.record == nil {
+					t.Fatal("unexpected record read")
 				}
-				return tc.alive(c)
+				return tc.record(dir)
+			}
+			stopCurrentIfFunc = func(_, id string, _ config.PrivilegedLaunchConfig, _ bool, _ time.Duration) (session.CurrentSession, string, error) {
+				if id != replacement.ID {
+					t.Fatalf("record stop for %q", id)
+				}
+				h.events = append(h.events, "stop-record")
+				return replacement, "stopped", tc.stopErr
+			}
+			stopReturnedFunc = func(c session.CurrentSession) error {
+				if c.ID != replacement.ID || c.Handle != replacement.Handle {
+					t.Fatalf("handle stop of %+v", c)
+				}
+				h.events = append(h.events, "stop-handle")
+				return tc.stopErr
 			}
 			var saved []session.CurrentSession
-			saveCurrentFunc = func(_ string, c session.CurrentSession) error {
+			saveCurrentIfAbsentFunc = func(_ string, c session.CurrentSession) error {
 				saved = append(saved, c)
 				return tc.saveErr
 			}
 			var out, errb bytes.Buffer
 			code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-			startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc, saveCurrentFunc = fixtureStart, fixtureStop, guardAlive, guardSave
+			startSessionFunc = fixtureStart
 			if code != 1 || strings.Join(h.events, ",") != tc.wantEvents {
 				t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 			}
-			if len(aliveCalls) != tc.wantAlive || (tc.wantAlive > 0 && aliveCalls[0].ID != replacement.ID) {
-				t.Fatalf("liveness checks %v, want %d of the replacement", aliveCalls, tc.wantAlive)
+			if checks != len(tc.checks) || len(saved) != tc.wantSaves || (tc.wantSaves > 0 && saved[0].ID != replacement.ID) {
+				t.Fatalf("stopped checks %d/%d, record writes %v", checks, len(tc.checks), saved)
 			}
-			if len(saved) != tc.wantSaves || (tc.wantSaves > 0 && saved[0].ID != replacement.ID) {
-				t.Fatalf("record writes %v, want %d of the replacement", saved, tc.wantSaves)
+			restored := 0
+			for _, e := range strings.Split(tc.wantEvents, ",") {
+				if e == "start" {
+					restored++
+				}
 			}
-			restored := strings.HasSuffix(tc.wantEvents, "stop,start")
-			if mayRun := strings.Contains(errb.String(), "may still be running"); mayRun == restored {
-				t.Fatalf("restored=%v but stderr %q", restored, errb.String())
+			restored-- // the replacement's own start
+			if blocked := strings.Contains(errb.String(), "previous session was not restored"); blocked == (restored == 1) {
+				t.Fatalf("restores=%d but stderr %q", restored, errb.String())
 			}
 			if tc.wantErr != "" && !strings.Contains(errb.String(), tc.wantErr) {
 				t.Fatalf("stderr %q lacks %q", errb.String(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// Claim: when the replacement cannot be stopped and is recorded for the operator, the public
+// `vless-tun stop` then finds exactly that replacement's record, and an existing record of another
+// session written meanwhile is never overwritten (the reconcile leaves it and reports the failure).
+// Limit: the stop itself is a fake that reads the real record file; the helper is not involved.
+func TestReconnectRecordedReplacementIsStoppableAndNeverOverwrites(t *testing.T) {
+	replacement := session.CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper}
+	for _, race := range []bool{false, true} {
+		name := "recorded, then vless-tun stop finds it"
+		if race {
+			name = "another record appears before the write"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := &helperReconnect{}
+			path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
+			fixtureStart, fixtureStop := startSessionFunc, stopCurrentSessionFunc
+			guardStopped, guardLoad, guardReturned, guardSave := sessionStoppedFunc, loadCurrentFunc, stopReturnedFunc, saveCurrentIfAbsentFunc
+			t.Cleanup(func() {
+				sessionStoppedFunc, loadCurrentFunc, stopReturnedFunc, saveCurrentIfAbsentFunc = guardStopped, guardLoad, guardReturned, guardSave
+			})
+			startSessionFunc = func(string, string, model.Profile, session.StartOptions) (session.CurrentSession, error) {
+				return replacement, errors.New("exited")
+			}
+			sessionStoppedFunc = func(session.CurrentSession) (bool, error) { return false, nil }
+			loadCurrentFunc = session.LoadCurrent
+			saveCurrentIfAbsentFunc = session.SaveCurrentIfAbsent
+			var cache string
+			var before []byte
+			stopReturnedFunc = func(session.CurrentSession) error {
+				if race {
+					// Another session starts and records itself between the record read and the write.
+					if err := session.SaveCurrent(cache, session.CurrentSession{ID: "other", PID: 7777}); err != nil {
+						t.Fatal(err)
+					}
+					before, _ = os.ReadFile(session.CurrentPath(cache))
+				}
+				return errors.New("helper refused the signal")
+			}
+			stopCurrentSessionFunc = func(dir string, l config.PrivilegedLaunchConfig, f bool, d time.Duration) (*session.CurrentSession, string, error) {
+				if cache == "" {
+					cache = dir // the first stop is reconnect's own stop of the running session
+					return fixtureStop(dir, l, f, d)
+				}
+				rec, err := session.LoadCurrent(dir)
+				if err != nil {
+					return nil, "", err
+				}
+				return &rec, "stopped", nil
+			}
+			var out, errb bytes.Buffer
+			if code := New(&out, &errb).Run([]string{"reconnect", "--config", path}); code != 1 || !strings.Contains(errb.String(), "previous session was not restored") {
+				t.Fatalf("reconnect exit %d stderr %q", code, errb.String())
+			}
+			startSessionFunc = fixtureStart
+			if race {
+				if after, _ := os.ReadFile(session.CurrentPath(cache)); !bytes.Equal(before, after) || strings.Contains(errb.String(), "now recorded") {
+					t.Fatalf("another session's record changed or claimed recorded: %s / %q", after, errb.String())
+				}
+				return
+			}
+			if !strings.Contains(errb.String(), "vless-tun stop") {
+				t.Fatalf("no operator step in %q", errb.String())
+			}
+			out.Reset()
+			if code := New(&out, &errb).Run([]string{"stop", "--config", path}); code != 0 || !strings.Contains(out.String(), "replacement") {
+				t.Fatalf("vless-tun stop exit %d out %q err %q", code, out.String(), errb.String())
 			}
 		})
 	}

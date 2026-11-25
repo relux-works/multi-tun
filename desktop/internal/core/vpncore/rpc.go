@@ -128,10 +128,19 @@ func callWithTimeoutAndLog(cfg ServiceConfig, request Request, timeout time.Dura
 		return Response{}, err
 	}
 	if !response.OK {
-		return response, errors.New(response.Error)
+		return response, &RefusedError{Message: response.Error}
 	}
 	return response, nil
 }
+
+// RefusedError is the helper's own error reply. Receiving one proves the helper answered: for a
+// start request it has already stopped and dropped any child it began. A transport or decode error
+// proves nothing of the kind, because the helper may have started the child and lost the reply.
+type RefusedError struct {
+	Message string
+}
+
+func (e *RefusedError) Error() string { return e.Message }
 
 // RPCTimeoutError preserves the network timeout while attaching a redacted
 // helper status sampled through the existing ping request.
