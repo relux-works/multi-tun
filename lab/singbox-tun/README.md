@@ -35,10 +35,18 @@ rm -f "$R/dl/$F"                      # never reuse an old download; the image b
 curl -sSLf -o "$R/dl/$F" "https://github.com/SagerNet/sing-box/releases/download/v1.13.3/$F"
 
 # Own Colima profile; mount only the output folder, no inotify forwarding, no context switch.
-# Stop it first: a running VM keeps the mounts it was started with.
-colima stop --profile multi-tun >/dev/null 2>&1 || true
+# A running VM keeps the mounts it was started with, so stop it first. A failed stop ends the run,
+# and the run goes on only when the profile is confirmed stopped and, after the start, the VM reads
+# this run's output folder.
+if colima status --profile multi-tun >/dev/null 2>&1; then colima stop --profile multi-tun; fi
+if colima status --profile multi-tun >/dev/null 2>&1; then echo 'Colima profile multi-tun is still running' >&2; exit 1; fi
 colima start --profile multi-tun --activate=false --mount-inotify=false \
   --mount "$R/out:w" --cpus 4 --memory 4
+# Prove the live mount: the VM must read back a fresh value written on the host. A plain directory
+# test is not enough, because docker creates a missing bind path on the VM's own disk.
+N="mount-check-$(date -u +%Y%m%dT%H%M%SZ)-$$"; echo "$N" > "$R/out/.mount-check"
+[ "$(colima ssh --profile multi-tun -- cat "$R/out/.mount-check")" = "$N" ] \
+  || { echo 'the VM does not see the output folder of this run' >&2; exit 1; }
 export DOCKER_CONTEXT=colima-multi-tun
 IMG="sblab:run-$(date -u +%Y%m%dT%H%M%SZ)"   # unique per run, so a failed build cannot reuse an old image
 docker build -t "$IMG" .                     # builds labserver and labclient inside the image
