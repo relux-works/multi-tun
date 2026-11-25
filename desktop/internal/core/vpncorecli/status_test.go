@@ -2,11 +2,49 @@ package vpncorecli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
 	"multi-tun/desktop/internal/core/vpncore"
 )
+
+func TestStatusMaintenanceCapability(t *testing.T) {
+	// Status distinguishes advertised support, legacy omission and absence; RPC errors never produce a capability verdict.
+	previousInspect, previousDrift := inspectServiceVPNCoreCLI, toolDriftVPNCoreCLI
+	t.Cleanup(func() { inspectServiceVPNCoreCLI = previousInspect; toolDriftVPNCoreCLI = previousDrift })
+	toolDriftVPNCoreCLI = func(vpncore.ServiceConfig) ([]string, error) { return nil, nil }
+	for _, tc := range []struct {
+		name   string
+		status vpncore.ServiceStatus
+		err    error
+		want   string
+	}{
+		{"inactive", vpncore.ServiceStatus{Reachable: true, MaintenanceDrain: &vpncore.MaintenanceDrainState{}}, nil, "maintenance_drain: supported\nmaintenance_active: false\n"},
+		{"active", vpncore.ServiceStatus{Reachable: true, MaintenanceDrain: &vpncore.MaintenanceDrainState{Active: true, ExpiresAt: "PRIVATE_EXPIRY"}}, nil, "maintenance_drain: supported\nmaintenance_active: true\n"},
+		{"legacy", vpncore.ServiceStatus{Reachable: true}, nil, "maintenance_drain: unadvertised\n"},
+		{"missing", vpncore.ServiceStatus{}, nil, "maintenance_drain: unknown\n"},
+		{"refused", vpncore.ServiceStatus{Reachable: true}, errors.New("peer uid refused"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inspectServiceVPNCoreCLI = func(vpncore.ServiceConfig) (vpncore.ServiceStatus, error) { return tc.status, tc.err }
+			var stdout, stderr bytes.Buffer
+			code := New(&stdout, &stderr).Run([]string{"status"})
+			if tc.err != nil {
+				if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "peer uid refused") {
+					t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				return
+			}
+			if code != 0 || !strings.Contains(stdout.String(), tc.want) {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Count(stdout.String(), "maintenance_drain:") != 1 || strings.Contains(stdout.String(), "PRIVATE_EXPIRY") || (tc.status.MaintenanceDrain == nil && strings.Contains(stdout.String(), "maintenance_active:")) {
+				t.Fatalf("ambiguous or excess status: %q", stdout.String())
+			}
+		})
+	}
+}
 
 func TestStatusPrintsRedactedRequestSnapshot(t *testing.T) {
 	previous := inspectServiceVPNCoreCLI

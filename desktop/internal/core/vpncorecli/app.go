@@ -260,6 +260,12 @@ func (a *App) runStatus(args []string) int {
 	if status.Reachable {
 		fmt.Fprintln(a.stdout, "state: reachable")
 		fmt.Fprintf(a.stdout, "daemon_pid: %d\n", status.DaemonPID)
+		if status.MaintenanceDrain == nil {
+			fmt.Fprintln(a.stdout, "maintenance_drain: unadvertised")
+		} else {
+			fmt.Fprintln(a.stdout, "maintenance_drain: supported")
+			fmt.Fprintf(a.stdout, "maintenance_active: %t\n", status.MaintenanceDrain.Active)
+		}
 		if status.HelperSnapshot != nil {
 			fmt.Fprintf(a.stdout, "active_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.ActiveRequests))
 			fmt.Fprintf(a.stdout, "queued_requests: %s\n", vpncore.FormatRequestSnapshots(status.HelperSnapshot.QueuedRequests))
@@ -269,6 +275,7 @@ func (a *App) runStatus(args []string) int {
 		}
 	} else {
 		fmt.Fprintln(a.stdout, "state: missing")
+		fmt.Fprintln(a.stdout, "maintenance_drain: unknown")
 	}
 	drift, err := toolDriftVPNCoreCLI(vpncore.DefaultServiceConfig())
 	if err != nil {

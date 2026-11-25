@@ -25,13 +25,14 @@ type ServiceConfig struct {
 }
 
 type ServiceStatus struct {
-	Label          string
-	PlistPath      string
-	SocketPath     string
-	Reachable      bool
-	DaemonPID      int
-	Compatibility  string
-	HelperSnapshot *HelperSnapshot
+	Label            string
+	PlistPath        string
+	SocketPath       string
+	Reachable        bool
+	DaemonPID        int
+	Compatibility    string
+	HelperSnapshot   *HelperSnapshot
+	MaintenanceDrain *MaintenanceDrainState
 }
 
 // RequestSnapshot is deliberately limited to non-sensitive request metadata.

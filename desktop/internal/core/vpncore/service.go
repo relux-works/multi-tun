@@ -100,6 +100,7 @@ func inspectExactServiceWithTimeout(cfg ServiceConfig, timeout time.Duration) (S
 	status.Reachable = resp.OK
 	status.DaemonPID = resp.DaemonPID
 	status.HelperSnapshot = resp.HelperSnapshot
+	status.MaintenanceDrain = resp.MaintenanceDrain
 	return status, nil
 }
 
