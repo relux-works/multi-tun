@@ -19,27 +19,29 @@ What it measures:
 | `Dockerfile` | yes | Alpine image with sing-box (release tarball verified by SHA-256) and the lab binaries |
 | `singbox-{system,gvisor,mixed}.json` | yes | TUN configs that differ only in `stack` |
 | `cmd/labserver`, `cmd/labclient`, `pattern/` | yes | Go server, client and stream pattern (with tests) |
-| `.runtime/` | no (`.gitignore`) | built binaries, downloaded tarball, VM mount, run output |
+| `.runtime/` | no (`.gitignore`) | downloaded tarball, VM mount, run output (lab binaries are built inside the image) |
 
 ## Run
 
 ```bash
+# Every host step fails the whole block, from the first line on: a failed download, image build,
+# cleanup or server start stops before any client runs.
+set -euo pipefail
 cd lab/singbox-tun
 R=$PWD/.runtime
-mkdir -p "$R/bin" "$R/dl" "$R/out"
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o "$R/bin/labserver" ./cmd/labserver
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o "$R/bin/labclient" ./cmd/labclient
+mkdir -p "$R/dl" "$R/out"
 F=sing-box-1.13.3-linux-arm64-musl.tar.gz
+rm -f "$R/dl/$F"                      # never reuse an old download; the image build checks its sha256
 curl -sSLf -o "$R/dl/$F" "https://github.com/SagerNet/sing-box/releases/download/v1.13.3/$F"
 
-# Every host step fails the whole block: no stale image, server or network can carry a run.
-set -euo pipefail
 # Own Colima profile; mount only the output folder, no inotify forwarding, no context switch.
+# Stop it first: a running VM keeps the mounts it was started with.
+colima stop --profile multi-tun >/dev/null 2>&1 || true
 colima start --profile multi-tun --activate=false --mount-inotify=false \
   --mount "$R/out:w" --cpus 4 --memory 4
 export DOCKER_CONTEXT=colima-multi-tun
 IMG="sblab:run-$(date -u +%Y%m%dT%H%M%SZ)"   # unique per run, so a failed build cannot reuse an old image
-docker build -t "$IMG" .
+docker build -t "$IMG" .                     # builds labserver and labclient inside the image
 # Remove any earlier server and network, then prove they are gone.
 docker rm -f sblab-srv >/dev/null 2>&1 || true
 docker network rm sblab >/dev/null 2>&1 || true
@@ -49,12 +51,16 @@ docker network create --subnet 10.77.0.0/24 sblab
 docker run -d --name sblab-srv --network sblab --ip 10.77.0.10 --cap-add NET_ADMIN \
   -v "$R/out:/out" "$IMG" \
   sh -ec 'ip addr add 203.0.113.10/32 dev lo; exec labserver --ca-out /out/ca.pem'
+# The client starts only once the server reports both listeners ready.
+for i in $(seq 1 20); do docker logs sblab-srv 2>&1 | grep -q 'labserver ready' && break; sleep 0.5; done
+docker logs sblab-srv 2>&1 | grep -q 'labserver ready'
 
 STACK=system   # or gvisor, mixed
 # Every client step fails the run: a config sing-box rejects, sing-box exiting, a missing tun0, a bench
 # route that does not use tun0, or sing-box dying during the run. The client summary is held back and
 # printed only after the final liveness and route checks, so a printed summary always comes from a valid
-# environment; the exit status is then labclient's own (1 when a stream failed, which is a result).
+# environment. The exit status is then labclient's own: a run PASSES only with exit 0 and zero failed
+# streams; exit 1 with a summary is a FAIL observation of the stack under test, not a bench error.
 docker run --rm --network sblab --privileged --device /dev/net/tun -v "$R/out:/out" "$IMG" sh -ec "
   sing-box check -c /etc/lab/singbox-$STACK.json
   sing-box run -c /etc/lab/singbox-$STACK.json > /out/singbox-$STACK.log 2>&1 & SB=\$!

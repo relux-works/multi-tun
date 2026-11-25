@@ -1,2 +1,3 @@
 .runtime/out/
 .runtime/colima-backup/
+.runtime/bin/
