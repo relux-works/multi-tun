@@ -50,6 +50,7 @@ type stopSessionResult struct {
 
 var stopCurrentSessionFunc = stopCurrentSession
 var startSessionFunc = session.Start
+var sessionAliveFunc = session.SessionAlive
 var lookPathFunc = exec.LookPath
 var profileProbeDialContext = (&net.Dialer{}).DialContext
 var currentSessionStateForSelection = currentSessionState
@@ -447,7 +448,7 @@ func (a *App) runReconnect(args []string) int {
 		// example when its liveness is unknown). Stop whatever it left before
 		// bringing the previous session back; if that cannot be confirmed, do not
 		// start a second session.
-		if _, _, serr := stopCurrentSessionFunc(cfg.CacheDir, launch, true, *timeout); serr != nil {
+		if serr := stopFailedReplacement(cfg.CacheDir, launch, started, *timeout); serr != nil {
 			fmt.Fprintf(a.stderr, "the replacement may still be running (%v); the previous session was not restored; inspect with `vless-tun status`\n", serr)
 			return 1
 		}
@@ -849,6 +850,34 @@ func effectiveStartRefresh(cfg config.ProjectConfig, options startOptions) bool 
 		return options.refresh
 	}
 	return true
+}
+
+// stopFailedReplacement stops what a failed start left behind and confirms that the replacement
+// session it returned, if any, is gone. A clean stop of the current record proves that only when
+// the record is that replacement: when the start could not save its record, the stop finds no
+// session and reports success, so the returned replacement is then checked directly and must be
+// confirmed not running. Anything else, including unknown liveness, is an error, and the caller
+// must not start the previous session next to a possibly live replacement.
+func stopFailedReplacement(cacheDir string, launch config.PrivilegedLaunchConfig, replacement session.CurrentSession, timeout time.Duration) error {
+	stopped, _, err := stopCurrentSessionFunc(cacheDir, launch, true, timeout)
+	if err != nil {
+		return err
+	}
+	if replacement.ID == "" && replacement.PID == 0 {
+		// The start returned no session: it stopped its own process before failing.
+		return nil
+	}
+	if stopped != nil && stopped.ID == replacement.ID {
+		return nil
+	}
+	alive, pid, err := sessionAliveFunc(replacement)
+	if err != nil {
+		return fmt.Errorf("replacement session %s (pid %d) has no saved record and its liveness is unknown: %w", replacement.ID, replacement.PID, err)
+	}
+	if alive {
+		return fmt.Errorf("replacement session %s (pid %d) is still running without a saved record", replacement.ID, pid)
+	}
+	return nil
 }
 
 func stopCurrentSession(cacheDir string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (*session.CurrentSession, string, error) {
