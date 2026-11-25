@@ -634,24 +634,25 @@ func (f *fightingPF) run(args []string, stdin string) ([]byte, error) {
 	return f.statefulPF.run(args, stdin)
 }
 
-// Claim: when another party keeps undoing the block, detection stays at the base interval (the
-// contract's bound) instead of backing off, and status reports the streak.
+// Claim: every supplied tick still checks and recovers through a persistent
+// fight, and status reports the base interval. Controlled ticks avoid relying
+// on filesystem speed or scheduler punctuality; they do not measure either.
 func TestFailClosedWatchKeepsBoundUnderFight(t *testing.T) {
 	p := &fightingPF{}
 	m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: time.Now}
-	_ = m.Apply(goodReq)
+	if err := m.Apply(goodReq); err != nil {
+		t.Fatal(err)
+	}
 	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() { m.watch(10*time.Millisecond, stop, func(string, ...any) {}); close(done) }()
-	time.Sleep(300 * time.Millisecond)
-	m.mu.Lock()
+	ticks := make(chan time.Time, 16)
+	for i := 0; i < cap(ticks); i++ {
+		ticks <- time.Time{}
+	}
+	close(ticks)
+	m.watchTicks(10*time.Millisecond, ticks, stop, func(string, ...any) {})
 	note := m.backoffNote
 	calls := p.infoChecks
-	m.mu.Unlock()
-	close(stop)
-	<-done
-	// 300 ms at a 10 ms bound gives about 30 checks; a backoff would give a handful.
-	if calls < 15 || !strings.Contains(note, "recoveries in a row") || !strings.Contains(note, "10ms") {
+	if calls != 16 || !strings.Contains(note, "16 recoveries in a row") || !strings.Contains(note, "10ms") {
 		t.Fatalf("checks=%d note=%q", calls, note)
 	}
 }

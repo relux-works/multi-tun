@@ -594,14 +594,21 @@ func (m *failClosedManager) Check() (string, error) {
 // 5 s); only the log is thinned after three recoveries in a row, and status
 // reports the streak.
 func (m *failClosedManager) watch(interval time.Duration, stop <-chan struct{}, logf func(string, ...any)) {
-	streak := 0
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	m.watchTicks(interval, ticker.C, stop, logf)
+}
+
+func (m *failClosedManager) watchTicks(interval time.Duration, ticks <-chan time.Time, stop <-chan struct{}, logf func(string, ...any)) {
+	streak := 0
 	for {
 		select {
 		case <-stop:
 			return
-		case <-ticker.C:
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
 		}
 		finding, err := m.Check()
 		switch {
