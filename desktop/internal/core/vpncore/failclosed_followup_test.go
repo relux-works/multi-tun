@@ -60,6 +60,26 @@ type failClosedOwnershipInfo struct {
 	stat syscall.Stat_t
 }
 
+// A link followed by .. must not disappear during lexical cleaning before the
+// filesystem checks. The equivalent clean spelling is a valid positive control.
+func TestFailClosedRefusesUncleanStatePath(t *testing.T) {
+	root := resolvedTempDir(t)
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	path := root + "/link/../state.json"
+	if err := checkStatePath(path); err == nil || !strings.Contains(err.Error(), "not clean") {
+		t.Fatalf("unclean link traversal = %v", err)
+	}
+	if err := checkStatePath(filepath.Clean(path)); err != nil {
+		t.Fatalf("clean control refused: %v", err)
+	}
+}
+
 func (info failClosedOwnershipInfo) Sys() any { return &info.stat }
 
 // Synthetic stat ownership checks each depth without chown or root privileges.

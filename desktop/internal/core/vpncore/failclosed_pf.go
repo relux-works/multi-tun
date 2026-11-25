@@ -161,6 +161,11 @@ func checkStatePath(path string) error {
 }
 
 func checkStatePathWithLstat(path string, lstat func(string) (os.FileInfo, error)) error {
+	// Cleaning a link/../ component before Lstat would check a different path
+	// from the one ReadFile or MkdirAll traverses. Require one lexical spelling.
+	if filepath.Clean(path) != path {
+		return fmt.Errorf("fail-closed state path %s is not clean", path)
+	}
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return err
