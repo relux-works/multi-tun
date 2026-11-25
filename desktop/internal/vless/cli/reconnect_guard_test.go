@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/singbox"
 )
 
 // errLiveLaunchModeProbe marks a test that reached the real launch-mode resolver, whose auto mode
@@ -16,4 +17,6 @@ func init() {
 		return "", errLiveLaunchModeProbe
 	}
 	validateHelperConfigCLI = func([]byte) error { return errors.New("test reached the default helper validator") }
+	// The default reads the work VPN's overlay DNS from the host; tests get a fixed empty result.
+	resolveRenderOptionsCLI = func(string) singbox.RenderOptions { return singbox.RenderOptions{} }
 }

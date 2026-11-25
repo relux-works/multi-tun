@@ -129,7 +129,7 @@ func TestReconnectRestoresPreviousSessionAfterRefusedStart(t *testing.T) {
 	path, target := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
 	var out, errb bytes.Buffer
 	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-	if code != 1 || strings.Join(h.events, ",") != "stop,start,start" {
+	if code != 1 || strings.Join(h.events, ",") != "stop,start,stop,start" {
 		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 	if h.starts[1] != target || !strings.Contains(errb.String(), "previous session restored as s2") {
@@ -147,7 +147,7 @@ func TestReconnectDoesNotGuessRestoreForSidecarSession(t *testing.T) {
 	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
 	var out, errb bytes.Buffer
 	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-	if code != 1 || strings.Join(h.events, ",") != "stop,start" || !strings.Contains(errb.String(), "could not be restored automatically") {
+	if code != 1 || strings.Join(h.events, ",") != "stop,start,stop" || !strings.Contains(errb.String(), "could not be restored automatically") {
 		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 }
@@ -158,7 +158,7 @@ func TestReconnectReportsFailedRestore(t *testing.T) {
 	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
 	var out, errb bytes.Buffer
 	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-	if code != 1 || strings.Join(h.events, ",") != "stop,start,start" || !strings.Contains(errb.String(), "restore of the previous session failed") {
+	if code != 1 || strings.Join(h.events, ",") != "stop,start,stop,start" || !strings.Contains(errb.String(), "restore of the previous session failed") {
 		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 	}
 }
@@ -221,7 +221,10 @@ func TestReconnectRestoreUsesStoppedSessionContext(t *testing.T) {
 		t.Fatalf("exit %d starts %d: %s", code, len(h.startOpts), errb.String())
 	}
 	replacement, got := h.startOpts[0], h.startOpts[1]
-	if strings.Join(replacement.TunAddresses, ",") == "172.20.9.1/30" || strings.Join(replacement.SystemDNSServers, ",") == "9.9.9.9" {
+	// The replacement's overlay DNS is pinned empty by the package guard's render-options seam, so the
+	// flag and the domains differ from the stopped record's.
+	if strings.Join(replacement.TunAddresses, ",") == "172.20.9.1/30" || strings.Join(replacement.SystemDNSServers, ",") == "9.9.9.9" ||
+		replacement.OverlayDNSActive || len(replacement.OverlayDNSDomains) != 0 {
 		t.Fatalf("fixture: replacement must differ from the stopped record: %+v", replacement)
 	}
 	if got.PrivilegedLaunch.Mode != config.LaunchModeSudo || got.InterfaceName != "utun9" || got.Mode != "tun" ||
@@ -352,5 +355,90 @@ func TestRestorePreviousSessionRefusesMultipleSessions(t *testing.T) {
 	a.restorePreviousSession(config.Default(), []stopSessionResult{{stopped: rec}, {stopped: rec}}, "/x", []byte("{}"), true)
 	if starts != 0 || !strings.Contains(errb.String(), "could not be restored automatically") {
 		t.Fatalf("starts %d stderr %q", starts, errb.String())
+	}
+}
+
+// Claim: every pre-stop refusal (a missing engine executable, or the helper refusing the config)
+// puts both config files a render may touch, the sing-box config and the Xray config, back to their
+// exact previous bytes, and stops nothing.
+func TestReconnectPreStopRefusalRestoresBothConfigFiles(t *testing.T) {
+	for name, tc := range map[string]struct {
+		validator func([]byte) error
+		lookFails bool
+	}{
+		"engine missing": {validator: func([]byte) error { return nil }, lookFails: true},
+		"helper refuses": {validator: refuseStack},
+	} {
+		h := &helperReconnect{}
+		path, target := setupHelperReconnect(t, h, config.LaunchModeHelper, tc.validator)
+		data, _ := os.ReadFile(path)
+		os.WriteFile(path, []byte(strings.Replace(string(data), `"engine": {"type": "sing-box"}`, `"engine": {"type": "xray", "xray": {"socks_listen": "127.0.0.1", "socks_port": 21808}}`, 1)), 0o600)
+		cfg, _, err := loadEffectiveConfig(path, config.SelectionOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		xrayPath := cfg.XrayConfigPath()
+		if xrayPath == "" || xrayPath == target {
+			t.Fatalf("%s: fixture xray path %q", name, xrayPath)
+		}
+		os.WriteFile(xrayPath, []byte(`{"previous-xray":true}`), 0o600)
+		if tc.lookFails {
+			prev := lookPathFunc
+			lookPathFunc = func(file string) (string, error) { return "", errors.New("not found: " + file) }
+			t.Cleanup(func() { lookPathFunc = prev })
+		}
+		var out, errb bytes.Buffer
+		code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
+		if tc.lookFails {
+			lookPathFunc = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		}
+		if code != 1 || len(h.events) != 0 {
+			t.Fatalf("%s: exit %d events %v stderr %q", name, code, h.events, errb.String())
+		}
+		if got, _ := os.ReadFile(target); string(got) != `{"previous":true}` {
+			t.Fatalf("%s: sing-box config not restored: %s", name, got)
+		}
+		if got, _ := os.ReadFile(xrayPath); string(got) != `{"previous-xray":true}` {
+			t.Fatalf("%s: xray config not restored: %s", name, got)
+		}
+	}
+}
+
+// Claim: when the replacement start returns a session together with an error (liveness unknown, a
+// persisted record), reconnect stops what the replacement left before restoring the previous session;
+// if that stop fails, it does not start a second session and says the replacement may be running.
+func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
+	h := &helperReconnect{startErrs: []error{errors.New("liveness unknown")}}
+	path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
+	prevStart := startSessionFunc
+	startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
+		s, err := prevStart(cacheDir, configPath, profile, options)
+		if err != nil {
+			return session.CurrentSession{ID: "replacement", PID: 9999}, err
+		}
+		return s, nil
+	}
+	t.Cleanup(func() { startSessionFunc = prevStart })
+	var out, errb bytes.Buffer
+	if code := New(&out, &errb).Run([]string{"reconnect", "--config", path}); code != 1 || strings.Join(h.events, ",") != "stop,start,stop,start" {
+		t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
+	}
+
+	h2 := &helperReconnect{startErrs: []error{errors.New("liveness unknown")}}
+	path2, _ := setupHelperReconnect(t, h2, config.LaunchModeHelper, func([]byte) error { return nil })
+	stops := 0
+	prevStop := stopCurrentSessionFunc
+	stopCurrentSessionFunc = func(c string, l config.PrivilegedLaunchConfig, f bool, d time.Duration) (*session.CurrentSession, string, error) {
+		stops++
+		if stops == 2 {
+			h2.events = append(h2.events, "stop")
+			return nil, "", errors.New("replacement still alive")
+		}
+		return prevStop(c, l, f, d)
+	}
+	t.Cleanup(func() { stopCurrentSessionFunc = prevStop })
+	errb.Reset()
+	if code := New(&out, &errb).Run([]string{"reconnect", "--config", path2}); code != 1 || strings.Join(h2.events, ",") != "stop,start,stop" || !strings.Contains(errb.String(), "may still be running") {
+		t.Fatalf("failed reconcile: exit %d events %v stderr %q", code, h2.events, errb.String())
 	}
 }

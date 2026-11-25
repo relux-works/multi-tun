@@ -218,13 +218,8 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 		BypassSuffixes:      append([]string(nil), options.BypassSuffixes...),
 		Command:             command,
 		LaunchMode:          launchMode,
-
-		StartOptionsRecorded: true,
-		TunAddresses:         append([]string(nil), options.TunAddresses...),
-		OverlayDNSActive:     options.OverlayDNSActive,
-		OverlayDNSDomains:    append([]string(nil), options.OverlayDNSDomains...),
-		SystemDNSServers:     append([]string(nil), options.SystemDNSServers...),
 	}
+	recordStartOptions(&session, options)
 	if launchMode == config.LaunchModeLaunchd {
 		session.LaunchLabel = options.PrivilegedLaunch.Label
 		session.LaunchPlistPath = options.PrivilegedLaunch.PlistPath
@@ -1033,6 +1028,16 @@ func stopStartedSession(current CurrentSession) error {
 		return restoreErr
 	}
 	return nil
+}
+
+// recordStartOptions copies into a session record the start options a later
+// restart needs and that the record does not otherwise keep.
+func recordStartOptions(session *CurrentSession, options StartOptions) {
+	session.StartOptionsRecorded = true
+	session.TunAddresses = append([]string(nil), options.TunAddresses...)
+	session.OverlayDNSActive = options.OverlayDNSActive
+	session.OverlayDNSDomains = append([]string(nil), options.OverlayDNSDomains...)
+	session.SystemDNSServers = append([]string(nil), options.SystemDNSServers...)
 }
 
 // ResolveLaunchMode returns the launch mode a start would use (auto resolves

@@ -90,6 +90,48 @@ func preflightHelperSchema(launchMode string, prepared preparedStart) error {
 	return nil
 }
 
+// fileSnapshot is a config file's state before rendering.
+type fileSnapshot struct {
+	path    string
+	data    []byte
+	existed bool
+}
+
+// snapshotFiles records the current bytes (or absence) of each distinct path.
+// A read failure other than absence is returned: such a file could not be put
+// back after a refused replacement.
+func snapshotFiles(paths ...string) ([]fileSnapshot, error) {
+	seen := map[string]bool{}
+	var out []fileSnapshot
+	for _, p := range paths {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		data, err := readFileCLI(p)
+		switch {
+		case err == nil:
+			out = append(out, fileSnapshot{path: p, data: data, existed: true})
+		case errors.Is(err, os.ErrNotExist):
+			out = append(out, fileSnapshot{path: p})
+		default:
+			return nil, fmt.Errorf("cannot read the current config %s: %w", p, err)
+		}
+	}
+	return out, nil
+}
+
+// restoreFiles puts every snapshotted file back and reports each failure.
+func restoreFiles(snaps []fileSnapshot) error {
+	var errs []error
+	for _, s := range snaps {
+		if err := restoreRenderedTarget(s.path, s.data, s.existed); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", s.path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // restoreRenderedTarget puts the replacement's target back to its state before
 // rendering: the previous bytes, or no file when none existed.
 func restoreRenderedTarget(target string, previous []byte, existed bool) error {
@@ -315,12 +357,21 @@ func (a *App) runReconnect(args []string) int {
 	if *outputPath != "" {
 		previousTarget = *outputPath
 	}
-	previousConfig, previousConfigErr := readFileCLI(previousTarget)
-	previousExisted := previousConfigErr == nil
-	if previousConfigErr != nil && !errors.Is(previousConfigErr, os.ErrNotExist) {
-		// Without the previous bytes a refused replacement could not be undone.
-		fmt.Fprintf(a.stderr, "reconnect failed: cannot read the current config %s: %v\n", previousTarget, previousConfigErr)
+	// Snapshot every config file rendering may overwrite (the sing-box config and
+	// the Xray config), so any refusal before the stop can put them back.
+	snaps, snapErr := snapshotFiles(previousTarget, cfg.XrayConfigPath())
+	if snapErr != nil {
+		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", snapErr)
 		fmt.Fprintln(a.stderr, "running sessions were left untouched")
+		return 1
+	}
+	previousConfig, previousExisted := snaps[0].data, snaps[0].existed
+	refuseBeforeStop := func(err error) int {
+		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		fmt.Fprintln(a.stderr, "running sessions were left untouched")
+		if rerr := restoreFiles(snaps); rerr != nil {
+			fmt.Fprintf(a.stderr, "but restoring the previous config files failed: %v\n", rerr)
+		}
 		return 1
 	}
 	// Resolve the launch mode once; the preflight and the start use the same
@@ -349,24 +400,13 @@ func (a *App) runReconnect(args []string) int {
 		refreshSet:      true,
 	}.withEffectiveSelection(selection))
 	if err != nil {
-		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		fmt.Fprintln(a.stderr, "running sessions were left untouched")
-		return 1
+		return refuseBeforeStop(err)
 	}
 	if err := preflightReplacement(prepared); err != nil {
-		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		fmt.Fprintln(a.stderr, "running sessions were left untouched")
-		return 1
+		return refuseBeforeStop(err)
 	}
 	if err := preflightHelperSchema(launchMode, prepared); err != nil {
-		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		fmt.Fprintln(a.stderr, "running sessions were left untouched")
-		if previousTarget == prepared.target {
-			if rerr := restoreRenderedTarget(previousTarget, previousConfig, previousExisted); rerr != nil {
-				fmt.Fprintf(a.stderr, "but restoring %s to its previous content failed: %v\n", previousTarget, rerr)
-			}
-		}
-		return 1
+		return refuseBeforeStop(err)
 	}
 
 	stoppedSessions, err := stopConfiguredSessions(*configPath, *force, *timeout)
@@ -403,6 +443,14 @@ func (a *App) runReconnect(args []string) int {
 	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, startOpts)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
+		// A failed start can still leave a replacement running or recorded (for
+		// example when its liveness is unknown). Stop whatever it left before
+		// bringing the previous session back; if that cannot be confirmed, do not
+		// start a second session.
+		if _, _, serr := stopCurrentSessionFunc(cfg.CacheDir, launch, true, *timeout); serr != nil {
+			fmt.Fprintf(a.stderr, "the replacement may still be running (%v); the previous session was not restored; inspect with `vless-tun status`\n", serr)
+			return 1
+		}
 		a.restorePreviousSession(cfg, stoppedSessions, previousTarget, previousConfig, previousExisted)
 		return 1
 	}
@@ -558,7 +606,7 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	}
 	profile := resolution.Profile
 
-	renderOptions := resolveRenderOptions(cfg.NetworkMode())
+	renderOptions := resolveRenderOptionsCLI(cfg.NetworkMode())
 	target := cfg.SingboxConfigPath()
 	if options.outputPath != "" {
 		target = options.outputPath

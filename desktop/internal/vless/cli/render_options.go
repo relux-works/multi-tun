@@ -6,6 +6,10 @@ import (
 	"multi-tun/desktop/internal/vless/singbox"
 )
 
+// resolveRenderOptionsCLI reads the work VPN's active overlay DNS from the host;
+// tests replace it.
+var resolveRenderOptionsCLI = resolveRenderOptions
+
 func resolveRenderOptions(mode string) singbox.RenderOptions {
 	if mode != config.RenderModeTun {
 		return singbox.RenderOptions{}
