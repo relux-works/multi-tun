@@ -91,7 +91,7 @@ var singBoxSchemas = map[string]singBoxSchemaNode{
 	"inbound":  {kind: singBoxObject, discriminator: "type", variants: map[string]string{"tun": "inbound_tun"}},
 	"inbound_tun": {kind: singBoxObject, fields: map[string]string{
 		"type": "string", "tag": "string", "interface_name": "string", "address": "strings", "auto_route": "bool",
-		"strict_route": "bool", "mtu": "number", "route_exclude_address": "strings",
+		"strict_route": "bool", "mtu": "number", "route_exclude_address": "strings", "stack": "tun_stack",
 	}},
 	"outbounds": {kind: singBoxArray, element: "outbound"},
 	"outbound": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
@@ -143,6 +143,13 @@ var singBoxSchemas = map[string]singBoxSchemaNode{
 	"string":  {kind: singBoxString},
 	"bool":    {kind: singBoxBool},
 	"number":  {kind: singBoxNumber},
+	"tun_stack": {kind: singBoxString, validate: func(value any) error {
+		switch value.(string) {
+		case "system", "gvisor", "mixed":
+			return nil
+		}
+		return errors.New("must be system, gvisor or mixed")
+	}},
 	"loopback_string": {kind: singBoxString, validate: func(value any) error {
 		address, err := netip.ParseAddr(value.(string))
 		if err != nil || !address.IsLoopback() {

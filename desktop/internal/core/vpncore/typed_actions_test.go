@@ -2,6 +2,7 @@ package vpncore
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -86,8 +87,12 @@ func TestSingBoxConfigValidationAcceptsEveryRendererVariant(t *testing.T) {
 		SocksListen: "127.0.0.1", SocksPort: 21808, ProcessNames: []string{"xray"},
 	}}
 
+	gvisorStack := config.Default()
+	gvisorStack.Network.TUN.Stack = "gvisor"
+
 	cases := map[string]func() ([]byte, error){
 		"vless tcp reality": func() ([]byte, error) { return singbox.Render(config.Default(), realityTCP) },
+		"tun stack gvisor":  func() ([]byte, error) { return singbox.Render(gvisorStack, realityTCP) },
 		"vless grpc tls":    func() ([]byte, error) { return singbox.Render(config.Default(), grpcTLS) },
 		"vless flow":        func() ([]byte, error) { return singbox.Render(config.Default(), withFlow) },
 		"overlay and routes": func() ([]byte, error) {
@@ -285,5 +290,25 @@ func TestSingBoxSchemaRefusesUnrenderedTCPTransport(t *testing.T) {
 	}
 	if _, err := validateSingBoxConfig(base(`{"type":"grpc","service_name":"svc"}`)); err != nil {
 		t.Fatalf("validateSingBoxConfig(grpc transport) error = %v, want accepted", err)
+	}
+}
+
+// Claim: the tun stack key accepts exactly system, gvisor and mixed (any case variant of the key is
+// folded by the case-insensitive walk), and refuses other values and non-string types; the rendered
+// stack is accepted end to end by TestSingBoxConfigValidationAcceptsEveryRendererVariant.
+func TestSingBoxSchemaTunStackValues(t *testing.T) {
+	base := `{"inbounds":[{"type":"tun","tag":"tun-in","stack":%s}]}`
+	for _, v := range []string{`"system"`, `"gvisor"`, `"mixed"`} {
+		if _, err := validateSingBoxConfig([]byte(fmt.Sprintf(base, v))); err != nil {
+			t.Errorf("stack %s refused: %v", v, err)
+		}
+	}
+	for _, v := range []string{`"lwip"`, `"GVISOR"`, `""`, `1`, `true`, `["gvisor"]`} {
+		if _, err := validateSingBoxConfig([]byte(fmt.Sprintf(base, v))); err == nil {
+			t.Errorf("stack %s accepted", v)
+		}
+	}
+	if _, err := validateSingBoxConfig([]byte(`{"outbounds":[{"type":"direct","tag":"direct","stack":"gvisor"}]}`)); err == nil {
+		t.Error("stack accepted on an outbound")
 	}
 }
