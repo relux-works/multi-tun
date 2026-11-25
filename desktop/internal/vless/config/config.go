@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"multi-tun/desktop/internal/core/failclosed"
@@ -150,7 +151,13 @@ type NetworkConfig struct {
 type TUNConfig struct {
 	InterfaceName string   `json:"interface_name,omitempty"`
 	Addresses     []string `json:"addresses,omitempty"`
+	// Stack selects the sing-box TUN stack: "system", "gvisor" or "mixed".
+	// Empty keeps sing-box's own default (mixed when built with gVisor).
+	Stack string `json:"stack,omitempty"`
 }
+
+// TunStacks lists the accepted network.tun.stack values.
+var TunStacks = []string{"system", "gvisor", "mixed"}
 
 type RoutingConfig struct {
 	BypassSuffixes    []string          `json:"bypass_suffixes,omitempty"`
@@ -630,6 +637,9 @@ func (c ProjectConfig) validateFlat() error {
 		}
 		if len(c.TunAddresses()) == 0 {
 			return errors.New("network.tun.addresses is required in tun mode")
+		}
+		if stack := strings.TrimSpace(c.Network.TUN.Stack); stack != "" && !slices.Contains(TunStacks, stack) {
+			return fmt.Errorf("network.tun.stack %q is not supported; use one of %s or leave it empty for the sing-box default", stack, strings.Join(TunStacks, ", "))
 		}
 	default:
 		return errors.New("network.mode must be tun")
@@ -1227,6 +1237,11 @@ func (c ProjectConfig) XrayConfigPath() string {
 		return path
 	}
 	return deriveXrayConfigPath(c.SingboxConfigPath())
+}
+
+// TunStack returns the configured sing-box TUN stack, or "" for the sing-box default.
+func (c ProjectConfig) TunStack() string {
+	return strings.TrimSpace(c.Network.TUN.Stack)
 }
 
 func (c ProjectConfig) TunInterfaceName() string {

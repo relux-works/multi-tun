@@ -79,3 +79,6 @@ task-board.config.json
 # Generated documentation renders
 /artefacts/
 /diagrams/artefacts/
+
+# sing-box TUN lab runtime: VM mount, built binaries, run output (never tracked)
+lab/singbox-tun/.runtime/

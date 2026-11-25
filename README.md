@@ -148,6 +148,7 @@ Generated artifacts:
 | `sing-box` | VLESS/Reality client runtime and config validation | `sing-box check -c <config.json>` | Runtime logs in session cache or `.temp/` |
 | `xray` | Optional VLESS engine sidecar for profiles that require Xray-only VLESS fields such as `encryption=mlkem...` | `xray run -c <xray-config.json>` through `vless-tun start` when `engine.type=xray` | Sidecar config and sidecar logs under the selected `vless-tun` cache/artifact paths |
 | `Docker` / `Colima` | Linux container labs and controlled SNI-gate experiments | `artifacts/fortinetz-cascade-whitelist/lab/run-macmini-sni-lab.sh nl` | `.temp/fortinetz-cascade/sni-lab-remote/`; remote scratch under `/Users/administrator/.cache/multi-tun/fortinetz-sni-lab` |
+| `lab/singbox-tun` | Isolated A/B of sing-box TUN stacks: long TLS streams with byte verification under connection churn, no VPN node or keys | see `lab/singbox-tun/README.md` (Colima profile `multi-tun`, `labclient --streams 8 --churn 32`) | `lab/singbox-tun/.runtime/out/` (ignored) |
 | `ssh` / `rsync` | Remote Mac mini lab orchestration without disturbing the local tunnel | `ssh relux-works-dedicated-macmini ...`, used by the lab runner | `.temp/fortinetz-cascade/remote-*.log` |
 | `go` / `gofmt` | Desktop CLI builds, formatting, vet and tests | `cd desktop && gofmt -l .`, `go build ./...`, `go vet ./...`, `go test ./... -count=1`, `go test -race ./internal/core/vpncore/ ./internal/core/vpncorecli/` (Go commands from `desktop/`) | local binaries; captured validation and mutation logs in task-scoped `.temp/` |
 | `xcodebuild` / `swift` | Apple helper builds and tests when needed | run through `./scripts/setup.sh` or targeted Swift build commands | build products under project and toolchain output paths |
@@ -870,6 +871,7 @@ Field reference:
 - `network.mode`: currently `tun`
 - `network.tun.interface_name`: TUN interface name for `tun` mode
 - `network.tun.addresses`: TUN addresses for `tun` mode
+- `network.tun.stack`: optional sing-box TUN stack, one of `system`, `gvisor` or `mixed`; omit it to keep the sing-box default (`mixed` in builds with gVisor, where TCP goes through the system-stack NAT)
 - `routing` may exist globally, per server, or per profile; ordinary settings such as `routes` use the more-specific override rule
 - `routing.bypass_suffixes`: domains that should go `direct`. Non-empty values are additive across global, server, and profile scopes, so a machine-wide bypass cannot be suppressed by a selected server/profile. Set an explicit `[]` at a more-specific scope for a deliberate full-tunnel reset.
 - `routing.bypass_exclude_suffixes`: optional suffixes that must stay on proxy even when a broader bypass list exists

@@ -750,3 +750,37 @@ func hasRouteRule(items []any, ruleSetTag, outbound string) bool {
 	}
 	return false
 }
+
+// Claim: the TUN inbound carries "stack" exactly when network.tun.stack is set, and omits it
+// otherwise so the sing-box default is unchanged for existing configs.
+func TestBuildInboundsRendersTunStackOnlyWhenSet(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		stack string
+		want  any
+	}{
+		{"", nil},
+		{"gvisor", "gvisor"},
+		{"system", "system"},
+	} {
+		cfg := config.Default()
+		cfg.Network.Mode = config.RenderModeTun
+		cfg.Network.TUN.Stack = tc.stack
+		inbounds, err := buildInbounds(cfg, nil, nil)
+		if err != nil {
+			t.Fatalf("stack %q: buildInbounds() error = %v", tc.stack, err)
+		}
+		inbound := inbounds[0].(map[string]any)
+		got, present := inbound["stack"]
+		if tc.want == nil {
+			if present {
+				t.Fatalf("empty stack rendered %#v, want no key", got)
+			}
+			continue
+		}
+		if got != tc.want {
+			t.Fatalf("stack %q rendered %#v", tc.stack, got)
+		}
+	}
+}

@@ -404,6 +404,9 @@ func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS, upstreamRou
 		"strict_route":   true,
 		"mtu":            1400,
 	}
+	if stack := cfg.TunStack(); stack != "" {
+		inbound["stack"] = stack
+	}
 	routeExcludes := append([]string(nil), upstreamRouteExcludes...)
 	if overlayDNS != nil && len(overlayDNS.RouteExcludes) > 0 {
 		routeExcludes = append(routeExcludes, overlayDNS.RouteExcludes...)

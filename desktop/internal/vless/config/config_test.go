@@ -982,3 +982,41 @@ func TestValidateProfileMatchRequiresExclusiveNonEmptyCriteria(t *testing.T) {
 		t.Fatalf("invalid-country Validate() error = %v, want assigned ISO code error", err)
 	}
 }
+
+// Claim: each supported TUN stack and the empty default validate, and TunStack trims whitespace.
+func TestValidateAcceptsSupportedTunStacks(t *testing.T) {
+	t.Parallel()
+
+	for _, stack := range []string{"", "system", "gvisor", "mixed", " gvisor "} {
+		cfg := Default()
+		cfg.Network.Mode = RenderModeTun
+		cfg.Network.TUN.Stack = stack
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("stack %q: Validate() error = %v", stack, err)
+		}
+		if got, want := cfg.TunStack(), strings.TrimSpace(stack); got != want {
+			t.Fatalf("TunStack() = %q, want %q", got, want)
+		}
+	}
+}
+
+// Claim: an unknown or differently cased stack is refused with a message naming the field and
+// the accepted values, instead of being passed to sing-box.
+func TestValidateRejectsUnknownTunStack(t *testing.T) {
+	t.Parallel()
+
+	for _, stack := range []string{"lwip", "GVISOR", "system,gvisor"} {
+		cfg := Default()
+		cfg.Network.Mode = RenderModeTun
+		cfg.Network.TUN.Stack = stack
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("stack %q: Validate() error = nil", stack)
+		}
+		for _, want := range []string{"network.tun.stack", "system, gvisor, mixed"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("stack %q: error %q lacks %q", stack, err, want)
+			}
+		}
+	}
+}
