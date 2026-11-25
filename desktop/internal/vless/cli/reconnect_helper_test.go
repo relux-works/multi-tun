@@ -406,53 +406,63 @@ func TestReconnectPreStopRefusalRestoresBothConfigFiles(t *testing.T) {
 
 // Claim: when the replacement start returns a session together with an error (liveness unknown),
 // reconnect starts the previous session again only after that replacement is confirmed gone: the
-// stop removed the replacement's own record, or, with no record saved, a direct liveness check says
-// it is not running. A failed stop, a record of another session, no record with the replacement
-// alive, and no record with unknown liveness all leave the previous session unstarted and say the
-// replacement may be running. Limit: the stop and liveness checks are fakes; the real
-// session.Stop and session.SessionAlive are covered by the session package.
+// stop removed the replacement's own record; or, with no record saved, a direct liveness check says
+// it is not running; or the replacement is recorded and a second stop through that record names it.
+// A failed stop, a failed record write, a failed second stop, and unknown liveness without a stop
+// all leave the previous session unstarted and say the replacement may be running; a recorded but
+// unstopped replacement points the operator to `vless-tun stop`. Limit: stop, liveness and record
+// writes are fakes; the real session.Stop, SessionAlive and SaveCurrent are covered in the session
+// package.
 func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 	replacement := session.CurrentSession{ID: "replacement", PID: 9999}
+	stopNamed := func(id string) func() (*session.CurrentSession, string, error) {
+		return func() (*session.CurrentSession, string, error) {
+			return &session.CurrentSession{ID: id, PID: 1}, "stopped", nil
+		}
+	}
+	noRecord := func() (*session.CurrentSession, string, error) { return nil, "none", nil }
+	stopFails := func() (*session.CurrentSession, string, error) { return nil, "", errors.New("replacement still alive") }
+	running := func(session.CurrentSession) (bool, int, error) { return true, 9999, nil }
 	cases := []struct {
 		name       string
-		stop       func() (*session.CurrentSession, string, error)
+		stops      []func() (*session.CurrentSession, string, error) // reconcile stops, in order
 		alive      func(session.CurrentSession) (bool, int, error)
+		saveErr    error
 		wantEvents string
 		wantAlive  int
+		wantSaves  int
 		wantErr    string
 	}{
-		{"record of the replacement stopped",
-			func() (*session.CurrentSession, string, error) { r := replacement; return &r, "stopped", nil },
-			nil, "stop,start,stop,start", 0, ""},
-		{"no record, replacement confirmed not running",
-			func() (*session.CurrentSession, string, error) { return nil, "none", nil },
-			func(session.CurrentSession) (bool, int, error) { return false, 9999, nil },
-			"stop,start,stop,start", 1, ""},
-		{"stop fails",
-			func() (*session.CurrentSession, string, error) { return nil, "", errors.New("replacement still alive") },
-			nil, "stop,start,stop", 0, "replacement still alive"},
-		{"no record, replacement still running",
-			func() (*session.CurrentSession, string, error) { return nil, "none", nil },
-			func(session.CurrentSession) (bool, int, error) { return true, 9999, nil },
-			"stop,start,stop", 1, "still running without a saved record"},
-		{"no record, liveness unknown",
-			func() (*session.CurrentSession, string, error) { return nil, "none", nil },
-			func(session.CurrentSession) (bool, int, error) { return false, 9999, errors.New("ps failed") },
-			"stop,start,stop", 1, "liveness is unknown"},
-		{"record of another session stopped, replacement still running",
-			func() (*session.CurrentSession, string, error) {
-				return &session.CurrentSession{ID: "other", PID: 7777}, "stopped", nil
-			},
-			func(session.CurrentSession) (bool, int, error) { return true, 9999, nil },
-			"stop,start,stop", 1, "still running without a saved record"},
+		{name: "record of the replacement stopped", stops: []func() (*session.CurrentSession, string, error){stopNamed("replacement")},
+			wantEvents: "stop,start,stop,start"},
+		{name: "no record, replacement confirmed not running", stops: []func() (*session.CurrentSession, string, error){noRecord},
+			alive: func(session.CurrentSession) (bool, int, error) { return false, 9999, nil }, wantAlive: 1,
+			wantEvents: "stop,start,stop,start"},
+		{name: "no record, running, recorded and stopped", stops: []func() (*session.CurrentSession, string, error){noRecord, stopNamed("replacement")},
+			alive: running, wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop,stop,start"},
+		{name: "stop fails", stops: []func() (*session.CurrentSession, string, error){stopFails},
+			wantEvents: "stop,start,stop", wantErr: "replacement still alive"},
+		{name: "no record, running, record write fails", stops: []func() (*session.CurrentSession, string, error){noRecord},
+			alive: running, saveErr: errors.New("disk full"), wantAlive: 1, wantSaves: 1,
+			wantEvents: "stop,start,stop", wantErr: "saving its record failed"},
+		{name: "no record, running, recorded, second stop fails", stops: []func() (*session.CurrentSession, string, error){noRecord, stopFails},
+			alive: running, wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop,stop", wantErr: "vless-tun stop"},
+		{name: "no record, running, recorded, second stop names another session", stops: []func() (*session.CurrentSession, string, error){noRecord, stopNamed("other")},
+			alive: running, wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop,stop", wantErr: "the stop did not name it"},
+		{name: "no record, liveness unknown, record write fails", stops: []func() (*session.CurrentSession, string, error){noRecord},
+			alive: func(session.CurrentSession) (bool, int, error) { return false, 9999, errors.New("ps failed") }, saveErr: errors.New("disk full"),
+			wantAlive: 1, wantSaves: 1, wantEvents: "stop,start,stop", wantErr: "liveness is unknown"},
+		{name: "record of another session stopped, replacement running, record write fails", stops: []func() (*session.CurrentSession, string, error){stopNamed("other")},
+			alive: running, saveErr: errors.New("disk full"), wantAlive: 1, wantSaves: 1,
+			wantEvents: "stop,start,stop", wantErr: "still running without a saved record"},
 	}
-	guardAlive := sessionAliveFunc
-	t.Cleanup(func() { sessionAliveFunc = guardAlive })
+	guardAlive, guardSave := sessionAliveFunc, saveCurrentFunc
+	t.Cleanup(func() { sessionAliveFunc, saveCurrentFunc = guardAlive, guardSave })
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &helperReconnect{startErrs: []error{errors.New("liveness unknown")}}
 			path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
-			fixtureStart, fixtureStop, prevAlive := startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc
+			fixtureStart, fixtureStop := startSessionFunc, stopCurrentSessionFunc
 			startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
 				s, err := fixtureStart(cacheDir, configPath, profile, options)
 				if err != nil {
@@ -463,11 +473,14 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 			stops := 0
 			stopCurrentSessionFunc = func(c string, l config.PrivilegedLaunchConfig, f bool, d time.Duration) (*session.CurrentSession, string, error) {
 				stops++
-				if stops == 2 {
-					h.events = append(h.events, "stop")
-					return tc.stop()
+				if stops == 1 {
+					return fixtureStop(c, l, f, d)
 				}
-				return fixtureStop(c, l, f, d)
+				h.events = append(h.events, "stop")
+				if stops-2 >= len(tc.stops) {
+					t.Fatalf("unexpected reconcile stop %d", stops-1)
+				}
+				return tc.stops[stops-2]()
 			}
 			var aliveCalls []session.CurrentSession
 			sessionAliveFunc = func(c session.CurrentSession) (bool, int, error) {
@@ -477,14 +490,22 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 				}
 				return tc.alive(c)
 			}
+			var saved []session.CurrentSession
+			saveCurrentFunc = func(_ string, c session.CurrentSession) error {
+				saved = append(saved, c)
+				return tc.saveErr
+			}
 			var out, errb bytes.Buffer
 			code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-			startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc = fixtureStart, fixtureStop, prevAlive
+			startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc, saveCurrentFunc = fixtureStart, fixtureStop, guardAlive, guardSave
 			if code != 1 || strings.Join(h.events, ",") != tc.wantEvents {
 				t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
 			}
 			if len(aliveCalls) != tc.wantAlive || (tc.wantAlive > 0 && aliveCalls[0].ID != replacement.ID) {
 				t.Fatalf("liveness checks %v, want %d of the replacement", aliveCalls, tc.wantAlive)
+			}
+			if len(saved) != tc.wantSaves || (tc.wantSaves > 0 && saved[0].ID != replacement.ID) {
+				t.Fatalf("record writes %v, want %d of the replacement", saved, tc.wantSaves)
 			}
 			restored := strings.HasSuffix(tc.wantEvents, "stop,start")
 			if mayRun := strings.Contains(errb.String(), "may still be running"); mayRun == restored {

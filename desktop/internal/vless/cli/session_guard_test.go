@@ -11,7 +11,7 @@ import (
 )
 
 // errUnsanctionedSessionCall marks a test that reached the real session start, stop or liveness
-// check without its own fake. The real ones would probe the live vpn-core helper, launch a TUN
+// check or record write without its own fake. The real ones would probe the live vpn-core helper, launch a TUN
 // process, stop the owner's running tunnel or probe an unrelated process by PID. Package init installs failing guards before any test runs; tests that
 // exercise start or stop install their own fakes and restore these guards afterwards.
 var errUnsanctionedSessionCall = errors.New("test reached the real session start or stop")
@@ -26,9 +26,12 @@ func init() {
 	sessionAliveFunc = func(session.CurrentSession) (bool, int, error) {
 		return false, 0, errUnsanctionedSessionCall
 	}
+	saveCurrentFunc = func(string, session.CurrentSession) error {
+		return errUnsanctionedSessionCall
+	}
 }
 
-// Claim: in this test binary the default start, stop and liveness seams fail with the guard error and touch
+// Claim: in this test binary the default start, stop, liveness and record seams fail with the guard error and touch
 // nothing, so an unsanctioned call cannot reach the real helper or tunnel (negative control: a
 // direct call through each seam returns the guard error).
 func TestSessionSeamsAreGuardedInTests(t *testing.T) {
@@ -40,5 +43,8 @@ func TestSessionSeamsAreGuardedInTests(t *testing.T) {
 	}
 	if _, _, err := sessionAliveFunc(session.CurrentSession{PID: 1}); !errors.Is(err, errUnsanctionedSessionCall) {
 		t.Fatalf("liveness seam = %v, want the guard", err)
+	}
+	if err := saveCurrentFunc(t.TempDir(), session.CurrentSession{}); !errors.Is(err, errUnsanctionedSessionCall) {
+		t.Fatalf("record seam = %v, want the guard", err)
 	}
 }

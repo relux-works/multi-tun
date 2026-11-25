@@ -363,6 +363,45 @@ func TestStartPreservesRecordWhenLivenessIsUnknown(t *testing.T) {
 	}
 }
 
+// Claim: when a start fails after launching its process (here sing-box exits during startup) and
+// stopping that process fails too, Start returns the session with both errors, so a caller can see
+// that the process may still run; when the stop succeeds, Start returns no session (positive
+// control). Limit: exercised on the helper path with fake vpn-core start, signal and liveness.
+func TestStartReturnsSessionWhenStoppingFailedStartFails(t *testing.T) {
+	signalFailure := errors.New("helper refused the signal")
+	for _, tt := range []struct {
+		name      string
+		signalErr error
+		wantPID   int
+	}{{"stop fails", signalFailure, 4242}, {"stop succeeds", nil, 0}} {
+		t.Run(tt.name, func(t *testing.T) {
+			previousStart, previousSignal, previousAlive := vpnCoreStartSingBoxSession, vpnCoreSignalSession, processAliveSession
+			vpnCoreStartSingBoxSession = func([]byte, string, int, bool) (int, string, error) { return 4242, "own-child-handle", nil }
+			vpnCoreSignalSession = func(string, string) error { return tt.signalErr }
+			processAliveSession = func(int) (bool, error) { return false, nil }
+			t.Cleanup(func() {
+				vpnCoreStartSingBoxSession, vpnCoreSignalSession, processAliveSession = previousStart, previousSignal, previousAlive
+			})
+			withProcessIdentity(t, "sing-box", time.Now(), nil)
+			cache := t.TempDir()
+			path := filepath.Join(cache, "config.json")
+			if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := Start(cache, path, model.Profile{}, StartOptions{Mode: config.RenderModeTun, PrivilegedLaunch: config.PrivilegedLaunchConfig{Mode: config.LaunchModeHelper}})
+			if err == nil || !strings.Contains(err.Error(), "exited during startup") {
+				t.Fatalf("err=%v, want the startup exit", err)
+			}
+			if got.PID != tt.wantPID {
+				t.Fatalf("returned session PID %d, want %d", got.PID, tt.wantPID)
+			}
+			if tt.signalErr != nil && (!errors.Is(err, signalFailure) || !strings.Contains(err.Error(), "stopping the failed start also failed")) {
+				t.Fatalf("err=%v, want the stop failure joined", err)
+			}
+		})
+	}
+}
+
 // A failed launchd startup PID lookup preserves its record and issues no further service actions.
 func TestLaunchdStartLookupErrorPreservesRecord(t *testing.T) {
 	failure := errors.New("print permission denied")

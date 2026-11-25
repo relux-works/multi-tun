@@ -296,15 +296,15 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 	// the opaque handle of the child the hardened vpn-core still holds, never
 	// by PID, and refuses a record without a handle.
 	if err := recordProcessIdentity(&session); err != nil {
-		_ = stopStartedSession(session)
+		stopErr := stopStartedSession(session)
 		if release != nil {
 			_ = release()
 		}
-		return CurrentSession{}, err
+		return failedStart(session, stopErr, err)
 	}
 	if err := saveJSON(metadataPath, session); err != nil {
-		_ = stopStartedSession(session)
-		return CurrentSession{}, err
+		stopErr := stopStartedSession(session)
+		return failedStart(session, stopErr, err)
 	}
 
 	pid, err := waitForStableStart(session, 1500*time.Millisecond)
@@ -316,48 +316,49 @@ func Start(cacheDir, configPath string, profile model.Profile, options StartOpti
 			}
 			return session, errors.Join(err, persistErr)
 		}
-		_ = stopStartedSession(session)
+		stopErr := stopStartedSession(session)
 		_ = ClearCurrent(cacheDir)
 		if release != nil {
 			_ = release()
 		}
 		if last := LastRelevantLogLine(logPath); last != "" {
-			return CurrentSession{}, fmt.Errorf("sing-box exited during startup: %s; inspect %s", last, logPath)
+			return failedStart(session, stopErr, fmt.Errorf("sing-box exited during startup: %s; inspect %s", last, logPath))
 		}
-		return CurrentSession{}, fmt.Errorf("sing-box exited during startup; inspect %s", logPath)
+		return failedStart(session, stopErr, fmt.Errorf("sing-box exited during startup; inspect %s", logPath))
 	}
 	if pid > 0 && pid != session.PID {
 		session.PID = pid
 		if err := recordProcessIdentity(&session); err != nil {
-			_ = stopStartedSession(session)
+			stopErr := stopStartedSession(session)
 			_ = ClearCurrent(cacheDir)
-			return CurrentSession{}, err
+			return failedStart(session, stopErr, err)
 		}
 	}
 
 	if err := applySystemDNSHandoff(&session, options); err != nil {
-		_ = stopStartedSession(session)
+		stopErr := stopStartedSession(session)
 		_ = ClearCurrent(cacheDir)
-		return CurrentSession{}, fmt.Errorf("configure system DNS: %w", err)
+		return failedStart(session, stopErr, fmt.Errorf("configure system DNS: %w", err))
 	}
 	if err := waitForStartupDNSReadiness(session, options, startupResolveTimeout, startupResolveInterval); err != nil {
-		_ = stopStartedSession(session)
+		stopErr := stopStartedSession(session)
 		_ = ClearCurrent(cacheDir)
-		return CurrentSession{}, err
+		return failedStart(session, stopErr, err)
 	}
 
 	if err := saveJSON(metadataPath, session); err != nil {
-		_ = stopStartedSession(session)
-		return CurrentSession{}, err
+		stopErr := stopStartedSession(session)
+		return failedStart(session, stopErr, err)
 	}
 
 	if err := SaveCurrent(cacheDir, session); err != nil {
-		_ = stopStartedSession(session)
-		return CurrentSession{}, err
+		stopErr := stopStartedSession(session)
+		return failedStart(session, stopErr, err)
 	}
 	if release != nil {
 		if err := release(); err != nil {
-			return CurrentSession{}, err
+			// The session runs and is recorded; return it so the caller can reconcile it.
+			return session, err
 		}
 	}
 
@@ -999,6 +1000,16 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 	}
 
 	return current, "timeout", fmt.Errorf("failed to stop sing-box pid %d", current.PID)
+}
+
+// failedStart reports a start that failed after its process was launched and stopped again. When
+// that stop failed too, the process may still run, so the session comes back with both errors and
+// the caller must reconcile it before starting anything else; otherwise the caller gets no session.
+func failedStart(session CurrentSession, stopErr, err error) (CurrentSession, error) {
+	if stopErr != nil {
+		return session, errors.Join(err, fmt.Errorf("stopping the failed start also failed: %w", stopErr))
+	}
+	return CurrentSession{}, err
 }
 
 func stopStartedSession(current CurrentSession) error {
