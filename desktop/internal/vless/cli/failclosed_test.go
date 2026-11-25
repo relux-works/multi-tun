@@ -96,6 +96,65 @@ func writeFailClosedConfig(t *testing.T, failClosed string) string {
 
 var upIfs = []ifaceInfo{{"lo0", true}, {"en0", true}, {"en5", false}, {"utun233", true}, {"utun4", true}, {"bridge0", true}}
 
+// Usage and a failed durable clear both retain the emergency flush followed by
+// the durable off command. The successful control reports off without advice.
+func TestFailClosedEmergencyFollowup(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		clearErr error
+		code     int
+	}{
+		{"usage", []string{"failclosed"}, nil, 2},
+		{"failed off", []string{"failclosed", "off"}, errors.New("helper unavailable"), 1},
+		{"off", []string{"failclosed", "off"}, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fcFakes{}
+			withFailClosedFakes(t, f, nil, nil)
+			failClosedClearCLI = func(vpncore.ServiceConfig) error { f.clears++; return tc.clearErr }
+			var out, errb bytes.Buffer
+			if code := New(&out, &errb).Run(tc.args); code != tc.code {
+				t.Fatalf("exit %d, want %d: %s", code, tc.code, errb.String())
+			}
+			if tc.code != 0 {
+				flush := "sudo pfctl -a com.apple/works.relux.vpn-core.failclosed -F all"
+				parts := strings.SplitN(errb.String(), flush, 2)
+				if len(parts) != 2 || !strings.Contains(parts[1], "vless-tun failclosed off") {
+					t.Fatalf("emergency advice lacks durable follow-up: %q", errb.String())
+				}
+			} else if errb.Len() != 0 || !strings.Contains(out.String(), "fail_closed: off") {
+				t.Fatalf("successful off: stdout=%q stderr=%q", out.String(), errb.String())
+			}
+			wantClears := 1
+			if tc.name == "usage" {
+				wantClears = 0
+			}
+			if f.clears != wantClears || len(f.applied) != 0 {
+				t.Fatalf("helper calls: clears=%d applied=%v", f.clears, f.applied)
+			}
+		})
+	}
+}
+
+// README emergency advice must put durable off in the same paragraph as the
+// manual flush so an owner is told to persist the change after recovery.
+func TestFailClosedReadmeEmergencyFollowup(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "sudo pfctl -a com.apple/works.relux.vpn-core.failclosed -F all") {
+			if !strings.Contains(line, "once it answers again, run `vless-tun failclosed off`") {
+				t.Fatalf("emergency paragraph lacks durable follow-up: %s", line)
+			}
+			return
+		}
+	}
+	t.Fatal("README emergency flush advice missing")
+}
+
 // Claim: apply with the default policy resolves only codex domains, sends the helper the up physical
 // interfaces (no utun, no down interface) and the public addresses (private ones dropped).
 func TestFailClosedApplyDefaultCodex(t *testing.T) {

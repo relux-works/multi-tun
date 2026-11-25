@@ -153,13 +153,22 @@ func (m *failClosedManager) coveredInterfaces(requested []string) []string {
 	return mergeInterfaces(requested, found)
 }
 
-// checkStatePath refuses a state path (or its parent) that is a symlink or a
-// file this process does not own, so the root helper never follows a link
-// planted by someone else.
+// checkStatePath refuses symlinks and foreign ownership along the entire path.
+// System ancestors may be root-owned; the state file and its parent belong to
+// this process. Callers must keep their ancestors protected against replacement.
 func checkStatePath(path string) error {
-	for _, p := range []string{filepath.Dir(path), path} {
-		info, err := os.Lstat(p)
-		if errors.Is(err, os.ErrNotExist) {
+	return checkStatePathWithLstat(path, os.Lstat)
+}
+
+func checkStatePathWithLstat(path string, lstat func(string) (os.FileInfo, error)) error {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(path)
+	for p := path; ; p = filepath.Dir(p) {
+		info, err := lstat(p)
+		if errors.Is(err, os.ErrNotExist) && p != filepath.Dir(p) {
 			continue
 		}
 		if err != nil {
@@ -168,8 +177,16 @@ func checkStatePath(path string) error {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("fail-closed state path %s is a symlink", p)
 		}
-		if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("fail-closed state path %s has no ownership information", p)
+		}
+		owned := int(st.Uid) == os.Geteuid()
+		if !owned && !(st.Uid == 0 && p != path && p != parent) {
 			return fmt.Errorf("fail-closed state path %s is owned by uid %d, not this process", p, st.Uid)
+		}
+		if p == filepath.Dir(p) {
+			break
 		}
 	}
 	return nil
@@ -194,6 +211,9 @@ func (m *failClosedManager) load() (failClosedState, error) {
 }
 
 func (m *failClosedManager) save(st failClosedState) error {
+	if err := checkStatePath(m.statePath); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(m.statePath), 0o755); err != nil {
 		return err
 	}
@@ -318,6 +338,9 @@ func (m *failClosedManager) applyLocked(st failClosedState, interfaces, table []
 func (m *failClosedManager) Clear() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := checkStatePath(m.statePath); err != nil {
+		return err
+	}
 	st, loadErr := m.load()
 	if loadErr != nil {
 		// A corrupt state must not prevent the owner's rollback, but its token

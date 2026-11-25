@@ -159,8 +159,8 @@ type TUNConfig struct {
 	Stack string `json:"stack,omitempty"`
 }
 
-// TunStacks lists the accepted network.tun.stack values.
-var TunStacks = []string{"system", "gvisor", "mixed"}
+// tunStacks lists the accepted network.tun.stack values.
+var tunStacks = []string{"system", "gvisor", "mixed"}
 
 type RoutingConfig struct {
 	BypassSuffixes    []string          `json:"bypass_suffixes,omitempty"`
@@ -641,8 +641,8 @@ func (c ProjectConfig) validateFlat() error {
 		if len(c.TunAddresses()) == 0 {
 			return errors.New("network.tun.addresses is required in tun mode")
 		}
-		if stack := strings.TrimSpace(c.Network.TUN.Stack); stack != "" && !slices.Contains(TunStacks, stack) {
-			return fmt.Errorf("network.tun.stack %q is not supported; use one of %s or leave it empty for the sing-box default", stack, strings.Join(TunStacks, ", "))
+		if stack := strings.TrimSpace(c.Network.TUN.Stack); stack != "" && !slices.Contains(tunStacks, stack) {
+			return fmt.Errorf("network.tun.stack %q is not supported; use one of %s or leave it empty for the sing-box default", stack, strings.Join(tunStacks, ", "))
 		}
 	default:
 		return errors.New("network.mode must be tun")

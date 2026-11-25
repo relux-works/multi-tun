@@ -51,7 +51,7 @@ func (f *fakePF) run(args []string, stdin string) ([]byte, error) {
 func newTestManager(t *testing.T, f *fakePF) *failClosedManager {
 	t.Helper()
 	return &failClosedManager{
-		statePath: filepath.Join(t.TempDir(), "state", "failclosed.json"),
+		statePath: filepath.Join(resolvedTempDir(t), "state", "failclosed.json"),
 		pfctl:     f.run,
 		now:       func() time.Time { return time.Date(2026, 11, 25, 13, 0, 0, 0, time.UTC) },
 	}
@@ -389,7 +389,7 @@ func TestFailClosedWatchdogRecovers(t *testing.T) {
 	}
 	for want, act := range acts {
 		p := &statefulPF{}
-		m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: func() time.Time { return time.Date(2026, 11, 25, 14, 0, 0, 0, time.UTC) }}
+		m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: func() time.Time { return time.Date(2026, 11, 25, 14, 0, 0, 0, time.UTC) }}
 		if err := m.Apply(goodReq); err != nil {
 			t.Fatal(err)
 		}
@@ -425,7 +425,7 @@ func TestFailClosedWatchdogRecovers(t *testing.T) {
 // Claim: Check does nothing when the policy is off (no pf calls), so 'off' is never undone by the watchdog.
 func TestFailClosedWatchdogIdleWhenOff(t *testing.T) {
 	p := &statefulPF{}
-	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+	m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: time.Now}
 	_ = m.Apply(goodReq)
 	_ = m.Clear()
 	p.calls = nil
@@ -438,7 +438,7 @@ func TestFailClosedWatchdogIdleWhenOff(t *testing.T) {
 // one interval.
 func TestFailClosedWatchLoopBounded(t *testing.T) {
 	p := &statefulPF{}
-	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+	m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: time.Now}
 	_ = m.Apply(goodReq)
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -578,7 +578,7 @@ func TestUninstallKeepsFailClosedWhenServiceNotConfirmedGone(t *testing.T) {
 func TestFailClosedCoversDiscoveredInterfaces(t *testing.T) {
 	p := &statefulPF{}
 	found := []string{"en0", "en7"}
-	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now,
+	m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: time.Now,
 		interfaces: func() ([]string, error) { return found, nil }}
 	if err := m.Apply(goodReq); err != nil {
 		t.Fatal(err)
@@ -600,7 +600,7 @@ func TestFailClosedCoversDiscoveredInterfaces(t *testing.T) {
 // with our rules and full table; not enforcing (pf_enabled=false) right after another party disables pf.
 func TestFailClosedStatusIsLive(t *testing.T) {
 	p := &statefulPF{}
-	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+	m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: time.Now}
 	if err := m.Apply(goodReq); err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +638,7 @@ func (f *fightingPF) run(args []string, stdin string) ([]byte, error) {
 // contract's bound) instead of backing off, and status reports the streak.
 func TestFailClosedWatchKeepsBoundUnderFight(t *testing.T) {
 	p := &fightingPF{}
-	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+	m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: time.Now}
 	_ = m.Apply(goodReq)
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -666,7 +666,7 @@ func TestFailClosedLiveCompareIsExact(t *testing.T) {
 		"extra pass rule":        func(p *statefulPF) { p.rules += "pass out quick to <failclosed>\n" },
 	} {
 		p := &statefulPF{}
-		m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+		m := &failClosedManager{statePath: filepath.Join(resolvedTempDir(t), "fc.json"), pfctl: p.run, now: time.Now}
 		if err := m.Apply(goodReq); err != nil {
 			t.Fatal(err)
 		}
@@ -690,7 +690,7 @@ func TestFailClosedLiveCompareIsExact(t *testing.T) {
 // Claim: a symlinked state path is refused before any pfctl call, so the root helper never writes
 // through a planted link.
 func TestFailClosedRefusesSymlinkedState(t *testing.T) {
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	target := filepath.Join(dir, "elsewhere.json")
 	link := filepath.Join(dir, "fc.json")
 	if err := os.Symlink(target, link); err != nil {

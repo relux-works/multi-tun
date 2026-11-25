@@ -763,6 +763,7 @@ func TestBuildInboundsRendersTunStackOnlyWhenSet(t *testing.T) {
 		{"", nil},
 		{"gvisor", "gvisor"},
 		{"system", "system"},
+		{"mixed", "mixed"},
 	} {
 		cfg := config.Default()
 		cfg.Network.Mode = config.RenderModeTun

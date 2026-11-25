@@ -22,6 +22,10 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		panic(err)
+	}
 	failClosedStatePathVPNCore = filepath.Join(dir, "failclosed.json")
 	pfctlVPNCore = func([]string, string) ([]byte, error) { return nil, errTestReachedRealPFCTL }
 	// Any test that reaches the privileged runner or sudo without its own seam fails instead of
@@ -65,7 +69,11 @@ func TestDaemonFixturesCannotReachRealPF(t *testing.T) {
 	if d.failClosed == nil {
 		t.Fatal("daemon has no fail-closed manager")
 	}
-	if d.failClosed.statePath == productionFailClosedStatePath || !strings.HasPrefix(d.failClosed.statePath, os.TempDir()) {
+	tempRoot, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.failClosed.statePath == productionFailClosedStatePath || !strings.HasPrefix(d.failClosed.statePath, tempRoot+string(os.PathSeparator)) {
 		t.Fatalf("fixture state path %q is not a temp path", d.failClosed.statePath)
 	}
 	if _, err := d.failClosed.pfctl([]string{"-s", "info"}, ""); !errors.Is(err, errTestReachedRealPFCTL) {
