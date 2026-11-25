@@ -592,6 +592,44 @@ This is a heuristic runtime status, not a control plane.
 
 By default, `status` reads only persisted session metadata and the cached subscription snapshot; it does not fetch or probe. Use `--refresh` to fetch explicitly. Candidate probing then runs only when no configured VLESS session is active.
 
+### `vless-tun failclosed`
+
+Keeps listed services from leaving by the direct route while the personal tunnel is down or
+restarting. The shared `vpn-core` helper enforces it with its own pf anchor,
+`com.apple/works.relux.vpn-core.failclosed`, which refuses the services' addresses on physical
+interfaces (`en*`, `bridge*`) and never matches a `utun` interface, so neither the personal tunnel
+nor the work VPN is matched. `/etc/pf.conf` and other anchors are never edited. The helper re-applies
+the last accepted policy when it starts, so the block is in place from boot, before the tunnel.
+
+```bash
+vless-tun failclosed status   # config list, tunnel state, helper state, blocking yes/no
+vless-tun failclosed apply    # resolve the services, send interfaces and addresses to the helper
+vless-tun failclosed off      # rollback in one command: clear the anchor, release the pf token
+```
+
+- `off` never stops, restarts or reconfigures sing-box, its routes or DNS, and stays off after reboot.
+  To keep it off when the policy is applied again, set `"fail_closed": {"enabled": false}`.
+- If the helper does not answer: `sudo pfctl -a com.apple/works.relux.vpn-core.failclosed -F all`.
+- A blocked connection fails at once with "connection refused" or "no route" instead of leaving
+  through another egress.
+- Services on shared CDN addresses take those addresses into the table, so during an outage other
+  sites on the same addresses are refused too.
+
+Config (`fail_closed`, optional):
+
+```json
+"fail_closed": {
+  "enabled": true,
+  "services": ["codex", { "name": "claude-api", "domains": ["anthropic.com"], "cidrs": ["160.79.104.0/23"] }]
+}
+```
+
+- Built-in catalog: `codex`, `claude`, `antigravity`. Without a `fail_closed` section, or freshly
+  installed, only `codex` is enabled; the others are enabled only by editing the config.
+- `services` entries are catalog names or objects with `name`, `domains` (suffixes) and `cidrs`.
+  Private, local, carrier-grade NAT and over-broad ranges are refused.
+- `tunnel_interface` defaults to `network.tun.interface_name`.
+
 ### `vless-tun diagnose`
 
 `vless-tun diagnose` is a tunnel/runtime diagnostic. It scans configured session cache directories and reports recorded session state plus launch backend readiness. When the effective launch backend resolves to `helper` or `launchd`, it checks the shared `vpn-core` daemon and reports the current socket, daemon PID, redacted active/queued request metadata, and the last-completed request summary.

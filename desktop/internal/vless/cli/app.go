@@ -65,6 +65,8 @@ func (a *App) Run(args []string) int {
 		return a.runStop(args[1:])
 	case "render":
 		return a.runRender(args[1:])
+	case "failclosed":
+		return a.runFailClosed(args[1:])
 	default:
 		fmt.Fprintf(a.stderr, "unknown command %q\n\n", args[0])
 		a.printUsage()
@@ -523,6 +525,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.stdout, "  vless-tun diagnose config [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc]")
 	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [server] [--timeout duration] [--force]")
 	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]")
+	fmt.Fprintln(a.stdout, "  vless-tun failclosed status|apply|off [--config path]")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
 	fmt.Fprintln(a.stdout, "  run, connect -> start")
