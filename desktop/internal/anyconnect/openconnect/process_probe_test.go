@@ -74,7 +74,15 @@ func TestCurrentRuntimeProbeVerdicts(t *testing.T) {
 	}{
 		{name: "absent", code: 1},
 		{name: "single", output: "4242\n", pid: 4242},
+		{name: "single-without-newline", output: "4242", pid: 4242},
 		{name: "multiple", output: "4242\n4243\n", pid: 4243},
+		{name: "multiple-without-final-newline", output: "4242\n4243", pid: 4243},
+		{name: "blank-line", output: "4242\n\n", wantError: true},
+		{name: "leading-blank-line", output: "\n4242\n", wantError: true},
+		{name: "multiple-on-line", output: "4242 4243\n", wantError: true},
+		{name: "tab-separated", output: "4242\t4243\n", wantError: true},
+		{name: "signed-positive", output: "+4242\n", wantError: true},
+		{name: "leading-space", output: " 4242\n", wantError: true},
 		{name: "probe-error", code: 2, wantError: true},
 		{name: "missing-executable", missing: true, wantError: true},
 		{name: "empty-success", wantError: true},
@@ -118,22 +126,35 @@ func TestCurrentRuntimeProbeVerdicts(t *testing.T) {
 }
 
 func TestStopProbeFailureDoesNotCleanOrWriteCache(t *testing.T) {
-	// A missing session plus unknown process state refuses before resolver cleanup/cache writes; true absence retains cleanup.
+	// Unknown or malformed process state refuses before liveness checks, resolver cleanup or cache writes; true absence retains cleanup. All liveness is mocked.
 	for _, tc := range []struct {
-		name string
-		code int
-	}{{"unknown", 2}, {"absent", 1}} {
+		name, output string
+		code         int
+		wantError    bool
+	}{
+		{name: "unknown", code: 2, wantError: true},
+		{name: "absent", code: 1},
+		{name: "blank-line", output: "4242\n\n", wantError: true},
+		{name: "multiple-on-line", output: "4242 4243\n", wantError: true},
+		{name: "signed-positive", output: "+4242\n", wantError: true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installProcessProbeFixture(t, "", tc.code, false)
+			calls := installProcessProbeFixture(t, tc.output, tc.code, false)
 			cache := t.TempDir()
 			previous := cleanupOrphanedResolverStateOpenConnect
+			previousAlive := processAliveOpenConnect
+			aliveChecks := 0
+			processAliveOpenConnect = func(int) (bool, error) { aliveChecks++; return false, nil }
 			cleanups := 0
 			cleanupOrphanedResolverStateOpenConnect = func(string) (bool, error) { cleanups++; return false, nil }
-			t.Cleanup(func() { cleanupOrphanedResolverStateOpenConnect = previous })
+			t.Cleanup(func() {
+				cleanupOrphanedResolverStateOpenConnect = previous
+				processAliveOpenConnect = previousAlive
+			})
 			_, state, err := Stop(cache, time.Millisecond)
-			if tc.code == 2 {
-				if err == nil || state != "" || cleanups != 0 {
-					t.Fatalf("unknown probe proceeded: state=%q err=%v cleanups=%d", state, err, cleanups)
+			if tc.wantError {
+				if err == nil || state != "" || cleanups != 0 || aliveChecks != 0 || strings.Join(*calls, ",") != "pgrep" {
+					t.Errorf("unknown probe proceeded: state=%q err=%v cleanups=%d liveness=%d calls=%v", state, err, cleanups, aliveChecks, *calls)
 				}
 				entries, readErr := os.ReadDir(cache)
 				if readErr != nil || len(entries) != 0 {

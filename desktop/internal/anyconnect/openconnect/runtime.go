@@ -3733,12 +3733,14 @@ func findOpenConnectPID() (int, error) {
 }
 
 func findOpenConnectPIDFromOutput(output string) (int, error) {
-	lines := strings.Fields(strings.TrimSpace(output))
-	if len(lines) == 0 {
-		return 0, errors.New("invalid openconnect pid response")
-	}
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
 	var pid int
 	for _, line := range lines {
+		for _, digit := range line {
+			if digit < '0' || digit > '9' {
+				return 0, errors.New("invalid openconnect pid response")
+			}
+		}
 		parsed, err := strconv.Atoi(line)
 		if err != nil || parsed <= 0 {
 			return 0, errors.New("invalid openconnect pid response")
