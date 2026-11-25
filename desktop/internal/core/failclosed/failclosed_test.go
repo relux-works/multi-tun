@@ -168,3 +168,17 @@ func TestRenderAnchorGoldenAndRefusals(t *testing.T) {
 		}
 	}
 }
+
+// Claim: ValidateTable normalizes and de-duplicates admissible prefixes and refuses malformed,
+// private and over-broad entries arriving over the RPC.
+func TestValidateTable(t *testing.T) {
+	got, err := ValidateTable([]string{"1.1.1.1/32", " 1.1.1.1/32", "160.79.105.7/23"})
+	if err != nil || strings.Join(got, ",") != "1.1.1.1/32,160.79.104.0/23" {
+		t.Fatalf("ValidateTable = %v, %v", got, err)
+	}
+	for _, bad := range []string{"1.1.1.1", "192.168.1.0/24", "0.0.0.0/0", "fe80::1/128", "x"} {
+		if _, err := ValidateTable([]string{bad}); err == nil {
+			t.Errorf("ValidateTable(%q) accepted", bad)
+		}
+	}
+}

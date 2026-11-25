@@ -14,8 +14,10 @@ import (
 	"time"
 )
 
-// AnchorName is the pf anchor owned by the vpn-core helper.
-const AnchorName = "works.relux.vpn-core/failclosed"
+// AnchorName is the pf anchor owned by the vpn-core helper. macOS evaluates
+// only anchors the main ruleset references; /etc/pf.conf references
+// "com.apple/*", so the anchor lives there and pf.conf is never edited.
+const AnchorName = "com.apple/works.relux.vpn-core.failclosed"
 
 // TableName is the pf table inside the anchor.
 const TableName = "failclosed"
@@ -259,6 +261,31 @@ func (p Policy) Contents(t Table) ([]string, error) {
 	if len(out) > MaxEntries {
 		return nil, fmt.Errorf("fail-closed table has %d entries, more than %d", len(out), MaxEntries)
 	}
+	return out, nil
+}
+
+// ValidateTable checks table entries received over the helper RPC: each must
+// be an admissible prefix; the result is sorted, de-duplicated and bounded.
+func ValidateTable(entries []string) ([]string, error) {
+	set := map[string]bool{}
+	for _, e := range entries {
+		p, err := netip.ParsePrefix(strings.TrimSpace(e))
+		if err != nil {
+			return nil, fmt.Errorf("table entry %q: %v", e, err)
+		}
+		if err := admissiblePrefix(p); err != nil {
+			return nil, fmt.Errorf("table entry %q: %w", e, err)
+		}
+		set[p.Masked().String()] = true
+	}
+	if len(set) > MaxEntries {
+		return nil, fmt.Errorf("table has %d entries, more than %d", len(set), MaxEntries)
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out, nil
 }
 
