@@ -436,6 +436,7 @@ func TestUninstallFailClosed(t *testing.T) {
 	t.Cleanup(func() { failClosedStatePathVPNCore = prev })
 	failClosedStatePathVPNCore = "/Library/Application Support/works.relux.vpn-core/failclosed.json"
 
+	var runRaw func(raw []byte, flushFails bool) ([]string, error)
 	run := func(state string, flushFails bool) ([]string, error) {
 		var cmds []string
 		withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
@@ -454,6 +455,17 @@ func TestUninstallFailClosed(t *testing.T) {
 		})
 		return cmds, uninstallFailClosed()
 	}
+	runRaw = func(raw []byte, flushFails bool) ([]string, error) {
+		var cmds []string
+		withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+			cmds = append(cmds, strings.Join(append([]string{name}, args...), " "))
+			if name == "cat" {
+				return raw, nil
+			}
+			return nil, nil
+		})
+		return cmds, uninstallFailClosed()
+	}
 
 	cmds, err := run(`{"enabled":true,"token":"42"}`, false)
 	joined := strings.Join(cmds, "|")
@@ -463,6 +475,11 @@ func TestUninstallFailClosed(t *testing.T) {
 	}
 	if _, err := run("", true); err != nil {
 		t.Fatalf("never used: err=%v", err)
+	}
+	// An empty state file reads as "never used" too, not as an unreadable state.
+	cmds, err = runRaw([]byte("\n"), false)
+	if err != nil || strings.Contains(strings.Join(cmds, "|"), "-X") {
+		t.Fatalf("empty state: err=%v cmds=%q", err, cmds)
 	}
 	cmds, err = run(`{"enabled":true,"token":"42"}`, true)
 	if err == nil || strings.Contains(strings.Join(cmds, "|"), "rm -f") {

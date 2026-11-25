@@ -137,7 +137,9 @@ func UninstallService(cfg ServiceConfig, options ...MaintenanceOptions) error {
 func uninstallFailClosed() error {
 	stateRaw, stateErr := runPrivilegedCommandVPNCore("cat", failClosedStatePathVPNCore)
 	_, flushErr := runPrivilegedCommandVPNCore("/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all")
-	if stateErr != nil {
+	if stateErr != nil || len(bytes.TrimSpace(stateRaw)) == 0 {
+		// No state (or an empty file): the feature was never used, so there is
+		// no token to release and a failed flush of the absent anchor is moot.
 		return nil
 	}
 	var errs []error
