@@ -63,16 +63,21 @@ var (
 	validateHelperConfigCLI = vpncore.ValidateSingBoxConfig
 	readFileCLI             = os.ReadFile
 	writeRestoredConfigCLI  = func(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }
-)
-
-// preflightHelperSchema refuses, before anything is stopped, a sing-box config
-// that the vpn-core helper would refuse to start.
-func preflightHelperSchema(cfg config.ProjectConfig, prepared preparedStart) error {
-	if prepared.engine != config.EngineSingbox {
+	removeRenderedConfigCLI = func(path string) error {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		return nil
 	}
-	mode, err := resolveLaunchModeCLI(cfg.NetworkMode(), cfg.LaunchOrDefault())
-	if err != nil || mode != config.LaunchModeHelper {
+)
+
+// preflightHelperSchema refuses, before anything is stopped, a rendered
+// sing-box config that the vpn-core helper would refuse to start. launchMode is
+// the mode resolved once for this reconnect; for every engine the sing-box
+// config at prepared.target (the full config, or the Xray engine's TUN
+// frontend) is what the helper launches.
+func preflightHelperSchema(launchMode string, prepared preparedStart) error {
+	if launchMode != config.LaunchModeHelper {
 		return nil
 	}
 	data, err := readFileCLI(prepared.target)
@@ -85,17 +90,28 @@ func preflightHelperSchema(cfg config.ProjectConfig, prepared preparedStart) err
 	return nil
 }
 
+// restoreRenderedTarget puts the replacement's target back to its state before
+// rendering: the previous bytes, or no file when none existed.
+func restoreRenderedTarget(target string, previous []byte, existed bool) error {
+	if existed {
+		return writeRestoredConfigCLI(target, previous)
+	}
+	return removeRenderedConfigCLI(target)
+}
+
 // restorePreviousSession brings the stopped session back after a refused
-// replacement start: it writes the previous config back and starts it again
-// with the stopped session's profile. It covers the single sing-box session
-// case; anything else is reported for a manual start.
-func (a *App) restorePreviousSession(cfg config.ProjectConfig, prepared preparedStart, opts session.StartOptions, stopped []stopSessionResult, previousTarget string, previousConfig []byte, previousConfigErr error) {
+// replacement start. It restarts the single stopped sing-box session with its
+// own recorded options (mode, launch mode, interface, bypass list, log
+// limit, resolution) and its own cache dir; options a session record does not
+// keep (TUN addresses, overlay DNS, system DNS servers) come from the current
+// config. Anything else is reported for a manual start.
+func (a *App) restorePreviousSession(cfg config.ProjectConfig, base session.StartOptions, stopped []stopSessionResult, previousTarget string, previousConfig []byte, previousExisted bool) {
 	if len(stopped) == 0 {
 		fmt.Fprintln(a.stderr, "no previous session was running")
 		return
 	}
 	prev := stopped[0].stopped
-	if len(stopped) != 1 || prev == nil || prev.Engine != config.EngineSingbox || prev.ConfigPath != previousTarget || previousConfigErr != nil || len(prev.Sidecars) != 0 {
+	if len(stopped) != 1 || prev == nil || prev.Engine != config.EngineSingbox || prev.ConfigPath != previousTarget || !previousExisted || len(prev.Sidecars) != 0 {
 		fmt.Fprintln(a.stderr, "the previous session was stopped and could not be restored automatically; start it with `vless-tun start`")
 		return
 	}
@@ -108,15 +124,40 @@ func (a *App) restorePreviousSession(cfg config.ProjectConfig, prepared prepared
 		profile.Host = host
 		profile.Port, _ = strconv.Atoi(port)
 	}
-	opts.Engine = config.EngineSingbox
-	opts.Sidecars = nil
-	opts.ResolvedID, opts.ResolvedName = prev.ResolvedProfileID, prev.ResolvedProfileName
-	restored, err := startSessionFunc(cfg.CacheDir, previousTarget, profile, opts)
+	opts := restoreStartOptions(cfg, base, prev)
+	restored, err := startSessionFunc(stopped[0].target.cacheDir, previousTarget, profile, opts)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "restore of the previous session failed: %v; start it with `vless-tun start`\n", err)
 		return
 	}
 	fmt.Fprintf(a.stderr, "previous session restored as %s (pid=%d, profile %s)\n", restored.ID, restored.PID, restored.ProfileName)
+}
+
+// restoreStartOptions builds the restart options from the stopped session's
+// record, falling back to base only for what the record does not keep.
+func restoreStartOptions(cfg config.ProjectConfig, base session.StartOptions, prev *session.CurrentSession) session.StartOptions {
+	launch := cfg.LaunchOrDefault()
+	if prev.LaunchMode != "" {
+		launch.Mode = prev.LaunchMode
+	}
+	return session.StartOptions{
+		Mode:              firstNonEmptyLocal(prev.Mode, base.Mode),
+		Engine:            config.EngineSingbox,
+		BypassSuffixes:    append([]string(nil), prev.BypassSuffixes...),
+		InterfaceName:     firstNonEmptyLocal(prev.InterfaceName, base.InterfaceName),
+		TunAddresses:      base.TunAddresses,
+		OverlayDNSActive:  base.OverlayDNSActive,
+		OverlayDNSDomains: base.OverlayDNSDomains,
+		SystemDNSServers:  base.SystemDNSServers,
+		PrivilegedLaunch:  launch,
+		LogMaxLines:       prev.LogMaxLines,
+		ResolvedServer:    prev.ResolvedServer,
+		ResolvedAlias:     prev.ResolvedAlias,
+		ResolvedName:      prev.ResolvedProfileName,
+		ResolvedID:        prev.ResolvedProfileID,
+		ResolutionReason:  prev.ResolutionReason,
+		SnapshotFetchedAt: prev.SnapshotFetchedAt,
+	}
 }
 
 func preflightReplacement(prepared preparedStart) error {
@@ -274,6 +315,21 @@ func (a *App) runReconnect(args []string) int {
 		previousTarget = *outputPath
 	}
 	previousConfig, previousConfigErr := readFileCLI(previousTarget)
+	previousExisted := previousConfigErr == nil
+	if previousConfigErr != nil && !errors.Is(previousConfigErr, os.ErrNotExist) {
+		// Without the previous bytes a refused replacement could not be undone.
+		fmt.Fprintf(a.stderr, "reconnect failed: cannot read the current config %s: %v\n", previousTarget, previousConfigErr)
+		fmt.Fprintln(a.stderr, "running sessions were left untouched")
+		return 1
+	}
+	// Resolve the launch mode once; the preflight and the start use the same
+	// mode, so a helper that appears or disappears in between cannot slip a
+	// config past the schema check.
+	launch := cfg.LaunchOrDefault()
+	launchMode, launchModeErr := resolveLaunchModeCLI(cfg.NetworkMode(), launch)
+	if launchModeErr == nil {
+		launch.Mode = launchMode
+	}
 
 	// Prepare the replacement before stopping anything: a refresh that drops the
 	// selected profile, or any render error, must leave the running tunnel alone.
@@ -297,12 +353,14 @@ func (a *App) runReconnect(args []string) int {
 		fmt.Fprintln(a.stderr, "running sessions were left untouched")
 		return 1
 	}
-	if err := preflightHelperSchema(cfg, prepared); err != nil {
-		if previousConfigErr == nil && previousTarget == prepared.target {
-			_ = writeRestoredConfigCLI(previousTarget, previousConfig)
-		}
+	if err := preflightHelperSchema(launchMode, prepared); err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
 		fmt.Fprintln(a.stderr, "running sessions were left untouched")
+		if previousTarget == prepared.target {
+			if rerr := restoreRenderedTarget(previousTarget, previousConfig, previousExisted); rerr != nil {
+				fmt.Fprintf(a.stderr, "but restoring %s to its previous content failed: %v\n", previousTarget, rerr)
+			}
+		}
 		return 1
 	}
 
@@ -327,7 +385,7 @@ func (a *App) runReconnect(args []string) int {
 		OverlayDNSActive:  prepared.renderOptions.OverlayDNS != nil,
 		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
 		SystemDNSServers:  systemDNSServers(cfg),
-		PrivilegedLaunch:  cfg.LaunchOrDefault(),
+		PrivilegedLaunch:  launch,
 		Sidecars:          prepared.sidecars,
 		LogMaxLines:       cfg.LogMaxLines(),
 		ResolvedServer:    prepared.resolvedServer(),
@@ -340,7 +398,7 @@ func (a *App) runReconnect(args []string) int {
 	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, startOpts)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", err)
-		a.restorePreviousSession(cfg, prepared, startOpts, stoppedSessions, previousTarget, previousConfig, previousConfigErr)
+		a.restorePreviousSession(cfg, startOpts, stoppedSessions, previousTarget, previousConfig, previousExisted)
 		return 1
 	}
 

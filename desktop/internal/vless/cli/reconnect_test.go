@@ -29,6 +29,9 @@ func installReconnectHarness(t *testing.T) *reconnectHarness {
 	previousStop := stopCurrentSessionFunc
 	previousStart := startSessionFunc
 	previousLookPath := lookPathFunc
+	previousResolve := resolveLaunchModeCLI
+	// Reconnect resolves the launch mode once; tests pin it so no live helper probe can happen.
+	resolveLaunchModeCLI = func(string, config.PrivilegedLaunchConfig) (string, error) { return config.LaunchModeSudo, nil }
 	lookPathFunc = func(file string) (string, error) {
 		return "/usr/local/bin/" + file, nil
 	}
@@ -46,6 +49,7 @@ func installReconnectHarness(t *testing.T) *reconnectHarness {
 		stopCurrentSessionFunc = previousStop
 		startSessionFunc = previousStart
 		lookPathFunc = previousLookPath
+		resolveLaunchModeCLI = previousResolve
 	})
 	return h
 }
