@@ -130,26 +130,68 @@ func (a *App) runFailClosed(args []string) int {
 	if sub == "status" {
 		return a.printFailClosedStatus(policy, tunnelUp)
 	}
-	if !policy.Enabled {
-		if err := failClosedClearCLI(vpncore.DefaultServiceConfig()); err != nil {
-			fmt.Fprintf(a.stderr, "failclosed apply failed: %v\n", err)
-			return 1
-		}
-		fmt.Fprintln(a.stdout, "fail_closed: disabled in config; anchor cleared")
-		return 0
-	}
-	table, err := a.refreshFailClosedTable(policy, tunnelUp)
+	summary, err := a.applyFailClosedPolicy(policy, tunnelUp, physical)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "failclosed apply failed: %v\n", err)
-		return 1
-	}
-	if err := failClosedApplyCLI(vpncore.DefaultServiceConfig(), physical, table); err != nil {
 		fmt.Fprintf(a.stderr, "failclosed apply failed: %v\nthe tunnel was not touched\n", err)
 		return 1
 	}
-	fmt.Fprintf(a.stdout, "fail_closed: active services=%s addresses=%d physical=%s tunnel=%s\n",
-		serviceNames(policy), len(table), strings.Join(physical, ","), upDown(tunnelUp))
+	fmt.Fprintln(a.stdout, summary)
 	return 0
+}
+
+// applyFailClosedPolicy applies an enabled policy or clears a disabled one.
+// It never touches the tunnel.
+func (a *App) applyFailClosedPolicy(policy failclosed.Policy, tunnelUp bool, physical []string) (string, error) {
+	if !policy.Enabled {
+		if err := failClosedClearCLI(vpncore.DefaultServiceConfig()); err != nil {
+			return "", err
+		}
+		return "fail_closed: disabled in config; anchor cleared", nil
+	}
+	table, err := a.refreshFailClosedTable(policy, tunnelUp)
+	if err != nil {
+		return "", err
+	}
+	if err := failClosedApplyCLI(vpncore.DefaultServiceConfig(), physical, table); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("fail_closed: active services=%s addresses=%d physical=%s tunnel=%s",
+		serviceNames(policy), len(table), strings.Join(physical, ","), upDown(tunnelUp)), nil
+}
+
+// refreshFailClosedAfterStart refreshes the address table once the tunnel is
+// up (start or reconnect through the helper). Best effort: a failure is a
+// warning and never affects the session that just started. A disabled policy
+// is left alone here; 'failclosed apply' or 'off' change it explicitly.
+func (a *App) refreshFailClosedAfterStart(policy failclosed.Policy, err error) {
+	if err != nil {
+		fmt.Fprintf(a.stderr, "warning: fail_closed not refreshed: %v\n", err)
+		return
+	}
+	if !policy.Enabled {
+		return
+	}
+	ifs, ierr := failClosedInterfacesCLI()
+	if ierr != nil {
+		fmt.Fprintf(a.stderr, "warning: fail_closed not refreshed: %v\n", ierr)
+		return
+	}
+	tunnelUp, physical := false, []string(nil)
+	for _, i := range ifs {
+		if i.Name == policy.TunnelInterface && i.Up {
+			tunnelUp = true
+		}
+		if physicalIfaceCLI.MatchString(i.Name) && i.Up {
+			physical = append(physical, i.Name)
+		}
+	}
+	sort.Strings(physical)
+	summary, aerr := a.applyFailClosedPolicy(policy, tunnelUp, physical)
+	if aerr != nil {
+		fmt.Fprintf(a.stderr, "warning: fail_closed not refreshed (the tunnel is unaffected): %v\n", aerr)
+		return
+	}
+	fmt.Fprintln(a.stdout, summary)
 }
 
 // refreshFailClosedTable resolves the policy domains, merges them into the

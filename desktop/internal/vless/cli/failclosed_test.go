@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
+	"multi-tun/desktop/internal/vless/model"
+	"multi-tun/desktop/internal/vless/session"
+	"multi-tun/desktop/internal/vless/subscription"
 )
 
 type fcFakes struct {
@@ -171,5 +174,49 @@ func TestFailClosedUnknownSubcommand(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := New(&out, &errb).Run([]string{"failclosed", "enable"}); code != 2 || f.clears != 0 || len(f.applied) != 0 {
 		t.Fatalf("exit %d", code)
+	}
+}
+
+func reconnectWithLaunchMode(t *testing.T, launchMode string) (int, string, string) {
+	t.Helper()
+	path, cacheDir := writeStableAliasReconnectConfig(t, "vless://00000000-0000-0000-0000-000000000003@203.0.113.10:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=example.com&sid=1#%F0%9F%87%BA%F0%9F%87%B8%20USA")
+	if _, err := subscription.Refresh(t.Context(), "direct", "vless://00000000-0000-0000-0000-000000000004@203.0.113.99:8443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=example.com&sid=1#%F0%9F%87%BA%F0%9F%87%B8%20USA", cacheDir); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+	installRefreshFailure(t, transientFetchError("temporary timeout"))
+	installReconnectHarness(t)
+	prev := startSessionFunc
+	startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
+		return session.CurrentSession{ID: "replacement", PID: 4343, LaunchMode: launchMode}, nil
+	}
+	t.Cleanup(func() { startSessionFunc = prev })
+	var out, errb bytes.Buffer
+	code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
+	return code, out.String(), errb.String()
+}
+
+// Claim: after a helper-launched reconnect, the fail-closed table is refreshed with the tunnel up and
+// the summary is printed; a helper apply failure is only a warning and the reconnect still succeeds.
+func TestFailClosedRefreshAfterReconnect(t *testing.T) {
+	f := &fcFakes{}
+	withFailClosedFakes(t, f, upIfs, map[string][]string{"chatgpt.com": {"104.18.32.47"}})
+	code, out, errs := reconnectWithLaunchMode(t, "helper")
+	if code != 0 || len(f.applied) != 1 || !strings.Contains(out, "fail_closed: active services=codex") || !strings.Contains(out, "tunnel=up") {
+		t.Fatalf("code %d applied %v out=%q err=%q", code, f.applied, out, errs)
+	}
+	f2 := &fcFakes{applyErr: errors.New("unsupported vpn core action")}
+	withFailClosedFakes(t, f2, upIfs, map[string][]string{"chatgpt.com": {"104.18.32.47"}})
+	code, _, errs = reconnectWithLaunchMode(t, "helper")
+	if code != 0 || !strings.Contains(errs, "tunnel is unaffected") {
+		t.Fatalf("apply failure: code %d err=%q", code, errs)
+	}
+}
+
+// Claim: a session not launched through the helper makes no fail-closed call at all (the guard fakes
+// installed by init would fail the run if one were made).
+func TestFailClosedNoRefreshWithoutHelper(t *testing.T) {
+	code, out, errs := reconnectWithLaunchMode(t, "sudo")
+	if code != 0 || strings.Contains(out, "fail_closed") || strings.Contains(errs, "fail_closed") {
+		t.Fatalf("code %d out=%q err=%q", code, out, errs)
 	}
 }

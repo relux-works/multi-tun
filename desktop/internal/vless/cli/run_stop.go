@@ -156,7 +156,16 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	printSidecarStarts(a.stdout, started.Sidecars)
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
+	if usesVPNCoreHelper(started.LaunchMode) {
+		a.refreshFailClosedAfterStart(cfg.FailClosedPolicy())
+	}
 	return 0
+}
+
+// usesVPNCoreHelper reports whether the session runs through the shared
+// vpn-core helper, which is the only component that enforces fail_closed.
+func usesVPNCoreHelper(launchMode string) bool {
+	return launchMode == "helper" || launchMode == "launchd"
 }
 
 func (a *App) runReconnect(args []string) int {
@@ -275,6 +284,9 @@ func (a *App) runReconnect(args []string) int {
 	printSidecarStarts(a.stdout, started.Sidecars)
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
+	if usesVPNCoreHelper(started.LaunchMode) {
+		a.refreshFailClosedAfterStart(cfg.FailClosedPolicy())
+	}
 	return 0
 }
 

@@ -607,6 +607,8 @@ vless-tun failclosed apply    # resolve the services, send interfaces and addres
 vless-tun failclosed off      # rollback in one command: clear the anchor, release the pf token
 ```
 
+- After `vless-tun start` or `reconnect` through the helper, the address table is refreshed with the
+  tunnel up. A refresh failure is only a warning; the session is never affected.
 - `off` never stops, restarts or reconfigures sing-box, its routes or DNS, and stays off after reboot.
   To keep it off when the policy is applied again, set `"fail_closed": {"enabled": false}`.
 - If the helper does not answer: `sudo pfctl -a com.apple/works.relux.vpn-core.failclosed -F all`.
