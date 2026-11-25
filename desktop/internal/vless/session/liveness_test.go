@@ -363,17 +363,18 @@ func TestStartPreservesRecordWhenLivenessIsUnknown(t *testing.T) {
 	}
 }
 
-// Claim: when a start fails after launching its process (here sing-box exits during startup) and
-// stopping that process fails too, Start returns the session with both errors, so a caller can see
-// that the process may still run; when the stop succeeds, Start returns no session (positive
-// control). Limit: exercised on the helper path with fake vpn-core start, signal and liveness.
+// Claim: when a start fails after launching its process (here sing-box exits during startup), Start
+// returns the session either way, so a caller can confirm the process and sidecars are gone before
+// starting anything else; a failed stop is joined to the error, a clean stop is not; neither carries
+// ErrNothingStarted, because a process did run. Limit: exercised on the helper path with fake
+// vpn-core start, signal and liveness.
 func TestStartReturnsSessionWhenStoppingFailedStartFails(t *testing.T) {
 	signalFailure := errors.New("helper refused the signal")
 	for _, tt := range []struct {
 		name      string
 		signalErr error
 		wantPID   int
-	}{{"stop fails", signalFailure, 4242}, {"stop succeeds", nil, 0}} {
+	}{{"stop fails", signalFailure, 4242}, {"stop succeeds", nil, 4242}} {
 		t.Run(tt.name, func(t *testing.T) {
 			previousStart, previousSignal, previousAlive := vpnCoreStartSingBoxSession, vpnCoreSignalSession, processAliveSession
 			vpnCoreStartSingBoxSession = func([]byte, string, int, bool) (int, string, error) { return 4242, "own-child-handle", nil }
@@ -395,8 +396,11 @@ func TestStartReturnsSessionWhenStoppingFailedStartFails(t *testing.T) {
 			if got.PID != tt.wantPID {
 				t.Fatalf("returned session PID %d, want %d", got.PID, tt.wantPID)
 			}
-			if tt.signalErr != nil && (!errors.Is(err, signalFailure) || !strings.Contains(err.Error(), "stopping the failed start also failed")) {
-				t.Fatalf("err=%v, want the stop failure joined", err)
+			if joined := strings.Contains(err.Error(), "stopping the failed start also failed"); joined != (tt.signalErr != nil) || (tt.signalErr != nil && !errors.Is(err, signalFailure)) {
+				t.Fatalf("err=%v, stop failure joined=%v, want %v", err, joined, tt.signalErr != nil)
+			}
+			if errors.Is(err, ErrNothingStarted) {
+				t.Fatalf("err=%v carries ErrNothingStarted after a process ran", err)
 			}
 		})
 	}
