@@ -49,6 +49,7 @@ const (
 )
 
 var (
+	errOpenConnectProcessNotFound        = errors.New("openconnect process not found")
 	resolvePrivilegedModeOpenConnect     = resolvePrivilegedMode
 	execLookPathOpenConnect              = exec.LookPath
 	execCommandOpenConnect               = exec.Command
@@ -476,8 +477,11 @@ func Disconnect(cacheDir string, timeout time.Duration) (CurrentSession, string,
 
 func CurrentRuntime() (*RuntimeStatus, error) {
 	pid, err := findOpenConnectPID()
-	if err != nil {
+	if errors.Is(err, errOpenConnectProcessNotFound) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	return &RuntimeStatus{
 		PID:       pid,
@@ -3719,7 +3723,11 @@ func buildOpenConnectCommandPreview(ocPath, server, script, pidFilePath string, 
 func findOpenConnectPID() (int, error) {
 	out, err := execCommandOpenConnect("pgrep", "-x", "openconnect").Output()
 	if err != nil {
-		return 0, fmt.Errorf("openconnect process not found")
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == 1 && len(out) == 0 && len(exitError.Stderr) == 0 {
+			return 0, errOpenConnectProcessNotFound
+		}
+		return 0, fmt.Errorf("inspect openconnect process: %w", err)
 	}
 	return findOpenConnectPIDFromOutput(string(out))
 }
@@ -3727,11 +3735,15 @@ func findOpenConnectPID() (int, error) {
 func findOpenConnectPIDFromOutput(output string) (int, error) {
 	lines := strings.Fields(strings.TrimSpace(output))
 	if len(lines) == 0 {
-		return 0, fmt.Errorf("openconnect process not found")
+		return 0, errors.New("invalid openconnect pid response")
 	}
-	pid, err := strconv.Atoi(lines[len(lines)-1])
-	if err != nil {
-		return 0, fmt.Errorf("invalid openconnect pid: %w", err)
+	var pid int
+	for _, line := range lines {
+		parsed, err := strconv.Atoi(line)
+		if err != nil || parsed <= 0 {
+			return 0, errors.New("invalid openconnect pid response")
+		}
+		pid = parsed
 	}
 	return pid, nil
 }

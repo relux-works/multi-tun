@@ -546,8 +546,10 @@ func loadOpenConnectStopSession(cacheDir string) (CurrentSession, error) {
 	current, err := LoadCurrent(cacheDir)
 	if errors.Is(err, os.ErrNotExist) {
 		pid, pidErr := findOpenConnectPID()
-		if pidErr != nil {
+		if errors.Is(pidErr, errOpenConnectProcessNotFound) {
 			current = CurrentSession{}
+		} else if pidErr != nil {
+			return CurrentSession{}, pidErr
 		} else {
 			current = CurrentSession{PID: pid}
 		}
