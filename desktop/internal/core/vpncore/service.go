@@ -121,14 +121,13 @@ func UninstallService(cfg ServiceConfig, options ...MaintenanceOptions) error {
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
 		configs = append(configs, compat.ServiceConfig)
 	}
-	err = uninstallServiceConfigs(append(configs, cfg), "", guard)
-	var maintenanceErr *maintenanceBootoutError
-	if errors.As(err, &maintenanceErr) {
-		// The daemon may still run its fail-closed watchdog; leave pf alone.
-		return err
+	if err := uninstallServiceConfigs(append(configs, cfg), "", guard); err != nil {
+		// Unless every service is confirmed gone, a live watchdog could re-apply
+		// the anchor; leave pf and the fail-closed state alone.
+		return errors.Join(err, errors.New("fail-closed anchor and state kept until every service is confirmed gone; run uninstall again"))
 	}
 	// The daemon is gone, so nothing re-applies the anchor after this.
-	return errors.Join(err, uninstallFailClosed())
+	return uninstallFailClosed()
 }
 
 // uninstallFailClosed removes the fail-closed anchor, releases the helper's pf
@@ -146,8 +145,16 @@ func uninstallFailClosed() error {
 		errs = append(errs, fmt.Errorf("flush fail-closed anchor: %w", flushErr))
 	}
 	var st failClosedState
-	if err := json.Unmarshal(stateRaw, &st); err == nil && st.Token != "" {
-		if _, err := runPrivilegedCommandVPNCore("/sbin/pfctl", "-X", st.Token); err != nil {
+	token := ""
+	if err := json.Unmarshal(stateRaw, &st); err == nil {
+		token = st.Token
+	} else if m := rawTokenRE.FindSubmatch(stateRaw); m != nil {
+		token = string(m[1])
+	} else {
+		errs = append(errs, fmt.Errorf("fail-closed state is unreadable, so its pf token is unknown; state kept for inspection: %w", err))
+	}
+	if token != "" {
+		if _, err := runPrivilegedCommandVPNCore("/sbin/pfctl", "-X", token); err != nil {
 			errs = append(errs, fmt.Errorf("release fail-closed pf token: %w", err))
 		}
 	}
@@ -839,8 +846,8 @@ func validateRequestShape(request Request) error {
 	onlyAction := len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
 	switch request.Action {
 	case "failclosed.apply":
-		if request.FailClosed == nil {
-			return errors.New("failclosed.apply needs fail_closed interfaces and table")
+		if request.FailClosed == nil || len(request.FailClosed.Table) == 0 || len(request.FailClosed.Interfaces) == 0 {
+			return errors.New("failclosed.apply needs fail_closed interfaces and a non-empty table")
 		}
 		if len(request.FailClosed.Interfaces) > 16 || len(request.FailClosed.Table) > 4096 {
 			return errors.New("failclosed.apply fields exceed their size limits")
