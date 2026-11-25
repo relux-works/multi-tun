@@ -32,22 +32,30 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o "$R/bin/labclient" ./cmd/labcl
 F=sing-box-1.13.3-linux-arm64-musl.tar.gz
 curl -sSLf -o "$R/dl/$F" "https://github.com/SagerNet/sing-box/releases/download/v1.13.3/$F"
 
+# Every host step fails the whole block: no stale image, server or network can carry a run.
+set -euo pipefail
 # Own Colima profile; mount only the output folder, no inotify forwarding, no context switch.
 colima start --profile multi-tun --activate=false --mount-inotify=false \
   --mount "$R/out:w" --cpus 4 --memory 4
 export DOCKER_CONTEXT=colima-multi-tun
-docker build -t sblab:1.13.3 .
-# Start from a clean state every run: no leftover server or network from an earlier run.
-docker rm -f sblab-srv >/dev/null 2>&1; docker network rm sblab >/dev/null 2>&1
+IMG="sblab:run-$(date -u +%Y%m%dT%H%M%SZ)"   # unique per run, so a failed build cannot reuse an old image
+docker build -t "$IMG" .
+# Remove any earlier server and network, then prove they are gone.
+docker rm -f sblab-srv >/dev/null 2>&1 || true
+docker network rm sblab >/dev/null 2>&1 || true
+! docker ps -a --format '{{.Names}}' | grep -qx sblab-srv
+! docker network ls --format '{{.Name}}' | grep -qx sblab
 docker network create --subnet 10.77.0.0/24 sblab
 docker run -d --name sblab-srv --network sblab --ip 10.77.0.10 --cap-add NET_ADMIN \
-  -v "$R/out:/out" sblab:1.13.3 \
+  -v "$R/out:/out" "$IMG" \
   sh -ec 'ip addr add 203.0.113.10/32 dev lo; exec labserver --ca-out /out/ca.pem'
 
 STACK=system   # or gvisor, mixed
-# Every step fails the run: a config sing-box rejects, sing-box exiting, a missing tun0, a bench
-# route that does not use tun0, or sing-box dying during the run. Only then is the summary valid.
-docker run --rm --network sblab --privileged --device /dev/net/tun -v "$R/out:/out" sblab:1.13.3 sh -ec "
+# Every client step fails the run: a config sing-box rejects, sing-box exiting, a missing tun0, a bench
+# route that does not use tun0, or sing-box dying during the run. The client summary is held back and
+# printed only after the final liveness and route checks, so a printed summary always comes from a valid
+# environment; the exit status is then labclient's own (1 when a stream failed, which is a result).
+docker run --rm --network sblab --privileged --device /dev/net/tun -v "$R/out:/out" "$IMG" sh -ec "
   sing-box check -c /etc/lab/singbox-$STACK.json
   sing-box run -c /etc/lab/singbox-$STACK.json > /out/singbox-$STACK.log 2>&1 & SB=\$!
   for i in \$(seq 1 20); do ip link show tun0 >/dev/null 2>&1 && break; kill -0 \$SB 2>/dev/null || { echo 'sing-box exited' >&2; exit 3; }; sleep 0.5; done
@@ -55,15 +63,17 @@ docker run --rm --network sblab --privileged --device /dev/net/tun -v "$R/out:/o
   ip route add 203.0.113.0/24 dev tun0 metric 10
   ip route add 203.0.113.0/24 via 10.77.0.10 dev eth0 metric 20
   ip route get 203.0.113.10 | grep -q 'dev tun0' || { echo 'bench route does not use tun0' >&2; exit 5; }
-  labclient --label tun-$STACK --streams 8 --duration 90s --churn 32
-  kill -0 \$SB 2>/dev/null || { echo 'sing-box died during the run' >&2; exit 6; }"
+  LC=0; labclient --label tun-$STACK --streams 8 --duration 90s --churn 32 > /tmp/summary.json || LC=\$?
+  kill -0 \$SB 2>/dev/null || { echo 'sing-box died during the run' >&2; exit 6; }
+  ip route get 203.0.113.10 | grep -q 'dev tun0' || { echo 'bench route left tun0 during the run' >&2; exit 7; }
+  cat /tmp/summary.json; exit \$LC"
 ```
 
 The client prints one JSON summary and exits 1 when any stream failed or mismatched. The
 sing-box `direct` outbound is bound to `eth0`, so it reaches the server over the metric-20
 route while the client's own traffic takes the TUN route.
 
-Clean up when done: `docker rm -f sblab-srv; docker network rm sblab; colima stop --profile multi-tun`.
+Clean up when done: `docker rm -f sblab-srv; docker network rm sblab; docker rmi "$IMG"; colima stop --profile multi-tun`.
 
 Negative control: `STACK=missing` (no such config) must end with a non-zero exit from `sing-box
 check` and print no client summary.
