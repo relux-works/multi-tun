@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -95,6 +96,7 @@ type FailClosedStatus struct {
 	PFEnabled        bool      `json:"pf_enabled"`
 	AnchorLoaded     bool      `json:"anchor_loaded"`
 	LiveTableEntries int       `json:"live_table_entries"`
+	TableMatches     bool      `json:"table_matches"`
 	Enforcing        bool      `json:"enforcing"`
 	LiveError        string    `json:"live_error,omitempty"`
 	Backoff          string    `json:"backoff,omitempty"`
