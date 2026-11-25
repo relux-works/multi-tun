@@ -449,48 +449,50 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 	guardAlive := sessionAliveFunc
 	t.Cleanup(func() { sessionAliveFunc = guardAlive })
 	for _, tc := range cases {
-		h := &helperReconnect{startErrs: []error{errors.New("liveness unknown")}}
-		path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
-		fixtureStart, fixtureStop, prevAlive := startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc
-		startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
-			s, err := fixtureStart(cacheDir, configPath, profile, options)
-			if err != nil {
-				return replacement, err
+		t.Run(tc.name, func(t *testing.T) {
+			h := &helperReconnect{startErrs: []error{errors.New("liveness unknown")}}
+			path, _ := setupHelperReconnect(t, h, config.LaunchModeHelper, func([]byte) error { return nil })
+			fixtureStart, fixtureStop, prevAlive := startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc
+			startSessionFunc = func(cacheDir, configPath string, profile model.Profile, options session.StartOptions) (session.CurrentSession, error) {
+				s, err := fixtureStart(cacheDir, configPath, profile, options)
+				if err != nil {
+					return replacement, err
+				}
+				return s, nil
 			}
-			return s, nil
-		}
-		stops := 0
-		stopCurrentSessionFunc = func(c string, l config.PrivilegedLaunchConfig, f bool, d time.Duration) (*session.CurrentSession, string, error) {
-			stops++
-			if stops == 2 {
-				h.events = append(h.events, "stop")
-				return tc.stop()
+			stops := 0
+			stopCurrentSessionFunc = func(c string, l config.PrivilegedLaunchConfig, f bool, d time.Duration) (*session.CurrentSession, string, error) {
+				stops++
+				if stops == 2 {
+					h.events = append(h.events, "stop")
+					return tc.stop()
+				}
+				return fixtureStop(c, l, f, d)
 			}
-			return fixtureStop(c, l, f, d)
-		}
-		var aliveCalls []session.CurrentSession
-		sessionAliveFunc = func(c session.CurrentSession) (bool, int, error) {
-			aliveCalls = append(aliveCalls, c)
-			if tc.alive == nil {
-				t.Fatalf("%s: unexpected liveness check", tc.name)
+			var aliveCalls []session.CurrentSession
+			sessionAliveFunc = func(c session.CurrentSession) (bool, int, error) {
+				aliveCalls = append(aliveCalls, c)
+				if tc.alive == nil {
+					t.Fatal("unexpected liveness check")
+				}
+				return tc.alive(c)
 			}
-			return tc.alive(c)
-		}
-		var out, errb bytes.Buffer
-		code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
-		startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc = fixtureStart, fixtureStop, prevAlive
-		if code != 1 || strings.Join(h.events, ",") != tc.wantEvents {
-			t.Fatalf("%s: exit %d events %v stderr %q", tc.name, code, h.events, errb.String())
-		}
-		if len(aliveCalls) != tc.wantAlive || (tc.wantAlive > 0 && aliveCalls[0].ID != replacement.ID) {
-			t.Fatalf("%s: liveness checks %v, want %d of the replacement", tc.name, aliveCalls, tc.wantAlive)
-		}
-		restored := strings.HasSuffix(tc.wantEvents, "stop,start")
-		if mayRun := strings.Contains(errb.String(), "may still be running"); mayRun == restored {
-			t.Fatalf("%s: restored=%v but stderr %q", tc.name, restored, errb.String())
-		}
-		if tc.wantErr != "" && !strings.Contains(errb.String(), tc.wantErr) {
-			t.Fatalf("%s: stderr %q lacks %q", tc.name, errb.String(), tc.wantErr)
-		}
+			var out, errb bytes.Buffer
+			code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
+			startSessionFunc, stopCurrentSessionFunc, sessionAliveFunc = fixtureStart, fixtureStop, prevAlive
+			if code != 1 || strings.Join(h.events, ",") != tc.wantEvents {
+				t.Fatalf("exit %d events %v stderr %q", code, h.events, errb.String())
+			}
+			if len(aliveCalls) != tc.wantAlive || (tc.wantAlive > 0 && aliveCalls[0].ID != replacement.ID) {
+				t.Fatalf("liveness checks %v, want %d of the replacement", aliveCalls, tc.wantAlive)
+			}
+			restored := strings.HasSuffix(tc.wantEvents, "stop,start")
+			if mayRun := strings.Contains(errb.String(), "may still be running"); mayRun == restored {
+				t.Fatalf("restored=%v but stderr %q", restored, errb.String())
+			}
+			if tc.wantErr != "" && !strings.Contains(errb.String(), tc.wantErr) {
+				t.Fatalf("stderr %q lacks %q", errb.String(), tc.wantErr)
+			}
+		})
 	}
 }
