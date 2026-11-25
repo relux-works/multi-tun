@@ -1,6 +1,7 @@
 package failclosed
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -180,6 +181,27 @@ func TestValidateTable(t *testing.T) {
 		if _, err := ValidateTable([]string{bad}); err == nil {
 			t.Errorf("ValidateTable(%q) accepted", bad)
 		}
+	}
+}
+
+// Claim: ValidateTable, which bounds the table the helper accepts, admits exactly MaxEntries distinct
+// entries and refuses one more; duplicates of an entry do not count toward the bound. Limit: only
+// /32 entries from one public /8 are used.
+func TestValidateTableEntryLimit(t *testing.T) {
+	entries := make([]string, 0, MaxEntries+1)
+	for i := 0; i <= MaxEntries; i++ {
+		entries = append(entries, fmt.Sprintf("11.%d.%d.%d/32", i>>16&0xff, i>>8&0xff, i&0xff))
+	}
+	got, err := ValidateTable(entries[:MaxEntries])
+	if err != nil || len(got) != MaxEntries {
+		t.Fatalf("MaxEntries entries: %d accepted, err %v", len(got), err)
+	}
+	withDuplicates := append(append([]string{}, entries[:MaxEntries]...), entries[0], " "+entries[1])
+	if got, err := ValidateTable(withDuplicates); err != nil || len(got) != MaxEntries {
+		t.Fatalf("MaxEntries entries plus duplicates: %d accepted, err %v", len(got), err)
+	}
+	if got, err := ValidateTable(entries); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("MaxEntries+1 entries: accepted %d, err %v", len(got), err)
 	}
 }
 
