@@ -22,6 +22,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"multi-tun/desktop/internal/core/failclosed"
 )
 
 const (
@@ -119,7 +121,42 @@ func UninstallService(cfg ServiceConfig, options ...MaintenanceOptions) error {
 	for _, compat := range compatibilityServiceConfigsVPNCore(cfg) {
 		configs = append(configs, compat.ServiceConfig)
 	}
-	return uninstallServiceConfigs(append(configs, cfg), "", guard)
+	err = uninstallServiceConfigs(append(configs, cfg), "", guard)
+	var maintenanceErr *maintenanceBootoutError
+	if errors.As(err, &maintenanceErr) {
+		// The daemon may still run its fail-closed watchdog; leave pf alone.
+		return err
+	}
+	// The daemon is gone, so nothing re-applies the anchor after this.
+	return errors.Join(err, uninstallFailClosed())
+}
+
+// uninstallFailClosed removes the fail-closed anchor, releases the helper's pf
+// token and deletes its state. pf tokens outlive the daemon process, so the
+// token recorded in the state must be released here. When no state exists the
+// feature was never used and a failed flush of the absent anchor is ignored.
+func uninstallFailClosed() error {
+	stateRaw, stateErr := runPrivilegedCommandVPNCore("cat", failClosedStatePathVPNCore)
+	_, flushErr := runPrivilegedCommandVPNCore("/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all")
+	if stateErr != nil {
+		return nil
+	}
+	var errs []error
+	if flushErr != nil {
+		errs = append(errs, fmt.Errorf("flush fail-closed anchor: %w", flushErr))
+	}
+	var st failClosedState
+	if err := json.Unmarshal(stateRaw, &st); err == nil && st.Token != "" {
+		if _, err := runPrivilegedCommandVPNCore("/sbin/pfctl", "-X", st.Token); err != nil {
+			errs = append(errs, fmt.Errorf("release fail-closed pf token: %w", err))
+		}
+	}
+	if len(errs) == 0 {
+		if _, err := runPrivilegedCommandVPNCore("rm", "-f", failClosedStatePathVPNCore); err != nil {
+			errs = append(errs, fmt.Errorf("remove fail-closed state: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func cleanupCompatibilityServices(cfg ServiceConfig, guards ...*maintenanceGuard) error {

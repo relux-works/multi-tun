@@ -383,3 +383,45 @@ func TestFailClosedWatchLoopBounded(t *testing.T) {
 		t.Fatal("watch loop did not repair a disabled pf within 2 s")
 	}
 }
+
+// Claim: uninstall flushes the fail-closed anchor, releases the recorded pf token and removes the
+// state after the daemon is gone; with no state (feature never used) a failed flush is ignored; with a
+// state, a failed flush is reported and the state is kept for another attempt.
+func TestUninstallFailClosed(t *testing.T) {
+	prev := failClosedStatePathVPNCore
+	t.Cleanup(func() { failClosedStatePathVPNCore = prev })
+	failClosedStatePathVPNCore = "/Library/Application Support/works.relux.vpn-core/failclosed.json"
+
+	run := func(state string, flushFails bool) ([]string, error) {
+		var cmds []string
+		withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+			c := strings.Join(append([]string{name}, args...), " ")
+			cmds = append(cmds, c)
+			switch {
+			case name == "cat":
+				if state == "" {
+					return nil, errors.New("no such file")
+				}
+				return []byte(state), nil
+			case strings.Contains(c, "-F all") && flushFails:
+				return nil, errors.New("pfctl failed")
+			}
+			return nil, nil
+		})
+		return cmds, uninstallFailClosed()
+	}
+
+	cmds, err := run(`{"enabled":true,"token":"42"}`, false)
+	joined := strings.Join(cmds, "|")
+	if err != nil || !strings.Contains(joined, "/sbin/pfctl -a "+failclosed.AnchorName+" -F all") ||
+		!strings.Contains(joined, "/sbin/pfctl -X 42") || !strings.Contains(joined, "rm -f "+failClosedStatePathVPNCore) {
+		t.Fatalf("with state: err=%v cmds=%q", err, cmds)
+	}
+	if _, err := run("", true); err != nil {
+		t.Fatalf("never used: err=%v", err)
+	}
+	cmds, err = run(`{"enabled":true,"token":"42"}`, true)
+	if err == nil || strings.Contains(strings.Join(cmds, "|"), "rm -f") {
+		t.Fatalf("failed flush: err=%v cmds=%q (state must be kept)", err, cmds)
+	}
+}

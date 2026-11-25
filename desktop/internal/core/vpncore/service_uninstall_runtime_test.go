@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"multi-tun/desktop/internal/core/failclosed"
 )
 
 func TestUninstallServiceRemovesRootOwnedRuntimeAfterForget(t *testing.T) {
@@ -37,6 +39,9 @@ func TestUninstallServiceRemovesRootOwnedRuntimeAfterForget(t *testing.T) {
 		{commands.executable, "_quarantine-runtime", cfg.Label, strconv.FormatUint(uint64(expected.Dev), 10), strconv.FormatUint(expected.Ino, 10)},
 		{"rm", "-rf", quarantine},
 		{"rm", "-rf", cfg.HelperDir, privateSocketDir(cfg)},
+		// Fail-closed cleanup runs last, after the daemon is gone.
+		{"cat", failClosedStatePathVPNCore},
+		{"/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all"},
 	}
 	if !reflect.DeepEqual(commands.calls, want) {
 		t.Fatalf("commands = %v, want %v", commands.calls, want)
@@ -147,7 +152,7 @@ func TestUninstallServiceRefusesUnexpectedRuntimeTypeOrOwner(t *testing.T) {
 }
 
 func TestUninstallServiceEmptyRuntimePreservesCommands(t *testing.T) {
-	// An empty RuntimeDir leaves the prior launchd, plist/socket and helper/private-socket removal sequence unchanged.
+	// An empty RuntimeDir leaves the prior launchd, plist/socket and helper/private-socket removal sequence unchanged; fail-closed cleanup follows it.
 	cfg := testInstallConfig(t)
 	commands := withRuntimeUninstallCommands(t, cfg)
 	if err := UninstallService(cfg); err != nil {
@@ -158,6 +163,8 @@ func TestUninstallServiceEmptyRuntimePreservesCommands(t *testing.T) {
 		{"launchctl", "print", launchctlTarget(cfg.Label)},
 		{"rm", "-f", cfg.PlistPath, cfg.SocketPath},
 		{"rm", "-rf", cfg.HelperDir, privateSocketDir(cfg)},
+		{"cat", failClosedStatePathVPNCore},
+		{"/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all"},
 	}
 	if !reflect.DeepEqual(commands.calls, want) {
 		t.Fatalf("commands = %v, want %v", commands.calls, want)
@@ -380,6 +387,14 @@ func withRuntimeUninstallCommands(t *testing.T, configs ...ServiceConfig) *runti
 				}
 				return output.Bytes(), err
 			}
+		}
+		// Fail-closed cleanup after the services are gone: no state in these fixtures, so the read
+		// fails and the flush of the absent anchor is attempted and ignored. Anything else stays fatal.
+		if reflect.DeepEqual(command, []string{"cat", failClosedStatePathVPNCore}) {
+			return nil, errors.New("no such file")
+		}
+		if reflect.DeepEqual(command, []string{"/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all"}) {
+			return nil, nil
 		}
 		for _, quarantine := range commands.quarantines {
 			if reflect.DeepEqual(command, []string{"rm", "-rf", quarantine}) {
