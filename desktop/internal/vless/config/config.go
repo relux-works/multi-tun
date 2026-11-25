@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"multi-tun/desktop/internal/core/failclosed"
 )
 
 const legacyRepoConfigPath = "configs/local.json"
@@ -45,19 +48,22 @@ var iso3166Alpha2 = func() map[string]struct{} {
 }()
 
 type ProjectConfig struct {
-	Current   *CurrentConfig          `json:"current,omitempty"`
-	Servers   map[string]ServerConfig `json:"servers,omitempty"`
-	CacheDir  string                  `json:"cache_dir,omitempty"`
-	Source    SourceConfig            `json:"source,omitempty"`
-	Default   *DefaultConfig          `json:"default,omitempty"`
-	Network   NetworkConfig           `json:"network,omitempty"`
-	Launch    *LaunchConfig           `json:"launch,omitempty"`
-	Routing   RoutingConfig           `json:"routing,omitempty"`
-	Engine    *EngineConfig           `json:"engine,omitempty"`
-	Singbox   *SingboxConfig          `json:"singbox,omitempty"`
-	DNS       DNSConfig               `json:"dns,omitempty"`
-	Logging   LoggingConfig           `json:"logging,omitempty"`
-	Artifacts ArtifactsConfig         `json:"artifacts,omitempty"`
+	Current  *CurrentConfig          `json:"current,omitempty"`
+	Servers  map[string]ServerConfig `json:"servers,omitempty"`
+	CacheDir string                  `json:"cache_dir,omitempty"`
+	Source   SourceConfig            `json:"source,omitempty"`
+	Default  *DefaultConfig          `json:"default,omitempty"`
+	Network  NetworkConfig           `json:"network,omitempty"`
+	Launch   *LaunchConfig           `json:"launch,omitempty"`
+	Routing  RoutingConfig           `json:"routing,omitempty"`
+	Engine   *EngineConfig           `json:"engine,omitempty"`
+	Singbox  *SingboxConfig          `json:"singbox,omitempty"`
+	DNS      DNSConfig               `json:"dns,omitempty"`
+	Logging  LoggingConfig           `json:"logging,omitempty"`
+	// FailClosed lists services that must never leave by the direct route while
+	// the personal tunnel is down. Absent means enabled with the default list.
+	FailClosed *FailClosedConfig `json:"fail_closed,omitempty"`
+	Artifacts  ArtifactsConfig   `json:"artifacts,omitempty"`
 
 	SubscriptionURL string        `json:"subscription_url,omitempty"`
 	SelectedProfile string        `json:"selected_profile,omitempty"`
@@ -640,7 +646,70 @@ func (c ProjectConfig) validateFlat() error {
 	if c.LogMaxLines() < 0 {
 		return errors.New("logging.max_lines must be >= 0; set 0 to disable bounded tail logs or a positive line count such as 1000")
 	}
+	if _, err := c.FailClosedPolicy(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// FailClosedConfig is the fail_closed section of the project config.
+type FailClosedConfig struct {
+	Enabled         *bool                  `json:"enabled,omitempty"`
+	TunnelInterface string                 `json:"tunnel_interface,omitempty"`
+	Services        []FailClosedServiceRef `json:"services,omitempty"`
+}
+
+// FailClosedServiceRef is a catalog service name ("codex") or a full service object.
+type FailClosedServiceRef struct {
+	Name    string
+	Service *failclosed.Service
+}
+
+func (r *FailClosedServiceRef) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		r.Name, r.Service = name, nil
+		return nil
+	}
+	var svc failclosed.Service
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&svc); err != nil {
+		return fmt.Errorf("fail_closed.services entry must be a catalog name or an object with name, domains and cidrs: %w", err)
+	}
+	r.Name, r.Service = svc.Name, &svc
+	return nil
+}
+
+func (r FailClosedServiceRef) MarshalJSON() ([]byte, error) {
+	if r.Service != nil {
+		return json.Marshal(r.Service)
+	}
+	return json.Marshal(r.Name)
+}
+
+// FailClosedPolicy resolves the fail_closed section. A missing section or a
+// missing services list yields the default list; the tunnel interface
+// defaults to network.tun.interface_name.
+func (c ProjectConfig) FailClosedPolicy() (failclosed.Policy, error) {
+	var (
+		enabled *bool
+		iface   string
+		entries []failclosed.Entry
+	)
+	if fc := c.FailClosed; fc != nil {
+		enabled, iface = fc.Enabled, fc.TunnelInterface
+		if fc.Services != nil {
+			entries = make([]failclosed.Entry, 0, len(fc.Services))
+			for _, ref := range fc.Services {
+				entries = append(entries, failclosed.Entry{Name: ref.Name, Service: ref.Service})
+			}
+		}
+	}
+	if strings.TrimSpace(iface) == "" {
+		iface = c.TunInterfaceName()
+	}
+	return failclosed.Resolve(enabled, iface, entries)
 }
 
 func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, EffectiveSelection, error) {
