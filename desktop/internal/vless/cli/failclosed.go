@@ -291,6 +291,7 @@ func (a *App) printFailClosedStatus(policy failclosed.Policy, tunnelUp bool) int
 		fmt.Fprintf(a.stdout, "pf_enabled: %t\n", st.PFEnabled)
 		fmt.Fprintf(a.stdout, "anchor_loaded: %t\n", st.AnchorLoaded)
 		fmt.Fprintf(a.stdout, "live_table_entries: %d\n", st.LiveTableEntries)
+		fmt.Fprintf(a.stdout, "table_matches: %t\n", st.TableMatches)
 	}
 	if st.LiveError != "" {
 		fmt.Fprintf(a.stdout, "live_error: %s\n", st.LiveError)

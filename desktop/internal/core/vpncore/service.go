@@ -130,18 +130,35 @@ func UninstallService(cfg ServiceConfig, options ...MaintenanceOptions) error {
 	return uninstallFailClosed()
 }
 
+// isNoSuchFile reports whether a privileged read failed because the file does
+// not exist (cat's "No such file or directory").
+func isNoSuchFile(err error, output []byte) bool {
+	text := strings.ToLower(err.Error() + " " + string(output))
+	return errors.Is(err, os.ErrNotExist) || strings.Contains(text, "no such file")
+}
+
 // uninstallFailClosed removes the fail-closed anchor, releases the helper's pf
 // token and deletes its state. pf tokens outlive the daemon process, so the
 // token recorded in the state must be released here. When no state exists the
 // feature was never used and a failed flush of the absent anchor is ignored.
 func uninstallFailClosed() error {
 	stateRaw, stateErr := runPrivilegedCommandVPNCore("cat", failClosedStatePathVPNCore)
-	_, flushErr := runPrivilegedCommandVPNCore("/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all")
-	if stateErr != nil || len(bytes.TrimSpace(stateRaw)) == 0 {
-		// No state (or an empty file): the feature was never used, so there is
-		// no token to release and a failed flush of the absent anchor is moot.
+	if stateErr != nil {
+		if !isNoSuchFile(stateErr, stateRaw) {
+			// A read failure is not absence: the state may hold a token. Keep
+			// the anchor and the state and report.
+			return fmt.Errorf("cannot read the fail-closed state (anchor and state kept): %w", stateErr)
+		}
+		// Confirmed absent: the feature was never used; flushing the absent
+		// anchor is harmless and its failure is moot.
+		_, _ = runPrivilegedCommandVPNCore("/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all")
 		return nil
 	}
+	if len(bytes.TrimSpace(stateRaw)) == 0 {
+		_, _ = runPrivilegedCommandVPNCore("/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all")
+		return nil
+	}
+	_, flushErr := runPrivilegedCommandVPNCore("/sbin/pfctl", "-a", failclosed.AnchorName, "-F", "all")
 	var errs []error
 	if flushErr != nil {
 		errs = append(errs, fmt.Errorf("flush fail-closed anchor: %w", flushErr))

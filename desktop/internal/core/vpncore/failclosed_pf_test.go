@@ -328,13 +328,48 @@ func (p *statefulPF) run(args []string, stdin string) ([]byte, error) {
 	case strings.Contains(j, "-T replace"):
 		p.table = stdin
 	case strings.HasSuffix(j, "-s rules"):
-		return []byte(p.rules), nil
+		return []byte(pfNormalizedRules(p.rules)), nil
 	case strings.HasSuffix(j, "-T show"):
-		return []byte(p.table), nil
+		return []byte(pfShownTable(p.table)), nil
 	case strings.HasSuffix(j, "-F all"):
 		p.rules, p.table = "", ""
 	}
 	return nil, nil
+}
+
+// pfNormalizedRules mimics pfctl -s rules: no comments or table definitions,
+// one "block return out quick on IF from any to <t>" line per interface, and
+// any other rule line passed through.
+func pfNormalizedRules(loaded string) string {
+	var out []string
+	for _, line := range strings.Split(loaded, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "", strings.HasPrefix(line, "#"), strings.HasPrefix(line, "table "):
+		case strings.HasPrefix(line, "block return out quick on { "):
+			rest := strings.TrimPrefix(line, "block return out quick on { ")
+			ifs := strings.Fields(rest[:strings.Index(rest, "}")])
+			for _, i := range ifs {
+				out = append(out, "block return out quick on "+i+" from any to <failclosed>")
+			}
+		default:
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+// pfShownTable mimics pfctl -T show: host entries without a prefix length.
+func pfShownTable(loaded string) string {
+	var out []string
+	for _, l := range strings.Split(loaded, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		out = append(out, "   "+strings.TrimSuffix(strings.TrimSuffix(l, "/32"), "/128"))
+	}
+	return strings.Join(out, "\n") + "\n"
 }
 
 // Other parties' acts (not our calls).
@@ -348,9 +383,9 @@ func (p *statefulPF) disableByOther()    { p.enabled = false; p.tokens = map[str
 // Check, the same act leaves the block missing, so the restore comes from the watchdog.
 func TestFailClosedWatchdogRecovers(t *testing.T) {
 	acts := map[string]func(*statefulPF){
-		"anchor table missing":         (*statefulPF).reloadPFConf,
-		"anchor rules missing":         (*statefulPF).reloadAppleAnchor,
-		"pf disabled by another party": (*statefulPF).disableByOther,
+		"anchor table missing or altered": (*statefulPF).reloadPFConf,
+		"anchor rules missing or altered": (*statefulPF).reloadAppleAnchor,
+		"pf disabled by another party":    (*statefulPF).disableByOther,
 	}
 	for want, act := range acts {
 		p := &statefulPF{}
@@ -366,9 +401,9 @@ func TestFailClosedWatchdogRecovers(t *testing.T) {
 		if p.enabled && strings.Contains(p.rules, "block return") && p.table != "" {
 			t.Fatalf("%s: simulated act did not remove the block", want)
 		}
-		if want == "anchor table missing" {
+		if want == "anchor table missing or altered" {
 			// pf.conf reload empties rules too; the check reports the first missing piece.
-			want = "anchor rules missing"
+			want = "anchor rules missing or altered"
 		}
 		finding, err := m.Check()
 		if err != nil || finding != want {
@@ -455,6 +490,17 @@ func TestUninstallFailClosed(t *testing.T) {
 		})
 		return cmds, uninstallFailClosed()
 	}
+	runRawErr := func(readErr error) ([]string, error) {
+		var cmds []string
+		withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
+			cmds = append(cmds, strings.Join(append([]string{name}, args...), " "))
+			if name == "cat" {
+				return nil, readErr
+			}
+			return nil, nil
+		})
+		return cmds, uninstallFailClosed()
+	}
 	runRaw = func(raw []byte, flushFails bool) ([]string, error) {
 		var cmds []string
 		withInstallSeams(t, func() error { return nil }, func(name string, args ...string) ([]byte, error) {
@@ -490,6 +536,11 @@ func TestUninstallFailClosed(t *testing.T) {
 	cmds, err = run(`{"enabled":true,"token":"42",`, false)
 	if err != nil || !strings.Contains(strings.Join(cmds, "|"), "/sbin/pfctl -X 42") {
 		t.Fatalf("corrupt with token: err=%v cmds=%q", err, cmds)
+	}
+	// A read failure that is not absence keeps everything and reports.
+	cmds, err = runRawErr(errors.New("cat: failclosed.json: Permission denied"))
+	if err == nil || strings.Contains(strings.Join(cmds, "|"), "-F all") || strings.Contains(strings.Join(cmds, "|"), "rm -f") {
+		t.Fatalf("read failure: err=%v cmds=%q", err, cmds)
 	}
 	cmds, err = run(`garbage`, false)
 	if err == nil || strings.Contains(strings.Join(cmds, "|"), "rm -f") || strings.Contains(strings.Join(cmds, "|"), "-X") {
@@ -579,30 +630,61 @@ func (f *fightingPF) run(args []string, stdin string) ([]byte, error) {
 	return f.statefulPF.run(args, stdin)
 }
 
-// Claim: when another party keeps undoing the block, the watchdog backs off (interval doubles up to the
-// cap) and status says so, instead of retrying at the base interval forever.
-func TestFailClosedWatchBacksOff(t *testing.T) {
-	prevMax := failClosedWatchMaxIntervalVPNCore
-	failClosedWatchMaxIntervalVPNCore = 40 * time.Millisecond
-	t.Cleanup(func() { failClosedWatchMaxIntervalVPNCore = prevMax })
+// Claim: when another party keeps undoing the block, detection stays at the base interval (the
+// contract's bound) instead of backing off, and status reports the streak.
+func TestFailClosedWatchKeepsBoundUnderFight(t *testing.T) {
 	p := &fightingPF{}
 	m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
 	_ = m.Apply(goodReq)
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go func() { m.watch(5*time.Millisecond, stop, func(string, ...any) {}); close(done) }()
-	deadline := time.Now().Add(2 * time.Second)
-	note := ""
-	for time.Now().Before(deadline) && !strings.Contains(note, "40ms") {
-		time.Sleep(10 * time.Millisecond)
-		m.mu.Lock()
-		note = m.backoffNote
-		m.mu.Unlock()
+	go func() { m.watch(10*time.Millisecond, stop, func(string, ...any) {}); close(done) }()
+	time.Sleep(300 * time.Millisecond)
+	m.mu.Lock()
+	note := m.backoffNote
+	calls := 0
+	for _, c := range p.calls {
+		if c == "-s info" {
+			calls++
+		}
 	}
+	m.mu.Unlock()
 	close(stop)
 	<-done
-	if !strings.Contains(note, "recoveries in a row") || !strings.Contains(note, "40ms") {
-		t.Fatalf("backoff note = %q, want capped backoff", note)
+	// 300 ms at a 10 ms bound gives about 30 checks; a backoff would give a handful.
+	if calls < 15 || !strings.Contains(note, "recoveries in a row") || !strings.Contains(note, "10ms") {
+		t.Fatalf("checks=%d note=%q", calls, note)
+	}
+}
+
+// Claim: live checks compare the exact table and the exact rule. A table with the same number of
+// entries but other addresses, a narrowed rule (proto/port) and an extra permissive rule are each
+// reported as not enforcing, and the watchdog repairs them; the healthy state reads as enforcing.
+func TestFailClosedLiveCompareIsExact(t *testing.T) {
+	for name, tamper := range map[string]func(*statefulPF){
+		"same-count wrong table": func(p *statefulPF) { p.table = "9.9.9.9/32\n8.8.8.8/32\n" },
+		"narrowed rule":          func(p *statefulPF) { p.rules = "block return out quick on en0 proto tcp to <failclosed> port 443\n" },
+		"extra pass rule":        func(p *statefulPF) { p.rules += "pass out quick to <failclosed>\n" },
+	} {
+		p := &statefulPF{}
+		m := &failClosedManager{statePath: filepath.Join(t.TempDir(), "fc.json"), pfctl: p.run, now: time.Now}
+		if err := m.Apply(goodReq); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := m.Status(); !st.Enforcing {
+			t.Fatalf("%s: healthy state not enforcing: %+v", name, st)
+		}
+		tamper(p)
+		if st, _ := m.Status(); st.Enforcing {
+			t.Fatalf("%s: tampered state still reads as enforcing: %+v", name, st)
+		}
+		finding, err := m.Check()
+		if err != nil || finding == "" {
+			t.Fatalf("%s: check = %q, %v", name, finding, err)
+		}
+		if st, _ := m.Status(); !st.Enforcing {
+			t.Fatalf("%s: not repaired: %+v", name, st)
+		}
 	}
 }
 

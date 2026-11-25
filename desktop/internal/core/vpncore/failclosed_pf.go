@@ -338,7 +338,7 @@ func (m *failClosedManager) Clear() error {
 		return err
 	}
 	if m.logf != nil {
-		m.logf("vpn core: fail-closed cleared: token_released=%t\n", st.Token != "")
+		m.logf("vpn core: fail-closed cleared: entries=%d interfaces=%d token_released=%t\n", len(st.Table), len(st.Interfaces), st.Token != "")
 	}
 	if loadErr != nil && st.Token == "" {
 		return fmt.Errorf("anchor cleared, but the pf token could not be recovered from the unreadable state (%v); check 'pfctl -s References' and release it with 'pfctl -X <token>'", loadErr)
@@ -397,14 +397,10 @@ func (m *failClosedManager) Status() (FailClosedStatus, error) {
 		out.LiveError = err.Error()
 		return out, nil
 	}
-	out.LiveChecked, out.PFEnabled, out.LiveTableEntries = true, f.pfEnabled, f.tableEntries
-	out.AnchorLoaded = len(f.rulesPerIface) > 0
-	for _, i := range st.Interfaces {
-		if !f.rulesPerIface[i] {
-			out.AnchorLoaded = false
-		}
-	}
-	out.Enforcing = out.PFEnabled && out.AnchorLoaded && out.LiveTableEntries == len(st.Table) && len(st.Table) > 0
+	out.LiveChecked, out.PFEnabled, out.LiveTableEntries = true, f.pfEnabled, len(f.table)
+	out.AnchorLoaded = f.anchorMatches(st.Interfaces)
+	out.TableMatches = f.tableMatches(st.Table)
+	out.Enforcing = out.PFEnabled && out.AnchorLoaded && out.TableMatches
 	return out, nil
 }
 
@@ -412,11 +408,18 @@ func (m *failClosedManager) Status() (FailClosedStatus, error) {
 type liveFacts struct {
 	pfEnabled     bool
 	rulesPerIface map[string]bool
-	tableEntries  int
+	// foreignRules counts anchor rule lines that are not exactly our block
+	// rule (a permissive, narrowed or extra rule).
+	foreignRules int
+	table        []string // normalized prefixes, sorted
 }
 
+// ourRuleRE is pf's normalized form of the rendered block rule, one line per
+// interface ("block return out quick on en0 from any to <failclosed>").
+var ourRuleRE = regexp.MustCompile(`^block return out quick on ([a-z]+[0-9]+) (?:from any )?to <` + failclosed.TableName + `>$`)
+
 // readLiveLocked queries pf for the enable status, our anchor's rules and
-// table. Rules are matched per interface because pf expands { en0 en1 }.
+// the table entries.
 func (m *failClosedManager) readLiveLocked() (liveFacts, error) {
 	f := liveFacts{rulesPerIface: map[string]bool{}}
 	info, err := m.run([]string{"-s", "info"}, "")
@@ -429,35 +432,62 @@ func (m *failClosedManager) readLiveLocked() (liveFacts, error) {
 		return f, err
 	}
 	for _, line := range strings.Split(string(rules), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "block return out quick on ") || !strings.Contains(line, "<"+failclosed.TableName+">") {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
 			continue
 		}
-		fields := strings.Fields(strings.TrimPrefix(line, "block return out quick on "))
-		if len(fields) > 0 {
-			for _, n := range strings.FieldsFunc(strings.Trim(fields[0], "{}"), func(r rune) bool { return r == ',' || r == ' ' }) {
-				f.rulesPerIface[n] = true
-			}
+		if m := ourRuleRE.FindStringSubmatch(line); m != nil {
+			f.rulesPerIface[m[1]] = true
+			continue
 		}
-		// The unexpanded form "{ en0 en1 }" spans several fields.
-		if strings.HasPrefix(fields[0], "{") {
-			for _, n := range fields[1:] {
-				if n == "}" {
-					break
-				}
-				f.rulesPerIface[strings.Trim(n, "{},")] = true
-			}
-		}
+		f.foreignRules++
 	}
 	entries, err := m.run([]string{"-a", failclosed.AnchorName, "-t", failclosed.TableName, "-T", "show"}, "")
 	if err == nil {
-		for _, l := range strings.Split(string(entries), "\n") {
-			if strings.TrimSpace(l) != "" {
-				f.tableEntries++
-			}
-		}
+		f.table = normalizeShownTable(string(entries))
 	}
 	return f, nil
+}
+
+// normalizeShownTable turns pfctl -T show output (hosts without a prefix
+// length) into sorted prefixes comparable with the stored table.
+func normalizeShownTable(out string) []string {
+	var table []string
+	for _, l := range strings.Split(out, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(l); err == nil {
+			table = append(table, p.Masked().String())
+			continue
+		}
+		if a, err := netip.ParseAddr(l); err == nil {
+			table = append(table, netip.PrefixFrom(a, a.BitLen()).String())
+			continue
+		}
+		table = append(table, "invalid:"+l)
+	}
+	sort.Strings(table)
+	return table
+}
+
+// anchorMatches reports whether every interface has exactly our rule and no
+// other rule is present.
+func (f liveFacts) anchorMatches(ifaces []string) bool {
+	if f.foreignRules != 0 || len(ifaces) == 0 {
+		return false
+	}
+	for _, i := range ifaces {
+		if !f.rulesPerIface[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (f liveFacts) tableMatches(stored []string) bool {
+	return len(stored) > 0 && strings.Join(f.table, ",") == strings.Join(stored, ",")
 }
 
 // inspectLocked compares pf's live state with the stored policy and names the
@@ -470,16 +500,10 @@ func (m *failClosedManager) inspectLocked(st failClosedState) (string, error) {
 	switch {
 	case !f.pfEnabled:
 		return "pf disabled by another party", nil
-	case len(f.rulesPerIface) == 0:
-		return "anchor rules missing", nil
-	}
-	for _, i := range st.Interfaces {
-		if !f.rulesPerIface[i] {
-			return "anchor rules missing", nil
-		}
-	}
-	if f.tableEntries != len(st.Table) {
-		return "anchor table missing", nil
+	case !f.anchorMatches(st.Interfaces):
+		return "anchor rules missing or altered", nil
+	case !f.tableMatches(st.Table):
+		return "anchor table missing or altered", nil
 	}
 	return "", nil
 }
@@ -535,46 +559,38 @@ func (m *failClosedManager) Check() (string, error) {
 	return finding, m.save(st)
 }
 
-// failClosedWatchMaxIntervalVPNCore caps the watchdog's backoff when another
-// party keeps undoing the block.
-var failClosedWatchMaxIntervalVPNCore = 5 * time.Minute
-
-// watch runs Check every interval until stop is closed. After consecutive
-// recoveries the interval doubles up to the maximum (another tool fighting the
-// anchor must not make the helper spin); a quiet tick resets it.
+// watch runs Check every interval until stop is closed. Detection stays at
+// one interval even when another party keeps undoing the block (contract:
+// 5 s); only the log is thinned after three recoveries in a row, and status
+// reports the streak.
 func (m *failClosedManager) watch(interval time.Duration, stop <-chan struct{}, logf func(string, ...any)) {
-	current, streak := interval, 0
-	timer := time.NewTimer(current)
-	defer timer.Stop()
+	streak := 0
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-stop:
 			return
-		case <-timer.C:
+		case <-ticker.C:
 		}
 		finding, err := m.Check()
 		switch {
 		case finding != "":
 			streak++
-			logf("vpn core: fail-closed watchdog: %s; re-applied (err=%v)\n", finding, err)
-			if streak > 1 && current < failClosedWatchMaxIntervalVPNCore {
-				current *= 2
-				if current > failClosedWatchMaxIntervalVPNCore {
-					current = failClosedWatchMaxIntervalVPNCore
-				}
+			if streak <= 3 || streak%12 == 0 {
+				logf("vpn core: fail-closed watchdog: %s; re-applied (err=%v, %d in a row)\n", finding, err, streak)
 			}
 		case err != nil:
 			logf("vpn core: fail-closed watchdog: %v\n", err)
 		default:
-			streak, current = 0, interval
+			streak = 0
 		}
 		m.mu.Lock()
 		if streak > 1 {
-			m.backoffNote = fmt.Sprintf("%d recoveries in a row; checking every %s", streak, current)
+			m.backoffNote = fmt.Sprintf("%d recoveries in a row; another party keeps undoing the block; checking every %s", streak, interval)
 		} else {
 			m.backoffNote = ""
 		}
 		m.mu.Unlock()
-		timer.Reset(current)
 	}
 }

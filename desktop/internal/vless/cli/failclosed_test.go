@@ -284,21 +284,39 @@ func TestDiagnoseShowsFailClosed(t *testing.T) {
 }
 
 // Claim: with the helper installed, reconnect applies the policy before the new tunnel starts (so a
-// first start is already fail closed) and refreshes it after; without the helper the pre-start apply
-// is skipped and makes no call.
+// first start is already fail closed) and refreshes it after: the call order is apply, start, apply.
+// Without the helper the pre-start apply is skipped and makes no call.
 func TestFailClosedAppliedBeforeStart(t *testing.T) {
 	for _, tc := range []struct {
 		ready bool
-		want  int
-	}{{true, 2}, {false, 1}} {
+		want  string
+	}{{true, "apply,start,apply"}, {false, "start,apply"}} {
 		f := &fcFakes{}
 		withFailClosedFakes(t, f, upIfs, map[string][]string{"chatgpt.com": {"104.18.32.47"}})
-		prev := failClosedHelperReadyCLI
+		var order []string
+		prevApply := failClosedApplyCLI
+		failClosedApplyCLI = func(c vpncore.ServiceConfig, i, tb []string) error {
+			order = append(order, "apply")
+			return prevApply(c, i, tb)
+		}
+		prevReady := failClosedHelperReadyCLI
 		failClosedHelperReadyCLI = func() bool { return tc.ready }
-		code, _, errs := reconnectWithLaunchMode(t, "helper")
-		failClosedHelperReadyCLI = prev
-		if code != 0 || len(f.applied) != tc.want {
-			t.Fatalf("ready=%v: exit %d applies %d want %d: %s", tc.ready, code, len(f.applied), tc.want, errs)
+		path, cacheDir := writeStableAliasReconnectConfig(t, "vless://00000000-0000-0000-0000-000000000003@203.0.113.10:443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=example.com&sid=1#%F0%9F%87%BA%F0%9F%87%B8%20USA")
+		if _, err := subscription.Refresh(t.Context(), "direct", "vless://00000000-0000-0000-0000-000000000004@203.0.113.99:8443?type=tcp&security=reality&pbk=abc&fp=chrome&sni=example.com&sid=1#%F0%9F%87%BA%F0%9F%87%B8%20USA", cacheDir); err != nil {
+			t.Fatal(err)
+		}
+		installRefreshFailure(t, transientFetchError("temporary timeout"))
+		installReconnectHarness(t)
+		prevStart := startSessionFunc
+		startSessionFunc = func(string, string, model.Profile, session.StartOptions) (session.CurrentSession, error) {
+			order = append(order, "start")
+			return session.CurrentSession{ID: "r", PID: 1, LaunchMode: "helper"}, nil
+		}
+		var out, errb bytes.Buffer
+		code := New(&out, &errb).Run([]string{"reconnect", "--config", path})
+		startSessionFunc, failClosedApplyCLI, failClosedHelperReadyCLI = prevStart, prevApply, prevReady
+		if code != 0 || strings.Join(order, ",") != tc.want {
+			t.Fatalf("ready=%v: exit %d order %v want %s: %s", tc.ready, code, order, tc.want, errb.String())
 		}
 	}
 }
