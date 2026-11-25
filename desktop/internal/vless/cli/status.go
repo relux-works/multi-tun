@@ -76,6 +76,7 @@ func (a *App) runStatus(args []string) int {
 	xrayRenderedPresent := fileExists(cfg.XrayConfigPath())
 
 	fmt.Fprintf(a.stdout, "connection: %s\n", connection)
+	a.printFailClosedSummary(cfg)
 	fmt.Fprintf(a.stdout, "mode: %s\n", mode)
 	fmt.Fprintf(a.stdout, "engine: %s\n", cfg.EngineType())
 	fmt.Fprintf(a.stdout, "logging_level: %s\n", cfg.LogLevel())

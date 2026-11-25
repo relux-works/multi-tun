@@ -599,7 +599,9 @@ restarting. The shared `vpn-core` helper enforces it with its own pf anchor,
 `com.apple/works.relux.vpn-core.failclosed`, which refuses the services' addresses on physical
 interfaces (`en*`, `bridge*`) and never matches a `utun` interface, so neither the personal tunnel
 nor the work VPN is matched. `/etc/pf.conf` and other anchors are never edited. The helper re-applies
-the last accepted policy when it starts, so the block is in place from boot, before the tunnel.
+the last accepted policy when it starts, so once a policy has been applied the block holds from boot,
+before the tunnel. Install step: run `vless-tun failclosed apply` once after installing the helper;
+`vless-tun start` and `reconnect` also apply the policy before the tunnel starts and refresh it after.
 
 ```bash
 vless-tun failclosed status   # config list, tunnel state, helper state, blocking yes/no
@@ -618,6 +620,11 @@ vless-tun failclosed off      # rollback in one command: clear the anchor, relea
   `last_recovery`.
 - A blocked connection fails at once with "connection refused" or "no route" instead of leaving
   through another egress.
+- Limit: unknown subdomains on other addresses are not blocked. Each service resolves its known hosts
+  plus the apex, `api.` and `www.` names of its domains, through the system resolver and, while the
+  tunnel is up, the tunnel's DNS.
+- New physical interfaces (for example a USB Ethernet adapter) are picked up by the helper within one
+  watchdog interval.
 - Services on shared CDN addresses take those addresses into the table, so during an outage other
   sites on the same addresses are refused too.
 

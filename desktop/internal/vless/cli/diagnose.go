@@ -76,6 +76,7 @@ func (a *App) runDiagnoseTunnel(args []string) int {
 		}
 	}
 
+	a.printFailClosedSummary(cfg)
 	return a.printVPNCoreDiagnostics(launchCfg)
 }
 

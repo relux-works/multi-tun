@@ -20,4 +20,8 @@ func init() {
 	}
 	failClosedLookupCLI = func(context.Context, string) ([]netip.Addr, error) { return nil, errHostFailClosedCall }
 	failClosedInterfacesCLI = func() ([]ifaceInfo, error) { return nil, errHostFailClosedCall }
+	failClosedHelperReadyCLI = func() bool { return false }
+	failClosedTunnelLookupCLI = func(context.Context, netip.AddrPort, string) ([]netip.Addr, error) {
+		return nil, errHostFailClosedCall
+	}
 }

@@ -119,6 +119,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		return 1
 	}
 
+	a.applyFailClosedBeforeStart(cfg)
 	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:              cfg.NetworkMode(),
 		Engine:            prepared.engine,
@@ -157,7 +158,8 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
 	if usesVPNCoreHelper(started.LaunchMode) {
-		a.refreshFailClosedAfterStart(cfg.FailClosedPolicy())
+		policy, perr := cfg.FailClosedPolicy()
+		a.refreshFailClosedAfterStart(policy, perr, cfg.TunAddresses())
 	}
 	return 0
 }
@@ -235,6 +237,7 @@ func (a *App) runReconnect(args []string) int {
 		return 1
 	}
 
+	a.applyFailClosedBeforeStart(cfg)
 	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
 		Mode:              cfg.NetworkMode(),
 		Engine:            prepared.engine,
@@ -285,7 +288,8 @@ func (a *App) runReconnect(args []string) int {
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
 	if usesVPNCoreHelper(started.LaunchMode) {
-		a.refreshFailClosedAfterStart(cfg.FailClosedPolicy())
+		policy, perr := cfg.FailClosedPolicy()
+		a.refreshFailClosedAfterStart(policy, perr, cfg.TunAddresses())
 	}
 	return 0
 }

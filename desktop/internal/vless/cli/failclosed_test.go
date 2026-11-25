@@ -23,11 +23,13 @@ type fcFakes struct {
 	clears    int
 	applyErr  error
 	statusOut vpncore.FailClosedStatus
+
+	tunnelServer netip.AddrPort
 }
 
 func withFailClosedFakes(t *testing.T, f *fcFakes, ifs []ifaceInfo, lookup map[string][]string) {
 	t.Helper()
-	prev := []any{failClosedApplyCLI, failClosedClearCLI, failClosedStatusCLI, failClosedLookupCLI, failClosedInterfacesCLI, failClosedNowCLI, failClosedTablePathCLI}
+	prev := []any{failClosedApplyCLI, failClosedClearCLI, failClosedStatusCLI, failClosedLookupCLI, failClosedInterfacesCLI, failClosedNowCLI, failClosedTablePathCLI, failClosedTunnelLookupCLI}
 	tablePath := filepath.Join(t.TempDir(), "table.json")
 	failClosedApplyCLI = func(_ vpncore.ServiceConfig, ifaces, table []string) error {
 		f.ifaces = ifaces
@@ -48,6 +50,18 @@ func withFailClosedFakes(t *testing.T, f *fcFakes, ifs []ifaceInfo, lookup map[s
 		return out, nil
 	}
 	failClosedInterfacesCLI = func() ([]ifaceInfo, error) { return ifs, nil }
+	failClosedTunnelLookupCLI = func(_ context.Context, server netip.AddrPort, host string) ([]netip.Addr, error) {
+		f.tunnelServer = server
+		raw, ok := lookup["tunnel:"+host]
+		if !ok {
+			return nil, errors.New("no such host")
+		}
+		var out []netip.Addr
+		for _, r := range raw {
+			out = append(out, netip.MustParseAddr(r))
+		}
+		return out, nil
+	}
 	failClosedNowCLI = func() time.Time { return time.Date(2026, 11, 25, 13, 0, 0, 0, time.UTC) }
 	failClosedTablePathCLI = func() string { return tablePath }
 	t.Cleanup(func() {
@@ -58,6 +72,7 @@ func withFailClosedFakes(t *testing.T, f *fcFakes, ifs []ifaceInfo, lookup map[s
 		failClosedInterfacesCLI = prev[4].(func() ([]ifaceInfo, error))
 		failClosedNowCLI = prev[5].(func() time.Time)
 		failClosedTablePathCLI = prev[6].(func() string)
+		failClosedTunnelLookupCLI = prev[7].(func(context.Context, netip.AddrPort, string) ([]netip.Addr, error))
 	})
 }
 
@@ -146,23 +161,31 @@ func TestFailClosedOff(t *testing.T) {
 	}
 }
 
-// Claim: status reports blocking=true only when the helper is enabled and the tunnel interface is down.
+// Claim: status reports blocking=true only when the helper is live-enforcing (pf enabled, anchor and
+// table loaded) and the tunnel interface is down; a stored enabled policy that pf no longer enforces
+// reports enforcing=false and blocking=false. The coverage limit line is always printed.
 func TestFailClosedStatusBlocking(t *testing.T) {
+	live := vpncore.FailClosedStatus{Enabled: true, TableEntries: 3, TokenHeld: true, LiveChecked: true, PFEnabled: true, AnchorLoaded: true, LiveTableEntries: 3, Enforcing: true}
+	stale := vpncore.FailClosedStatus{Enabled: true, TableEntries: 3, TokenHeld: true, LiveChecked: true, PFEnabled: false}
 	for _, tc := range []struct {
+		st   vpncore.FailClosedStatus
 		ifs  []ifaceInfo
-		want string
+		want []string
 	}{
-		{upIfs, "blocking: false"},
-		{[]ifaceInfo{{"en0", true}}, "blocking: true"},
+		{live, upIfs, []string{"enforcing: true", "blocking: false"}},
+		{live, []ifaceInfo{{"en0", true}}, []string{"enforcing: true", "blocking: true"}},
+		{stale, []ifaceInfo{{"en0", true}}, []string{"pf_enabled: false", "enforcing: false", "blocking: false"}},
 	} {
-		f := &fcFakes{statusOut: vpncore.FailClosedStatus{Enabled: true, TableEntries: 3, TokenHeld: true}}
+		f := &fcFakes{statusOut: tc.st}
 		withFailClosedFakes(t, f, tc.ifs, nil)
 		var out, errb bytes.Buffer
 		if code := New(&out, &errb).Run([]string{"failclosed", "status", "--config", writeFailClosedConfig(t, "")}); code != 0 {
 			t.Fatalf("exit %d: %s", code, errb.String())
 		}
-		if !strings.Contains(out.String(), tc.want) {
-			t.Fatalf("status = %s, want %q", out.String(), tc.want)
+		for _, w := range append(tc.want, "limit: unknown subdomains on other addresses are not blocked") {
+			if !strings.Contains(out.String(), w) {
+				t.Fatalf("status = %s, want %q", out.String(), w)
+			}
 		}
 	}
 }
@@ -218,5 +241,64 @@ func TestFailClosedNoRefreshWithoutHelper(t *testing.T) {
 	code, out, errs := reconnectWithLaunchMode(t, "sudo")
 	if code != 0 || strings.Contains(out, "fail_closed") || strings.Contains(errs, "fail_closed") {
 		t.Fatalf("code %d out=%q err=%q", code, out, errs)
+	}
+}
+
+// Claim: with the tunnel up, the table is the union of the system resolver and the tunnel DNS (the
+// TUN peer address, 172.19.0.2:53 for 172.19.0.1/30); with the tunnel down only the system answer is
+// used and the tunnel resolver is not asked.
+func TestFailClosedResolvesUnionOfSystemAndTunnelDNS(t *testing.T) {
+	lookup := map[string][]string{"chatgpt.com": {"104.18.32.47"}, "tunnel:chatgpt.com": {"8.6.112.0"}}
+	f := &fcFakes{}
+	withFailClosedFakes(t, f, upIfs, lookup)
+	var out, errb bytes.Buffer
+	if code := New(&out, &errb).Run([]string{"failclosed", "apply", "--config", writeFailClosedConfig(t, "")}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if got := strings.Join(f.applied[0], ","); got != "104.18.32.47/32,8.6.112.0/32" || f.tunnelServer.String() != "172.19.0.2:53" {
+		t.Fatalf("tunnel up: table %s server %v", got, f.tunnelServer)
+	}
+	f2 := &fcFakes{}
+	withFailClosedFakes(t, f2, []ifaceInfo{{"en0", true}}, lookup)
+	if code := New(&out, &errb).Run([]string{"failclosed", "apply", "--config", writeFailClosedConfig(t, "")}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if got := strings.Join(f2.applied[0], ","); got != "104.18.32.47/32" || f2.tunnelServer.IsValid() {
+		t.Fatalf("tunnel down: table %s server %v", got, f2.tunnelServer)
+	}
+}
+
+// Claim: diagnose prints a read-only fail_closed line with live enforcement and the limit, and makes
+// no apply or clear call.
+func TestDiagnoseShowsFailClosed(t *testing.T) {
+	f := &fcFakes{statusOut: vpncore.FailClosedStatus{Enabled: true, LiveChecked: true, PFEnabled: true, AnchorLoaded: true, Enforcing: true}}
+	withFailClosedFakes(t, f, upIfs, nil)
+	var out, errb bytes.Buffer
+	New(&out, &errb).Run([]string{"diagnose", "--config", writeFailClosedConfig(t, "")})
+	if !strings.Contains(out.String(), "fail_closed: services=codex enforcing=true pf_enabled=true anchor_loaded=true (unknown subdomains") {
+		t.Fatalf("diagnose output lacks fail_closed line:\n%s", out.String())
+	}
+	if len(f.applied) != 0 || f.clears != 0 {
+		t.Fatalf("diagnose changed fail-closed state: applied %v clears %d", f.applied, f.clears)
+	}
+}
+
+// Claim: with the helper installed, reconnect applies the policy before the new tunnel starts (so a
+// first start is already fail closed) and refreshes it after; without the helper the pre-start apply
+// is skipped and makes no call.
+func TestFailClosedAppliedBeforeStart(t *testing.T) {
+	for _, tc := range []struct {
+		ready bool
+		want  int
+	}{{true, 2}, {false, 1}} {
+		f := &fcFakes{}
+		withFailClosedFakes(t, f, upIfs, map[string][]string{"chatgpt.com": {"104.18.32.47"}})
+		prev := failClosedHelperReadyCLI
+		failClosedHelperReadyCLI = func() bool { return tc.ready }
+		code, _, errs := reconnectWithLaunchMode(t, "helper")
+		failClosedHelperReadyCLI = prev
+		if code != 0 || len(f.applied) != tc.want {
+			t.Fatalf("ready=%v: exit %d applies %d want %d: %s", tc.ready, code, len(f.applied), tc.want, errs)
+		}
 	}
 }

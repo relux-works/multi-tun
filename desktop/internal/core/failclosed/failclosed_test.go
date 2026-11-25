@@ -63,7 +63,7 @@ func TestResolveRefusals(t *testing.T) {
 	}{
 		"unknown catalog name":  {"", []Entry{{Name: "gemini"}}, "not a catalog service"},
 		"duplicate":             {"", []Entry{{Name: "codex"}, {Name: "codex"}}, "duplicate service"},
-		"empty service":         {"", []Entry{{Service: &Service{Name: "x"}}}, "at least one domain or cidr"},
+		"empty service":         {"", []Entry{{Service: &Service{Name: "x"}}}, "at least one domain, host or cidr"},
 		"bad name":              {"", []Entry{{Service: &Service{Name: "Bad Name", Domains: []string{"a.com"}}}}, "service name"},
 		"single label domain":   {"", []Entry{{Service: &Service{Name: "x", Domains: []string{"localhost"}}}}, "two labels"},
 		"bad label":             {"", []Entry{{Service: &Service{Name: "x", Domains: []string{"a_b.com"}}}}, "invalid label"},
@@ -180,5 +180,27 @@ func TestValidateTable(t *testing.T) {
 		if _, err := ValidateTable([]string{bad}); err == nil {
 			t.Errorf("ValidateTable(%q) accepted", bad)
 		}
+	}
+}
+
+// Claim: the catalog's resolve set is pinned exactly to the endpoints observed in real sessions
+// (review/ENDPOINTS-r1.md) plus apex/api/www of each suffix; a dropped or added endpoint fails here.
+func TestCatalogResolveSetPinned(t *testing.T) {
+	want := map[string]string{
+		"codex":       "ab.chatgpt.com,api.chatgpt.com,api.oaistatic.com,api.oaiusercontent.com,api.openai.com,auth.openai.com,chatgpt.com,oaistatic.com,oaiusercontent.com,openai.com,persistent.oaistatic.com,www.chatgpt.com,www.oaistatic.com,www.oaiusercontent.com,www.openai.com",
+		"claude":      "anthropic.com,api.anthropic.com,api.claude.ai,api.claude.com,claude.ai,claude.com,console.anthropic.com,downloads.claude.ai,mcp-proxy.anthropic.com,platform.claude.com,www.anthropic.com,www.claude.ai,www.claude.com",
+		"antigravity": "aicode.googleapis.com,antigravity.google,api.antigravity.google,api.cloudcode-pa.googleapis.com,api.daily-cloudcode-pa.googleapis.com,cloudcode-pa.googleapis.com,daily-cloudcode-pa.googleapis.com,oauth2.googleapis.com,www.antigravity.google,www.cloudcode-pa.googleapis.com,www.daily-cloudcode-pa.googleapis.com",
+	}
+	for name, names := range want {
+		p, err := Resolve(nil, "", []Entry{{Name: name}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(p.ResolveNames(), ","); got != names {
+			t.Errorf("%s resolve set:\n got %s\nwant %s", name, got, names)
+		}
+	}
+	if p, _ := Resolve(nil, "", []Entry{{Name: "claude"}}); strings.Join(p.Services[0].CIDRs, ",") != "160.79.104.0/23" {
+		t.Errorf("claude cidrs = %v", p.Services[0].CIDRs)
 	}
 }

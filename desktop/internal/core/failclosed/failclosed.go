@@ -33,7 +33,10 @@ const AddressTTL = 24 * time.Hour
 type Service struct {
 	Name    string   `json:"name"`
 	Domains []string `json:"domains,omitempty"`
-	CIDRs   []string `json:"cidrs,omitempty"`
+	// Hosts are exact endpoints the client is known to use; they are resolved
+	// in addition to each domain's apex, api and www names.
+	Hosts []string `json:"hosts,omitempty"`
+	CIDRs []string `json:"cidrs,omitempty"`
 }
 
 // Catalog is the built-in service catalog. Only DefaultEnabled is enabled
@@ -42,17 +45,23 @@ var Catalog = map[string]Service{
 	"codex": {
 		Name:    "codex",
 		Domains: []string{"openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com"},
+		Hosts:   []string{"chatgpt.com", "ab.chatgpt.com", "api.chatgpt.com", "api.openai.com", "auth.openai.com", "persistent.oaistatic.com"},
 	},
 	"claude": {
 		Name:    "claude",
 		Domains: []string{"anthropic.com", "claude.ai", "claude.com"},
+		Hosts:   []string{"api.anthropic.com", "claude.ai", "console.anthropic.com", "mcp-proxy.anthropic.com", "platform.claude.com", "downloads.claude.ai"},
 		CIDRs:   []string{"160.79.104.0/23"},
 	},
 	"antigravity": {
 		Name:    "antigravity",
-		Domains: []string{"cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"},
+		Domains: []string{"cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com", "antigravity.google"},
+		Hosts:   []string{"daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com", "aicode.googleapis.com", "oauth2.googleapis.com", "antigravity.google"},
 	},
 }
+
+// Limit is the one-line coverage limit shown in README and status.
+const Limit = "unknown subdomains on other addresses are not blocked"
 
 // DefaultEnabled is the enabled list when fail_closed is absent or freshly
 // installed (owner decision: Codex only until it has run without breakage).
@@ -138,6 +147,15 @@ func normalizeService(s Service) (Service, error) {
 			out.Domains = append(out.Domains, d)
 		}
 	}
+	for _, h := range s.Hosts {
+		h = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
+		if err := validDomain(h); err != nil {
+			return Service{}, fmt.Errorf("service %q: host: %w", out.Name, err)
+		}
+		if !slices.Contains(out.Hosts, h) {
+			out.Hosts = append(out.Hosts, h)
+		}
+	}
 	for _, c := range s.CIDRs {
 		prefix, err := netip.ParsePrefix(strings.TrimSpace(c))
 		if err != nil {
@@ -151,8 +169,8 @@ func normalizeService(s Service) (Service, error) {
 			out.CIDRs = append(out.CIDRs, norm)
 		}
 	}
-	if len(out.Domains) == 0 && len(out.CIDRs) == 0 {
-		return Service{}, fmt.Errorf("service %q needs at least one domain or cidr", out.Name)
+	if len(out.Domains) == 0 && len(out.CIDRs) == 0 && len(out.Hosts) == 0 {
+		return Service{}, fmt.Errorf("service %q needs at least one domain, host or cidr", out.Name)
 	}
 	return out, nil
 }
@@ -186,6 +204,27 @@ func admissiblePrefix(p netip.Prefix) error {
 		return errors.New("range overlaps carrier-grade NAT space 100.64.0.0/10")
 	}
 	return nil
+}
+
+// ResolveNames returns every name to resolve for the policy: each service's
+// explicit hosts plus the apex, api and www names of each domain suffix,
+// de-duplicated and sorted.
+func (p Policy) ResolveNames() []string {
+	set := map[string]bool{}
+	for _, s := range p.Services {
+		for _, h := range s.Hosts {
+			set[h] = true
+		}
+		for _, d := range s.Domains {
+			set[d], set["api."+d], set["www."+d] = true, true, true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // MatchesDomain reports whether host belongs to any service domain suffix.
