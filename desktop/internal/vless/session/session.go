@@ -591,12 +591,49 @@ func withCurrentRecordLock(cacheDir string, fn func() error) error {
 	return fn()
 }
 
-// SameSession reports whether two records describe the same running session. Session IDs have
-// one-second resolution, so two starts in the same second can share one; the PID, the helper
-// handle, the recorded process start and the launchd label must match too.
+// SameSession reports whether two records describe the same running session. Both must carry a
+// complete identity (see completeIdentity), and every part must match: session IDs have one-second
+// resolution, so two starts in the same second can share one, and the launch mode picks the stop
+// path. Two records with missing parts never match, not even each other.
 func SameSession(a, b CurrentSession) bool {
-	return a.ID == b.ID && a.PID == b.PID && a.Handle == b.Handle &&
-		a.ProcessStart.Equal(b.ProcessStart) && a.LaunchLabel == b.LaunchLabel
+	if !completeIdentity(a) || !completeIdentity(b) {
+		return false
+	}
+	return a.ID == b.ID &&
+		a.PID == b.PID &&
+		a.LaunchMode == b.LaunchMode &&
+		a.ProcessComm == b.ProcessComm &&
+		a.ProcessStart.Equal(b.ProcessStart) &&
+		a.Handle == b.Handle &&
+		a.LaunchLabel == b.LaunchLabel
+}
+
+// completeIdentity reports whether a record names one process unambiguously: a session ID, a PID,
+// a launch mode, the recorded process name and start time as a pair (never the name alone), and
+// the handle or label its mode stops through.
+func completeIdentity(s CurrentSession) bool {
+	if s.ID == "" {
+		return false
+	}
+	if s.PID <= 0 {
+		return false
+	}
+	if s.LaunchMode == "" {
+		return false
+	}
+	if s.ProcessComm == "" {
+		return false
+	}
+	if s.ProcessStart.IsZero() {
+		return false
+	}
+	if s.LaunchMode == config.LaunchModeHelper && s.Handle == "" {
+		return false
+	}
+	if s.LaunchMode == config.LaunchModeLaunchd && s.LaunchLabel == "" {
+		return false
+	}
+	return true
 }
 
 func ProcessAlive(pid int) (bool, error) {

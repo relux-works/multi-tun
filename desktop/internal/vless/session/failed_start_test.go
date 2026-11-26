@@ -169,12 +169,12 @@ func TestStopIfCurrentLeavesAnotherSessionAlone(t *testing.T) {
 	t.Cleanup(func() { vpnCoreSignalSession, processAliveSession = prevSignal, prevAlive })
 	launch := config.PrivilegedLaunchConfig{Mode: config.LaunchModeHelper}
 	started := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
-	expected := CurrentSession{ID: "20261125T220000Z", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started}
+	expected := CurrentSession{ID: "20261125T220000Z", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started}
 	for name, other := range map[string]CurrentSession{
-		"different ID":           {ID: "other", PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started},
-		"same ID, other process": {ID: expected.ID, PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started},
-		"same ID, other handle":  {ID: expected.ID, PID: 9999, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started},
-		"same ID, other start":   {ID: expected.ID, PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started.Add(time.Second)},
+		"different ID":           {ID: "other", PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started},
+		"same ID, other process": {ID: expected.ID, PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started},
+		"same ID, other handle":  {ID: expected.ID, PID: 9999, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started},
+		"same ID, other start":   {ID: expected.ID, PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started.Add(time.Second)},
 	} {
 		cache := t.TempDir()
 		if err := SaveCurrent(cache, other); err != nil {
@@ -289,8 +289,9 @@ func TestStopIfCurrentBindsToTheCheckedRecord(t *testing.T) {
 // using SaveCurrent; a writer in another process takes the same flock.
 func TestClearCurrentIfSameHoldsTheLock(t *testing.T) {
 	cache := t.TempDir()
-	own := CurrentSession{ID: "20261125T220000Z", PID: 9999, Handle: "own-handle"}
-	other := CurrentSession{ID: "20261125T220000Z", PID: 7777, Handle: "other-handle"}
+	started := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	own := CurrentSession{ID: "20261125T220000Z", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started}
+	other := CurrentSession{ID: "20261125T220000Z", PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started}
 	if err := SaveCurrent(cache, own); err != nil {
 		t.Fatal(err)
 	}
@@ -317,4 +318,55 @@ func TestClearCurrentIfSameHoldsTheLock(t *testing.T) {
 	if err != nil || !SameSession(got, other) {
 		t.Fatalf("record after the clear: %+v err %v, want the other session's", got, err)
 	}
+}
+
+// Claim: SameSession matches only complete, equal identities. A record missing any one part (ID,
+// PID, launch mode, process name, process start, the helper handle in helper mode, the launchd label
+// in launchd mode) matches nothing, not even an identical copy of itself, and two complete records
+// that differ only in launch mode or only in process name do not match. Positive controls: complete
+// helper, direct and launchd identities match their copies.
+func TestSameSessionRequiresCompleteIdentity(t *testing.T) {
+	started := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	helper := CurrentSession{ID: "20261125T220000Z", PID: 9999, LaunchMode: config.LaunchModeHelper, ProcessComm: "sing-box", ProcessStart: started, Handle: "own-handle"}
+	direct := CurrentSession{ID: "20261125T220000Z", PID: 9999, LaunchMode: config.LaunchModeDirect, ProcessComm: "sing-box", ProcessStart: started}
+	launchd := CurrentSession{ID: "20261125T220000Z", PID: 9999, LaunchMode: config.LaunchModeLaunchd, ProcessComm: "sing-box", ProcessStart: started, LaunchLabel: "works.relux.test"}
+	for name, s := range map[string]CurrentSession{"helper": helper, "direct": direct, "launchd": launchd} {
+		if !SameSession(s, s) {
+			t.Errorf("complete %s identity does not match its copy", name)
+		}
+	}
+	missing := map[string]CurrentSession{}
+	add := func(name string, base CurrentSession, edit func(*CurrentSession)) {
+		c := base
+		edit(&c)
+		missing[name] = c
+	}
+	add("no ID", helper, func(c *CurrentSession) { c.ID = "" })
+	add("no PID", helper, func(c *CurrentSession) { c.PID = 0 })
+	add("no launch mode", helper, func(c *CurrentSession) { c.LaunchMode = "" })
+	add("no process name", direct, func(c *CurrentSession) { c.ProcessComm = "" })
+	add("no process start", direct, func(c *CurrentSession) { c.ProcessStart = time.Time{} })
+	add("helper without handle", helper, func(c *CurrentSession) { c.Handle = "" })
+	add("launchd without label", launchd, func(c *CurrentSession) { c.LaunchLabel = "" })
+	for name, c := range missing {
+		t.Run(name, func(t *testing.T) {
+			if SameSession(c, c) {
+				t.Fatalf("incomplete identity %+v matches its copy", c)
+			}
+		})
+	}
+	t.Run("launch mode differs", func(t *testing.T) {
+		other := helper
+		other.LaunchMode = config.LaunchModeDirect
+		if SameSession(helper, other) || SameSession(other, helper) {
+			t.Fatal("identities that differ only in launch mode match")
+		}
+	})
+	t.Run("process name differs", func(t *testing.T) {
+		other := direct
+		other.ProcessComm = "xray"
+		if SameSession(direct, other) {
+			t.Fatal("identities that differ only in process name match")
+		}
+	})
 }

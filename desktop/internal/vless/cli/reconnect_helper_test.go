@@ -505,7 +505,8 @@ func TestFailClosedAppliedBeforeRestoredStart(t *testing.T) {
 // pointed to `vless-tun stop`. Limit: every session operation is a fake here; the session package
 // tests cover the real marker, SessionStopped, StopIfCurrent, StopReturned and SaveCurrentIfAbsent.
 func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
-	replacement := session.CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper}
+	replacement := session.CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper,
+		ProcessComm: "sing-box", ProcessStart: time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)}
 	lostReply := errors.New("vpn core singbox.start: unexpected EOF")
 	type outcome struct {
 		stopped bool
@@ -517,8 +518,12 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 	otherRecord := func(string) (session.CurrentSession, error) {
 		return session.CurrentSession{ID: "other", PID: 7777}, nil
 	}
+	incomplete := session.CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper} // no process name or start
+	incompleteRecord := func(string) (session.CurrentSession, error) { return incomplete, nil }
 	sameIDOtherProcess := func(string) (session.CurrentSession, error) {
-		return session.CurrentSession{ID: replacement.ID, PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper}, nil
+		other := replacement
+		other.PID, other.Handle = 7777, "other-handle"
+		return other, nil
 	}
 	cases := []struct {
 		name       string
@@ -547,6 +552,8 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 			record: otherRecord, wantEvents: "stop,start", wantErr: "left alone"},
 		{name: "same ID, other process: its record is left alone", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
 			record: sameIDOtherProcess, wantEvents: "stop,start", wantErr: "left alone"},
+		{name: "incomplete identity: its record is not trusted", returned: incomplete, startErr: errors.New("exited"), checks: []outcome{running},
+			record: incompleteRecord, wantEvents: "stop,start", wantErr: "left alone"},
 		{name: "B4 no record, stopped through its own handle", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running, gone},
 			record: noRecord, wantEvents: "stop,start,stop-handle,start"},
 		{name: "B4 handle stop fails, recorded for vless-tun stop", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
@@ -644,7 +651,8 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 // session written meanwhile is never overwritten (the reconcile leaves it and reports the failure).
 // Limit: the stop itself is a fake that reads the real record file; the helper is not involved.
 func TestReconnectRecordedReplacementIsStoppableAndNeverOverwrites(t *testing.T) {
-	replacement := session.CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper}
+	replacement := session.CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper,
+		ProcessComm: "sing-box", ProcessStart: time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)}
 	for _, race := range []bool{false, true} {
 		name := "recorded, then vless-tun stop finds it"
 		if race {
