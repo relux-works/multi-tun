@@ -163,7 +163,8 @@ func TestProcessAliveCurrentProcess(t *testing.T) {
 // be another vless-tun session's sidecar or another program; a ps check bound to that start time, with
 // a reused PID left alone; stop through the owner; how to confirm the original is gone. The start time
 // is never looked up again by PID, so a same-name process that reused the PID cannot lend its start
-// time. A row without a start time gives no check or stop step. No owner, no stop or kill command, no
+// time. A row the client cannot read (no start time, or a malformed one) is never taken as a command:
+// the whole list is refused with errUnreadableProcessList and the start refuses. No owner, no stop or kill command, no
 // PID or group signal in any case. Positive control: no matching process gives no error. Limit: the
 // process list and signals are fakes.
 func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
@@ -201,7 +202,8 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 		}, "111", listed},
 		{"process group differs, another start", []string{row("444", "999", later)}, "444", later},
 		{"same-name process reuses the PID after the listing", []string{row("666", "666", listed)}, "666", listed},
-		{"row without a start time", []string{" 555   1 555 " + cmd}, "555", time.Time{}},
+		{"row without a start time", []string{" 555   1 555 " + cmd}, "unreadable", time.Time{}},
+		{"malformed start time", []string{" 777 1 777 not-a-time /opt/bin/xray run -c /tmp/xray_freedom.json"}, "unreadable", time.Time{}},
 		{"no matching process", []string{
 			" 222   1 222 " + listed.Format(psStartLayout) + " /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
 		}, "", time.Time{}},
@@ -225,6 +227,13 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 				}
 				return
 			}
+			if tc.pid == "unreadable" {
+				// Fail closed: the start refuses on a row it cannot read; nothing is taken as a command.
+				if !errors.Is(err, errUnreadableProcessList) {
+					t.Fatalf("unreadable row: err %v, want errUnreadableProcessList", err)
+				}
+				return
+			}
 			msg := ""
 			if err != nil {
 				msg = err.Error()
@@ -237,14 +246,7 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 				"it may belong to another vless-tun session that uses the same Xray config, or to another program",
 				"then start again",
 			}
-			if tc.start.IsZero() {
-				want = append(want, "leave pid "+tc.pid+" alone unless whoever owns it can confirm it is this process")
-				for _, absent := range []string{"started:", "check it:", "stop it:"} {
-					if strings.Contains(msg, absent) {
-						t.Fatalf("%q given without a start time:\n%s", absent, msg)
-					}
-				}
-			} else {
+			{
 				shown := tc.start.UTC().Format(psStartLayout)
 				want = append(want,
 					"started:   "+shown+" UTC ("+tc.start.UTC().Format(time.RFC3339)+")",
@@ -277,25 +279,36 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 }
 
 // Claim: the process list reads each process's start time from the same row as its command, in the
-// pinned C locale and UTC, including a space-padded single-digit day; a row without a start time
-// still parses with a zero start. Limit: fixed rows, no live ps.
+// pinned C locale and UTC, including a space-padded single-digit day, and skips blank lines. A row
+// without a start time, or with a malformed one, is never read as a command: the whole list is
+// refused with errUnreadableProcessList. Limit: fixed rows, no live ps.
 func TestParseSidecarProcessesReadsStartFromTheSameRow(t *testing.T) {
-	got := parseSidecarProcesses([]byte(strings.Join([]string{
+	got, err := parseSidecarProcesses([]byte(strings.Join([]string{
 		" 111   1 111 Thu Nov 26 05:00:07 2026 /opt/bin/xray run -c /tmp/a.json",
+		"",
 		" 222   1 222 Fri Nov  6 06:30:07 2026 /opt/bin/xray run -c /tmp/b.json",
-		" 333   1 333 /opt/bin/xray run -c /tmp/c.json",
 	}, "\n")))
 	want := []sidecarProcess{
 		{PID: 111, PPID: 1, PGID: 111, Started: time.Date(2026, 11, 26, 5, 0, 7, 0, time.UTC), Command: "/opt/bin/xray run -c /tmp/a.json"},
 		{PID: 222, PPID: 1, PGID: 222, Started: time.Date(2026, 11, 6, 6, 30, 7, 0, time.UTC), Command: "/opt/bin/xray run -c /tmp/b.json"},
-		{PID: 333, PPID: 1, PGID: 333, Command: "/opt/bin/xray run -c /tmp/c.json"},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("parsed %d rows: %+v", len(got), got)
+	if err != nil || len(got) != len(want) {
+		t.Fatalf("parsed %+v err %v", got, err)
 	}
 	for i := range want {
 		if got[i].PID != want[i].PID || got[i].Command != want[i].Command || !got[i].Started.Equal(want[i].Started) {
 			t.Fatalf("row %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	for name, row := range map[string]string{
+		"no start time":           " 333   1 333 /opt/bin/xray run -c /tmp/c.json",
+		"malformed start":         " 777 1 777 not-a-time /opt/bin/xray run -c /tmp/xray_freedom.json",
+		"impossible date":         " 888   1 888 Thu Nov 31 05:00:07 2026 /opt/bin/xray run -c /tmp/d.json",
+		"start without a command": " 999   1 999 Thu Nov 26 05:00:07 2026",
+	} {
+		listing := " 111   1 111 Thu Nov 26 05:00:07 2026 /opt/bin/xray run -c /tmp/a.json\n" + row
+		if got, err := parseSidecarProcesses([]byte(listing)); !errors.Is(err, errUnreadableProcessList) || got != nil {
+			t.Errorf("%s: parsed %+v err %v, want the whole list refused", name, got, err)
 		}
 	}
 }
@@ -360,7 +373,7 @@ func TestWaitForSidecarStartDiscoversForkedSidecar(t *testing.T) {
 		return false, nil
 	}
 	sidecarProcessListSession = func() ([]byte, error) {
-		return []byte(" 777   1 777 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json\n"), nil
+		return []byte(" 777   1 777 Thu Nov 26 05:00:07 2026 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json\n"), nil
 	}
 
 	got, err := waitForSidecarStart(SidecarSession{
@@ -854,7 +867,11 @@ func TestOrphanGuidanceCheckMatchesPsInAnyLocale(t *testing.T) {
 		t.Fatal(err)
 	}
 	var self sidecarProcess
-	for _, p := range parseSidecarProcesses(out) {
+	rows, err := parseSidecarProcesses(out)
+	if err != nil {
+		t.Fatalf("real process list: %v", err)
+	}
+	for _, p := range rows {
 		if p.PID == os.Getpid() {
 			self = p
 		}

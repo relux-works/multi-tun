@@ -36,7 +36,7 @@ type sidecarProcess struct {
 	PID     int
 	PPID    int
 	PGID    int
-	Started time.Time // from the same ps row as Command; zero when the listing has no start time
+	Started time.Time // from the same ps row as Command
 	Command string
 }
 
@@ -46,9 +46,14 @@ type orphanSidecarTarget struct {
 	ConfigPath     string
 }
 
-// psProcessLinePattern reads "pid ppid pgid [lstart] command"; lstart ("Thu Nov 26 05:00:07 2026",
-// C locale) is optional so a listing without it still parses, with no start time.
-var psProcessLinePattern = regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+(\d+)\s+(?:([A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4})\s+)?(.+?)\s*$`)
+// psProcessLinePattern reads one row of the pinned listing: "pid ppid pgid lstart command", where
+// lstart is "Thu Nov 26 05:00:07 2026" (C locale, day padded with a space).
+var psProcessLinePattern = regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4})\s+(\S.*?)\s*$`)
+
+// errUnreadableProcessList marks a process list with a row that does not have the expected shape;
+// such a row is never guessed at (a bad start time must not become part of the command), so the
+// whole list is refused and the caller fails closed.
+var errUnreadableProcessList = errors.New("the process list has a row this client cannot read")
 
 func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout time.Duration) error {
 	targets := orphanSidecarTargets(options)
@@ -66,7 +71,11 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout 
 	// path: another vless-tun session can share the config (and may have its own record), or another
 	// program can use it. Each one is reported with what one ps row observed (orphanSidecarGuidance)
 	// and is never signalled; the start refuses while any is found.
-	processes := parseSidecarProcesses(out)
+	processes, err := parseSidecarProcesses(out)
+	if err != nil {
+		writeSessionLog(logFile, logLevelError, "orphan_sidecar_list_unreadable: %v\n", err)
+		return fmt.Errorf("list sidecar processes: %w", err)
+	}
 	var found []string
 	seen := map[int]struct{}{}
 	for _, target := range targets {
@@ -101,18 +110,14 @@ const psStartLayout = "Mon Jan _2 15:04:05 2006"
 // states only what one ps row observed: PID, start time and command come from the same row, so the
 // start time always belongs to the listed command, even if the PID has been reused since. The
 // process may be another vless-tun session's sidecar (caches can share an Xray config) or another
-// program, so no owner and no stop or kill command is named. Without a start time in the row there
-// is nothing to tell a reused PID apart, so no check or stop step is given. The client itself
+// program, so no owner and no stop or kill command is named. Every row has a start time: a row
+// without a readable one makes the whole list unreadable (parseSidecarProcesses). The client itself
 // signals nothing.
 func orphanSidecarGuidance(target orphanSidecarTarget, process sidecarProcess) string {
 	pid := process.PID
 	head := fmt.Sprintf("leftover %s sidecar process: pid %d, config %s, command %s\n"+
 		"  it may belong to another vless-tun session that uses the same Xray config, or to another program\n",
 		target.Name, pid, target.ConfigPath, process.Command)
-	if process.Started.IsZero() {
-		return head + fmt.Sprintf("  the process list gave no start time, so `ps` cannot tell it from a later process that reuses pid %d;\n"+
-			"  leave pid %d alone unless whoever owns it can confirm it is this process", pid, pid)
-	}
 	shown := process.Started.UTC().Format(psStartLayout)
 	return head + fmt.Sprintf("  started:   %s UTC (%s)\n"+
 		"  check it:  LC_ALL=C TZ=UTC0 ps -o pid,lstart,command -p %d\n"+
@@ -136,7 +141,11 @@ func findRunningSidecar(option SidecarOptions) (sidecarProcess, bool, error) {
 		return sidecarProcess{}, false, fmt.Errorf("list sidecar processes: %w", err)
 	}
 	target := targets[0]
-	for _, process := range parseSidecarProcesses(out) {
+	processes, err := parseSidecarProcesses(out)
+	if err != nil {
+		return sidecarProcess{}, false, fmt.Errorf("list sidecar processes: %w", err)
+	}
+	for _, process := range processes {
 		if process.PID == os.Getpid() {
 			continue
 		}
@@ -200,44 +209,32 @@ func sidecarConfigPath(args []string) string {
 	return ""
 }
 
-func parseSidecarProcesses(out []byte) []sidecarProcess {
+func parseSidecarProcesses(out []byte) ([]sidecarProcess, error) {
 	var processes []sidecarProcess
-	for _, line := range strings.Split(string(out), "\n") {
+	for n, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		match := psProcessLinePattern.FindStringSubmatch(line)
 		if match == nil {
-			continue
+			return nil, fmt.Errorf("%w (row %d)", errUnreadableProcessList, n+1)
 		}
-		pid, err := strconv.Atoi(match[1])
-		if err != nil {
-			continue
-		}
-		ppid, err := strconv.Atoi(match[2])
-		if err != nil {
-			continue
-		}
-		pgid, err := strconv.Atoi(match[3])
-		if err != nil {
-			continue
-		}
-		var started time.Time
-		if match[4] != "" {
-			if t, err := time.ParseInLocation(psStartLayout, match[4], time.UTC); err == nil {
-				started = t
-			}
-		}
-		command := strings.TrimSpace(match[5])
-		if command == "" {
-			continue
+		pid, err1 := strconv.Atoi(match[1])
+		ppid, err2 := strconv.Atoi(match[2])
+		pgid, err3 := strconv.Atoi(match[3])
+		started, err4 := time.ParseInLocation(psStartLayout, match[4], time.UTC)
+		if err := errors.Join(err1, err2, err3, err4); err != nil {
+			return nil, fmt.Errorf("%w (row %d): %v", errUnreadableProcessList, n+1, err)
 		}
 		processes = append(processes, sidecarProcess{
 			PID:     pid,
 			PPID:    ppid,
 			PGID:    pgid,
 			Started: started,
-			Command: command,
+			Command: strings.TrimSpace(match[5]),
 		})
 	}
-	return processes
+	return processes, nil
 }
 
 func orphanSidecarMatches(target orphanSidecarTarget, process sidecarProcess) bool {

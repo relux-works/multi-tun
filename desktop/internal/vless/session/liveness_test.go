@@ -340,7 +340,9 @@ func TestRecordSidecarIdentity(t *testing.T) {
 func TestForkedSidecarRecordsIdentity(t *testing.T) {
 	previousAlive, previousList := sidecarProcessAliveSession, sidecarProcessListSession
 	sidecarProcessAliveSession = func(int) (bool, error) { return false, nil }
-	sidecarProcessListSession = func() ([]byte, error) { return []byte(" 777 1 777 /opt/bin/xray run -c /tmp/test-xray.json\n"), nil }
+	sidecarProcessListSession = func() ([]byte, error) {
+		return []byte(" 777 1 777 Thu Nov 26 05:00:07 2026 /opt/bin/xray run -c /tmp/test-xray.json\n"), nil
+	}
 	t.Cleanup(func() { sidecarProcessAliveSession, sidecarProcessListSession = previousAlive, previousList })
 	started := time.Now()
 	previousIdentity := processIdentitySession
