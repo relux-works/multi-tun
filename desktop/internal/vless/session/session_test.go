@@ -155,195 +155,67 @@ func TestProcessAliveCurrentProcess(t *testing.T) {
 	}
 }
 
-func TestCleanupOrphanSidecarsKillsOnlyMatchingConfigProcess(t *testing.T) {
-	prevList := sidecarProcessListSession
-	prevAlive := sidecarProcessAliveSession
-	prevSignalPID := sidecarSignalPIDSession
-	prevSignalGroup := sidecarSignalGroupSession
+// Claim: a process found at start by a sidecar's executable and config path is never signalled,
+// because nothing records its name and start pair: cleanupOrphanSidecars returns errOrphanSidecarRunning
+// naming exactly the matching PID (not a process with another config path, not an unrelated command
+// that mentions the path), sends no PID or group signal, and logs what it found. Positive control: with
+// no matching process it returns nil, still without signals. Limit: the process list and the signal
+// functions are fakes.
+func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
+	prevList, prevAlive := sidecarProcessListSession, sidecarProcessAliveSession
+	prevSignalPID, prevSignalGroup := sidecarSignalPIDSession, sidecarSignalGroupSession
 	t.Cleanup(func() {
-		sidecarProcessListSession = prevList
-		sidecarProcessAliveSession = prevAlive
-		sidecarSignalPIDSession = prevSignalPID
-		sidecarSignalGroupSession = prevSignalGroup
+		sidecarProcessListSession, sidecarProcessAliveSession = prevList, prevAlive
+		sidecarSignalPIDSession, sidecarSignalGroupSession = prevSignalPID, prevSignalGroup
 	})
-
-	sidecarProcessListSession = func() ([]byte, error) {
-		return []byte(strings.Join([]string{
+	var signals []int
+	sidecarSignalPIDSession = func(pid int, _ syscall.Signal) error { signals = append(signals, pid); return nil }
+	sidecarSignalGroupSession = func(pid int, _ syscall.Signal) error { signals = append(signals, -pid); return nil }
+	sidecarProcessAliveSession = func(int) (bool, error) { return true, nil }
+	options := []SidecarOptions{{Name: "xray", Executable: "/opt/homebrew/opt/xray/libexec/xray", Args: []string{"run", "-c", "/tmp/xray_freedom.json"}}}
+	for _, tc := range []struct {
+		name    string
+		listing []string
+		want    string // the matching PID in the error, or "" for no error
+	}{
+		{"matching leftover", []string{
 			" 111   1 111 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json",
 			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
 			" 333   1 333 /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
-		}, "\n")), nil
-	}
-	sidecarProcessAliveSession = func(pid int) (bool, error) {
-		return false, nil
-	}
-
-	var pidSignals []int
-	var groupSignals []int
-	sidecarSignalPIDSession = func(pid int, signal syscall.Signal) error {
-		if signal != syscall.SIGTERM {
-			t.Fatalf("sidecarSignalPIDSession signal = %v, want SIGTERM", signal)
-		}
-		pidSignals = append(pidSignals, pid)
-		return nil
-	}
-	sidecarSignalGroupSession = func(pid int, signal syscall.Signal) error {
-		if signal != syscall.SIGTERM {
-			t.Fatalf("sidecarSignalGroupSession signal = %v, want SIGTERM", signal)
-		}
-		groupSignals = append(groupSignals, pid)
-		return nil
-	}
-
-	logPath := filepath.Join(t.TempDir(), "session.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatalf("OpenFile() error = %v", err)
-	}
-
-	err = cleanupOrphanSidecars([]SidecarOptions{
-		{
-			Name:       "xray",
-			Executable: "/opt/homebrew/opt/xray/libexec/xray",
-			Args:       []string{"run", "-c", "/tmp/xray_freedom.json"},
-		},
-	}, logFile, time.Millisecond)
-	if closeErr := logFile.Close(); closeErr != nil {
-		t.Fatalf("Close() error = %v", closeErr)
-	}
-	if err != nil {
-		t.Fatalf("cleanupOrphanSidecars() error = %v", err)
-	}
-
-	if len(pidSignals) != 0 {
-		t.Fatalf("pid signals = %#v, want none", pidSignals)
-	}
-	if len(groupSignals) != 1 || groupSignals[0] != 111 {
-		t.Fatalf("group signals = %#v, want [111]", groupSignals)
-	}
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-	body := string(data)
-	for _, want := range []string{
-		"orphan_sidecar_cleanup_begin targets=xray:/tmp/xray_freedom.json",
-		"orphan_sidecar_cleanup_kill name=xray pid=111",
-		"orphan_sidecar_cleanup_done killed=1",
+		}, "pid 111"},
+		{"process group differs", []string{" 444   1 999 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json"}, "pid 444"},
+		{"no matching process", []string{
+			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
+			" 333   1 333 /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
+		}, ""},
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("session log missing %q:\n%s", want, body)
-		}
-	}
-}
-
-func TestCleanupOrphanSidecarsUsesPIDWhenProcessGroupDiffers(t *testing.T) {
-	prevList := sidecarProcessListSession
-	prevAlive := sidecarProcessAliveSession
-	prevSignalPID := sidecarSignalPIDSession
-	prevSignalGroup := sidecarSignalGroupSession
-	t.Cleanup(func() {
-		sidecarProcessListSession = prevList
-		sidecarProcessAliveSession = prevAlive
-		sidecarSignalPIDSession = prevSignalPID
-		sidecarSignalGroupSession = prevSignalGroup
-	})
-
-	sidecarProcessListSession = func() ([]byte, error) {
-		return []byte(" 444   1 999 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c=/tmp/xray_freedom.json\n"), nil
-	}
-	sidecarProcessAliveSession = func(pid int) (bool, error) {
-		return false, nil
-	}
-
-	var pidSignals []int
-	var groupSignals []int
-	sidecarSignalPIDSession = func(pid int, signal syscall.Signal) error {
-		pidSignals = append(pidSignals, pid)
-		return nil
-	}
-	sidecarSignalGroupSession = func(pid int, signal syscall.Signal) error {
-		groupSignals = append(groupSignals, pid)
-		return nil
-	}
-
-	logFile, err := os.Create(filepath.Join(t.TempDir(), "session.log"))
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	defer logFile.Close()
-
-	err = cleanupOrphanSidecars([]SidecarOptions{
-		{
-			Name:       "xray",
-			Executable: "xray",
-			Args:       []string{"run", "-c=/tmp/xray_freedom.json"},
-		},
-	}, logFile, time.Millisecond)
-	if err != nil {
-		t.Fatalf("cleanupOrphanSidecars() error = %v", err)
-	}
-
-	if len(groupSignals) != 0 {
-		t.Fatalf("group signals = %#v, want none", groupSignals)
-	}
-	if len(pidSignals) != 1 || pidSignals[0] != 444 {
-		t.Fatalf("pid signals = %#v, want [444]", pidSignals)
-	}
-}
-
-func TestCleanupOrphanSidecarsFallsBackToPIDWhenGroupSignalDenied(t *testing.T) {
-	prevList := sidecarProcessListSession
-	prevAlive := sidecarProcessAliveSession
-	prevSignalPID := sidecarSignalPIDSession
-	prevSignalGroup := sidecarSignalGroupSession
-	t.Cleanup(func() {
-		sidecarProcessListSession = prevList
-		sidecarProcessAliveSession = prevAlive
-		sidecarSignalPIDSession = prevSignalPID
-		sidecarSignalGroupSession = prevSignalGroup
-	})
-
-	sidecarProcessListSession = func() ([]byte, error) {
-		return []byte(" 555   1 555 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json\n"), nil
-	}
-	sidecarProcessAliveSession = func(pid int) (bool, error) {
-		return false, nil
-	}
-
-	var pidSignals []int
-	var groupSignals []int
-	sidecarSignalGroupSession = func(pid int, signal syscall.Signal) error {
-		groupSignals = append(groupSignals, pid)
-		return syscall.EPERM
-	}
-	sidecarSignalPIDSession = func(pid int, signal syscall.Signal) error {
-		pidSignals = append(pidSignals, pid)
-		return nil
-	}
-
-	logFile, err := os.Create(filepath.Join(t.TempDir(), "session.log"))
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	defer logFile.Close()
-
-	err = cleanupOrphanSidecars([]SidecarOptions{
-		{
-			Name:       "xray",
-			Executable: "xray",
-			Args:       []string{"run", "-c", "/tmp/xray_freedom.json"},
-		},
-	}, logFile, time.Millisecond)
-	if err != nil {
-		t.Fatalf("cleanupOrphanSidecars() error = %v", err)
-	}
-	if len(groupSignals) != 1 || groupSignals[0] != 555 {
-		t.Fatalf("group signals = %#v, want [555]", groupSignals)
-	}
-	if len(pidSignals) != 1 || pidSignals[0] != 555 {
-		t.Fatalf("pid signals = %#v, want [555]", pidSignals)
+		t.Run(tc.name, func(t *testing.T) {
+			signals = nil
+			sidecarProcessListSession = func() ([]byte, error) { return []byte(strings.Join(tc.listing, "\n")), nil }
+			logPath := filepath.Join(t.TempDir(), "session.log")
+			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = cleanupOrphanSidecars(options, logFile, time.Millisecond)
+			_ = logFile.Close()
+			if len(signals) != 0 {
+				t.Fatalf("signals sent: %v", signals)
+			}
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("no matching process: err %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errOrphanSidecarRunning) || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "pid 222") || strings.Contains(err.Error(), "pid 333") {
+				t.Fatalf("err = %v, want errOrphanSidecarRunning naming only %s", err, tc.want)
+			}
+			body, _ := os.ReadFile(logPath)
+			if !strings.Contains(string(body), "orphan_sidecar_found name=xray "+strings.Replace(tc.want, "pid ", "pid=", 1)) {
+				t.Fatalf("session log:\n%s", body)
+			}
+		})
 	}
 }
 

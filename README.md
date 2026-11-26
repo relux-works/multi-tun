@@ -978,9 +978,11 @@ Desktop VLESS primary/sidecar and OpenConnect session records retain the observe
 process command and start time. Liveness and stop checks reject reused PIDs and
 return identity lookup errors without further PID signals. OpenConnect failed-start
 cleanup also verifies identity and preserves a current record on uncertainty.
-Legacy records use executable name checks; wrapped sidecars accept the supervisor
-or known payload name. An ambiguous payload with another live name retains the
-record and returns an error. OpenConnect status shows retained recovery context
+A VLESS primary or sidecar record without the name and start pair (from an older
+client) is unverifiable: it is never signalled and never treated as gone, and the
+stop returns an error. A leftover sidecar found at start by its executable and
+config path is reported and not signalled, and the start refuses until it is
+stopped. A launchd session is stopped only under the configured launch label. OpenConnect status shows retained recovery context
 with unknown liveness on identity errors. Both clients share the read-only macOS `kern.proc.pid` lookup in
 `desktop/internal/processidentity`; launchd lookup errors propagate unless the
 service is explicitly reported missing.

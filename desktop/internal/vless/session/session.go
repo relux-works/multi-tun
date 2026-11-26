@@ -739,10 +739,6 @@ func recordProcessIdentity(session *CurrentSession) error {
 
 var identityRetryDelay = 100 * time.Millisecond
 
-// sessionProcessMatches reports whether the live process holding current.PID
-// is the recorded one. Records carrying ProcessComm/ProcessStart must match
-// both; legacy records are matched by the recorded executable's name only.
-// An identity lookup failure is returned as an error, never guessed.
 // sessionProcessMatches reports whether the live process at the session's PID is the recorded main
 // process. Only the recorded process name and start time as a pair identify it: a name alone is
 // shared by any later process of the same program, so a record without the pair is unverifiable

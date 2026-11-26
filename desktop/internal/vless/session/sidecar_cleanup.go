@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -54,8 +55,12 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout 
 		return fmt.Errorf("list sidecar processes: %w", err)
 	}
 
+	// A leftover sidecar has no record, so there is no recorded name and start pair that could prove
+	// it belongs to an earlier vless-tun session; a process found by executable name and config path
+	// alone may be anything that reuses them. It is reported and never signalled, and the start
+	// refuses until it is gone.
 	processes := parseSidecarProcesses(out)
-	killed := 0
+	var found []string
 	seen := map[int]struct{}{}
 	for _, target := range targets {
 		for _, process := range processes {
@@ -68,18 +73,21 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout 
 			if !orphanSidecarMatches(target, process) {
 				continue
 			}
-
-			writeSessionLog(logFile, logLevelWarn, "orphan_sidecar_cleanup_kill name=%s pid=%d pgid=%d command=%s\n", target.Name, process.PID, process.PGID, process.Command)
-			if err := terminateOrphanSidecar(process, timeout); err != nil {
-				return fmt.Errorf("stop orphan %s sidecar pid %d: %w", target.Name, process.PID, err)
-			}
 			seen[process.PID] = struct{}{}
-			killed++
+			writeSessionLog(logFile, logLevelWarn, "orphan_sidecar_found name=%s pid=%d pgid=%d command=%s\n", target.Name, process.PID, process.PGID, process.Command)
+			found = append(found, fmt.Sprintf("%s pid %d (%s)", target.Name, process.PID, process.Command))
 		}
 	}
-	writeSessionLog(logFile, logLevelInfo, "orphan_sidecar_cleanup_done killed=%d\n", killed)
+	if len(found) > 0 {
+		return fmt.Errorf("%w: %s; stop it, then start again", errOrphanSidecarRunning, strings.Join(found, "; "))
+	}
+	writeSessionLog(logFile, logLevelInfo, "orphan_sidecar_cleanup_done found=0\n")
 	return nil
 }
+
+// errOrphanSidecarRunning marks a start refused because a process using a sidecar's executable and
+// config path is already running and nothing proves it is a leftover of this client.
+var errOrphanSidecarRunning = errors.New("a process using this sidecar's executable and config is already running and is not signalled")
 
 func findRunningSidecar(option SidecarOptions) (sidecarProcess, bool, error) {
 	targets := orphanSidecarTargets([]SidecarOptions{option})
@@ -215,56 +223,4 @@ func processCommandBase(command string) string {
 		return ""
 	}
 	return base
-}
-
-func terminateOrphanSidecar(process sidecarProcess, timeout time.Duration) error {
-	if err := signalOrphanSidecar(process, syscall.SIGTERM); err != nil {
-		return err
-	}
-	if stopped, err := waitForSidecarProcessExit(process.PID, timeout); err != nil {
-		return err
-	} else if stopped {
-		return nil
-	}
-
-	if err := signalOrphanSidecar(process, syscall.SIGKILL); err != nil {
-		return err
-	}
-	if stopped, err := waitForSidecarProcessExit(process.PID, timeout); err != nil {
-		return err
-	} else if stopped {
-		return nil
-	}
-	return fmt.Errorf("still alive after SIGKILL")
-}
-
-func signalOrphanSidecar(process sidecarProcess, signal syscall.Signal) error {
-	if process.PGID == process.PID {
-		err := sidecarSignalGroupSession(process.PID, signal)
-		if err == nil {
-			return nil
-		}
-		if err == syscall.EPERM {
-			return sidecarSignalPIDSession(process.PID, signal)
-		}
-		return err
-	}
-	return sidecarSignalPIDSession(process.PID, signal)
-}
-
-func waitForSidecarProcessExit(pid int, timeout time.Duration) (bool, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		alive, err := sidecarProcessAliveSession(pid)
-		if err != nil {
-			return false, err
-		}
-		if !alive {
-			return true, nil
-		}
-		if time.Now().After(deadline) {
-			return false, nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }
