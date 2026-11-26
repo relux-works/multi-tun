@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -158,7 +160,8 @@ func TestProcessAliveCurrentProcess(t *testing.T) {
 // Claim: a process found at start by a sidecar's executable and config path is never signalled:
 // cleanupOrphanSidecars returns errOrphanSidecarRunning naming exactly the matching PID (not a process
 // with another config path, not an unrelated command that mentions the path) and states only what it
-// knows: PID, config, command and the start time read at discovery; that the process may be another
+// knows: PID, config, command and the start time read at discovery (only when the looked-up name
+// matches the listed executable; a reused PID is reported as such with no start time); that the process may be another
 // vless-tun session's sidecar or another program; a ps check bound to that start time, with a reused
 // PID left alone; stop through the owner; how to confirm the original is gone. It names no owner and
 // no stop or kill command. If the start time cannot be read, it gives no stop step and says to leave
@@ -179,27 +182,41 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 	const cmd = "/opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json"
 	discovered := time.Date(2026, 11, 26, 5, 0, 7, 0, time.UTC)
 	other := discovered.Add(90 * time.Minute)
+	type identity struct {
+		comm    string
+		started time.Time
+		err     error
+	}
 	for _, tc := range []struct {
-		name      string
-		listing   []string
-		started   time.Time
-		lookupErr error
-		pid       string // the matching PID, or "" for no error
+		name     string
+		listing  []string
+		identity map[int]identity // what kern.proc reports now, by PID
+		pid      string           // the matching PID, or "" for no error
+		mode     string           // "started", "unreadable" or "reused"
 	}{
 		{"matching leftover", []string{
 			" 111   1 111 " + cmd,
 			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
 			" 333   1 333 /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
-		}, discovered, nil, "111"},
-		{"process group differs, another start", []string{" 444   1 999 " + cmd}, other, nil, "444"},
-		{"start time unreadable", []string{" 555   1 555 " + cmd}, time.Time{}, errors.New("identity denied"), "555"},
+		}, map[int]identity{111: {"xray", discovered, nil}, 222: {"xray", other, nil}, 333: {"rg", other, nil}}, "111", "started"},
+		{"process group differs, another start", []string{" 444   1 999 " + cmd}, map[int]identity{444: {"xray", other, nil}}, "444", "started"},
+		{"start time unreadable", []string{" 555   1 555 " + cmd}, map[int]identity{555: {"", time.Time{}, errors.New("identity denied")}}, "555", "unreadable"},
+		{"PID reused by another program", []string{" 666   1 666 " + cmd}, map[int]identity{666: {"zsh", other, nil}}, "666", "reused"},
 		{"no matching process", []string{
 			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
-		}, discovered, nil, ""},
+		}, map[int]identity{222: {"xray", other, nil}}, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			signals = nil
-			withProcessIdentity(t, "xray", tc.started, tc.lookupErr)
+			prevIdentity := processIdentitySession
+			processIdentitySession = func(pid int) (string, time.Time, error) {
+				id, ok := tc.identity[pid]
+				if !ok {
+					t.Fatalf("identity lookup for unlisted pid %d", pid)
+				}
+				return id.comm, id.started, id.err
+			}
+			t.Cleanup(func() { processIdentitySession = prevIdentity })
 			sidecarProcessListSession = func() ([]byte, error) { return []byte(strings.Join(tc.listing, "\n")), nil }
 			logPath := filepath.Join(t.TempDir(), "session.log")
 			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -229,17 +246,26 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 				"it may belong to another vless-tun session that uses the same Xray config, or to another program",
 				"then start again",
 			}
-			if tc.lookupErr != nil {
-				want = append(want, "leave pid "+tc.pid+" alone unless whoever owns it can confirm it is this process")
-				if strings.Contains(msg, "stop it:") {
-					t.Fatalf("a stop step without a start time:\n%s", msg)
+			pidNum, _ := strconv.Atoi(tc.pid)
+			switch tc.mode {
+			case "unreadable", "reused":
+				if tc.mode == "unreadable" {
+					want = append(want, "leave pid "+tc.pid+" alone unless whoever owns it can confirm it is this process")
+				} else {
+					want = append(want, "pid "+tc.pid+" now belongs to another process (\"zsh\", not \"xray\"): the listed process is gone; leave pid "+tc.pid+" alone")
 				}
-			} else {
-				local := tc.started.In(time.Local).Format(psStartLayout)
+				for _, absent := range []string{"started:", "check it:", "stop it:"} {
+					if strings.Contains(msg, absent) {
+						t.Fatalf("%s: %q given without a matching identity:\n%s", tc.mode, absent, msg)
+					}
+				}
+			default:
+				st := tc.identity[pidNum].started
+				shown := st.UTC().Format(psStartLayout)
 				want = append(want,
-					"started:   "+local+" ("+tc.started.UTC().Format(time.RFC3339)+")",
-					"check it:  ps -o pid,lstart,command -p "+tc.pid,
-					"a start time other than "+local+" means the original is gone and pid "+tc.pid+" was reused: leave that process alone",
+					"started:   "+shown+" UTC ("+st.UTC().Format(time.RFC3339)+")",
+					"check it:  LC_ALL=C TZ=UTC0 ps -o pid,lstart,command -p "+tc.pid,
+					"a start time other than "+shown+" means the original is gone and pid "+tc.pid+" was reused: leave that process alone",
 					"stop it:   through the session or program that owns it",
 					"confirm:   the original is gone once `ps` shows no process "+tc.pid+" or one with another start time",
 				)
@@ -798,5 +824,51 @@ func TestWaitForStartupDNSReadinessTimeoutIncludesLastIssue(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out waiting for public DNS readiness") || !strings.Contains(err.Error(), "resolve github.com: context deadline exceeded") {
 		t.Fatalf("waitForStartupDNSReadiness() error = %v, want timeout with last issue", err)
+	}
+}
+
+// Claim: the shown check and the printed start time compare as text in any locale and time zone. On
+// this test's own process, the shown check command, run by a shell under fr_FR.UTF-8 and
+// Pacific/Auckland, prints exactly the printed start time; the same ps without the pinned
+// LC_ALL=C TZ=UTC0 does not (negative control: the environment really differs). Limit: darwin only
+// (kern.proc and BSD ps); the process is this test binary, read-only.
+func TestOrphanGuidanceCheckMatchesPsInAnyLocale(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("kern.proc identity and BSD ps are darwin-only")
+	}
+	pid := os.Getpid()
+	comm, started, err := processIdentitySession(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := os.Args[0] + " -test.run TestOrphanGuidanceCheckMatchesPsInAnyLocale"
+	text := orphanSidecarGuidance(orphanSidecarTarget{Name: "xray", ConfigPath: "/tmp/x.json"}, sidecarProcess{PID: pid, Command: listed}, comm, started, nil)
+	line := func(prefix string) string {
+		for _, l := range strings.Split(text, "\n") {
+			if i := strings.Index(l, prefix); i >= 0 {
+				return strings.TrimSpace(l[i+len(prefix):])
+			}
+		}
+		t.Fatalf("no %q line in:\n%s", prefix, text)
+		return ""
+	}
+	shown := strings.TrimSuffix(strings.SplitN(line("started:"), " (", 2)[0], " UTC")
+	check := line("check it:")
+	env := append(os.Environ(), "LANG=fr_FR.UTF-8", "LC_ALL=fr_FR.UTF-8", "TZ=Pacific/Auckland")
+	run := func(command string) string {
+		c := exec.Command("/bin/sh", "-c", command)
+		c.Env = env
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", command, err, out)
+		}
+		return string(out)
+	}
+	if out := run(check); !strings.Contains(out, shown) {
+		t.Fatalf("shown check %q printed\n%s\nwithout the printed start %q", check, out, shown)
+	}
+	unpinned := strings.TrimPrefix(check, "LC_ALL=C TZ=UTC0 ")
+	if out := run(unpinned); strings.Contains(out, shown) {
+		t.Fatalf("control: %q under fr_FR/Auckland also printed %q; the test environment does not differ", unpinned, shown)
 	}
 }
