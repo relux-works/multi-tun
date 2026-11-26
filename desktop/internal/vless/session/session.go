@@ -555,18 +555,48 @@ func LoadCurrent(cacheDir string) (CurrentSession, error) {
 }
 
 func SaveCurrent(cacheDir string, current CurrentSession) error {
-	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
-		return err
-	}
-	return saveJSON(CurrentPath(cacheDir), current)
+	return withCurrentRecordLock(cacheDir, func() error {
+		return saveJSON(CurrentPath(cacheDir), current)
+	})
 }
 
 func ClearCurrent(cacheDir string) error {
+	return withCurrentRecordLock(cacheDir, func() error { return removeCurrentRecord(cacheDir) })
+}
+
+func removeCurrentRecord(cacheDir string) error {
 	err := os.Remove(CurrentPath(cacheDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+// withCurrentRecordLock runs fn while holding an exclusive per-cache lock (flock on
+// runtime/current.lock). Every write and removal of the current-session record takes it, so a
+// compare-and-remove cannot be split by another writer in this or another vless-tun process.
+func withCurrentRecordLock(cacheDir string, fn func() error) error {
+	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(filepath.Join(RuntimeDir(cacheDir), "current.lock"), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock the current-session record: %w", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+// SameSession reports whether two records describe the same running session. Session IDs have
+// one-second resolution, so two starts in the same second can share one; the PID, the helper
+// handle, the recorded process start and the launchd label must match too.
+func SameSession(a, b CurrentSession) bool {
+	return a.ID == b.ID && a.PID == b.PID && a.Handle == b.Handle &&
+		a.ProcessStart.Equal(b.ProcessStart) && a.LaunchLabel == b.LaunchLabel
 }
 
 func ProcessAlive(pid int) (bool, error) {
@@ -1093,55 +1123,61 @@ func StopReturned(current CurrentSession) error {
 // SaveCurrentIfAbsent records the session as current only when no current record exists, so it
 // never overwrites another session's record.
 func SaveCurrentIfAbsent(cacheDir string, current CurrentSession) error {
-	if err := os.MkdirAll(RuntimeDir(cacheDir), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(current, "", "  ")
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(CurrentPath(cacheDir), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		_ = f.Close()
-		_ = os.Remove(CurrentPath(cacheDir))
-		return err
-	}
-	return f.Close()
+	return withCurrentRecordLock(cacheDir, func() error {
+		f, err := os.OpenFile(CurrentPath(cacheDir), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			return err
+		}
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			_ = f.Close()
+			_ = os.Remove(CurrentPath(cacheDir))
+			return err
+		}
+		return f.Close()
+	})
 }
 
-// StopIfCurrent stops the current session only when its record names the expected session ID; a
-// record of another session is left alone and reported. The stop acts on the checked record, not
-// on whatever record is current when the signal goes out.
-func StopIfCurrent(cacheDir, expectedID string, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (CurrentSession, string, error) {
+// StopIfCurrent stops the current session only when its record is the expected session (SameSession:
+// ID, PID, helper handle, process start); a record of any other session is left alone and reported.
+// The stop acts on the checked record, not on whatever record is current when the signal goes out.
+func StopIfCurrent(cacheDir string, expected CurrentSession, launch config.PrivilegedLaunchConfig, force bool, timeout time.Duration) (CurrentSession, string, error) {
 	current, err := LoadCurrent(cacheDir)
 	if err != nil {
 		return CurrentSession{}, "", err
 	}
-	if current.ID != expectedID {
-		return CurrentSession{}, "", fmt.Errorf("the current record is session %s, not %s; left alone", current.ID, expectedID)
+	if !SameSession(current, expected) {
+		return CurrentSession{}, "", fmt.Errorf("the current record is session %s (pid %d), not %s (pid %d); left alone", current.ID, current.PID, expected.ID, expected.PID)
 	}
 	// Stop exactly the checked session, never a record read again later, and drop the record only
-	// while it still names that session: a start that replaced it meanwhile keeps its record.
-	return stopResolved(cacheDir, current, force, timeout, func() error { return clearCurrentIfID(cacheDir, expectedID) })
+	// while it still is that session: a start that replaced it meanwhile keeps its record.
+	return stopResolved(cacheDir, current, force, timeout, func() error { return clearCurrentIfSame(cacheDir, current) })
 }
 
-// clearCurrentIfID removes the current record only while it names the given session. Limit: the
-// read and the remove are two steps, so a record written between them can still be removed.
-func clearCurrentIfID(cacheDir, id string) error {
-	current, err := LoadCurrent(cacheDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if current.ID != id {
-		return nil
-	}
-	return ClearCurrent(cacheDir)
+// afterCurrentRecordCompare runs between the compare and the remove of clearCurrentIfSame; tests
+// use it to write another record at exactly that point.
+var afterCurrentRecordCompare = func() {}
+
+// clearCurrentIfSame removes the current record only while it is the given session. The read, the
+// compare and the remove run under the record lock, so no writer can come in between.
+func clearCurrentIfSame(cacheDir string, expected CurrentSession) error {
+	return withCurrentRecordLock(cacheDir, func() error {
+		current, err := LoadCurrent(cacheDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !SameSession(current, expected) {
+			return nil
+		}
+		afterCurrentRecordCompare()
+		return removeCurrentRecord(cacheDir)
+	})
 }
 
 func stopStartedSession(current CurrentSession) error {

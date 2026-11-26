@@ -156,9 +156,11 @@ func TestSaveCurrentIfAbsentNeverOverwrites(t *testing.T) {
 	}
 }
 
-// Claim: StopIfCurrent leaves a record of another session alone: it returns an error, sends no
-// signal, makes no liveness probe and leaves the record bytes unchanged. Positive control: a record
-// of the expected session goes on to the normal stop. Limit: signals and liveness are fakes.
+// Claim: StopIfCurrent leaves a record of any other session alone: a different ID, and also the
+// same (one-second) ID held by a different process, helper handle or process start. Each returns
+// an error, sends no signal, makes no liveness probe and leaves the record bytes unchanged.
+// Positive control: the expected session's own record goes on to the normal stop. Limit: signals
+// and liveness are fakes.
 func TestStopIfCurrentLeavesAnotherSessionAlone(t *testing.T) {
 	prevSignal, prevAlive := vpnCoreSignalSession, processAliveSession
 	signals, probes := 0, 0
@@ -166,24 +168,32 @@ func TestStopIfCurrentLeavesAnotherSessionAlone(t *testing.T) {
 	processAliveSession = func(int) (bool, error) { probes++; return false, nil }
 	t.Cleanup(func() { vpnCoreSignalSession, processAliveSession = prevSignal, prevAlive })
 	launch := config.PrivilegedLaunchConfig{Mode: config.LaunchModeHelper}
-
-	cache := t.TempDir()
-	if err := SaveCurrent(cache, CurrentSession{ID: "other", PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper}); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := os.ReadFile(CurrentPath(cache))
-	if _, _, err := StopIfCurrent(cache, "replacement", launch, true, time.Second); err == nil || !strings.Contains(err.Error(), "left alone") {
-		t.Fatalf("stop of another record: %v", err)
-	}
-	if after, _ := os.ReadFile(CurrentPath(cache)); !bytes.Equal(before, after) || signals != 0 || probes != 0 {
-		t.Fatalf("record changed=%v signals=%d probes=%d", !bytes.Equal(before, after), signals, probes)
+	started := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	expected := CurrentSession{ID: "20261125T220000Z", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started}
+	for name, other := range map[string]CurrentSession{
+		"different ID":           {ID: "other", PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started},
+		"same ID, other process": {ID: expected.ID, PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started},
+		"same ID, other handle":  {ID: expected.ID, PID: 9999, Handle: "other-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started},
+		"same ID, other start":   {ID: expected.ID, PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper, ProcessStart: started.Add(time.Second)},
+	} {
+		cache := t.TempDir()
+		if err := SaveCurrent(cache, other); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(CurrentPath(cache))
+		if _, _, err := StopIfCurrent(cache, expected, launch, true, time.Second); err == nil || !strings.Contains(err.Error(), "left alone") {
+			t.Fatalf("%s: stop of another record: %v", name, err)
+		}
+		if after, _ := os.ReadFile(CurrentPath(cache)); !bytes.Equal(before, after) || signals != 0 || probes != 0 {
+			t.Fatalf("%s: record changed=%v signals=%d probes=%d", name, !bytes.Equal(before, after), signals, probes)
+		}
 	}
 
 	own := t.TempDir()
-	if err := SaveCurrent(own, CurrentSession{ID: "replacement", PID: 9999, Handle: "own-handle", LaunchMode: config.LaunchModeHelper}); err != nil {
+	if err := SaveCurrent(own, expected); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := StopIfCurrent(own, "replacement", launch, true, time.Second); err != nil && strings.Contains(err.Error(), "left alone") {
+	if _, _, err := StopIfCurrent(own, expected, launch, true, time.Second); err != nil && strings.Contains(err.Error(), "left alone") {
 		t.Fatalf("own record refused: %v", err)
 	}
 	if probes == 0 {
@@ -219,7 +229,7 @@ func TestStopReturnedUsesOwnHandleOnly(t *testing.T) {
 // byte-for-byte, whether the checked session is still running (stopped through its own handle) or
 // already gone (stale path, no signal at all). The replacement happens deterministically inside
 // the first liveness probe, which runs after the ID check. Limit: signals, liveness and process
-// identity are fakes; a write between clearCurrentIfID's read and remove is not modeled.
+// identity are fakes; the write between the compare and the remove is TestClearCurrentIfSameHoldsTheLock's.
 func TestStopIfCurrentBindsToTheCheckedRecord(t *testing.T) {
 	started := time.Now()
 	for _, checkedAlive := range []bool{true, false} {
@@ -253,7 +263,7 @@ func TestStopIfCurrentBindsToTheCheckedRecord(t *testing.T) {
 			}
 			t.Cleanup(func() { vpnCoreSignalSession, processAliveSession = prevSignal, prevAlive })
 			withProcessIdentity(t, "sing-box", started, nil)
-			stopped, _, err := StopIfCurrent(cache, "replacement", config.PrivilegedLaunchConfig{Mode: config.LaunchModeHelper}, true, time.Second)
+			stopped, _, err := StopIfCurrent(cache, own, config.PrivilegedLaunchConfig{Mode: config.LaunchModeHelper}, true, time.Second)
 			if err != nil || stopped.ID != "replacement" {
 				t.Fatalf("stop of the checked session: %+v err %v", stopped, err)
 			}
@@ -269,5 +279,42 @@ func TestStopIfCurrentBindsToTheCheckedRecord(t *testing.T) {
 				t.Fatalf("other session's record changed or removed: %v\n%s", err, after)
 			}
 		})
+	}
+}
+
+// Claim: the conditional clear holds the record lock from its read through its remove: another
+// session's record written exactly between the compare and the remove waits for the lock and
+// survives (bytes intact, still loadable), so that session stays tracked. Positive control in the
+// same test: the checked record itself is removed. Limit: the writer is a goroutine in this process
+// using SaveCurrent; a writer in another process takes the same flock.
+func TestClearCurrentIfSameHoldsTheLock(t *testing.T) {
+	cache := t.TempDir()
+	own := CurrentSession{ID: "20261125T220000Z", PID: 9999, Handle: "own-handle"}
+	other := CurrentSession{ID: "20261125T220000Z", PID: 7777, Handle: "other-handle"}
+	if err := SaveCurrent(cache, own); err != nil {
+		t.Fatal(err)
+	}
+	wrote := make(chan error, 1)
+	prev := afterCurrentRecordCompare
+	afterCurrentRecordCompare = func() {
+		go func() { wrote <- SaveCurrent(cache, other) }()
+		select {
+		case err := <-wrote:
+			// The write got in before the remove: put the result back for the final check.
+			wrote <- err
+		case <-time.After(300 * time.Millisecond):
+			// The writer is blocked on the lock, as it must be.
+		}
+	}
+	t.Cleanup(func() { afterCurrentRecordCompare = prev })
+	if err := clearCurrentIfSame(cache, own); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-wrote; err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadCurrent(cache)
+	if err != nil || !SameSession(got, other) {
+		t.Fatalf("record after the clear: %+v err %v, want the other session's", got, err)
 	}
 }

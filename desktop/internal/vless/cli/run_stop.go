@@ -887,12 +887,12 @@ func stopFailedReplacement(cacheDir string, launch config.PrivilegedLaunchConfig
 		return nil
 	}
 	record, err := loadCurrentFunc(cacheDir)
-	recorded := err == nil && record.ID == replacement.ID
+	recorded := err == nil && session.SameSession(record, replacement)
 	switch {
 	case recorded:
-		_, _, err = stopCurrentIfFunc(cacheDir, replacement.ID, launch, true, timeout)
+		_, _, err = stopCurrentIfFunc(cacheDir, replacement, launch, true, timeout)
 	case err == nil:
-		return fmt.Errorf("replacement session %s may still be running, and the current record belongs to session %s, which is left alone", replacement.ID, record.ID)
+		return fmt.Errorf("replacement session %s (pid %d) may still be running, and the current record belongs to another session (%s, pid %d), which is left alone", replacement.ID, replacement.PID, record.ID, record.PID)
 	case errors.Is(err, os.ErrNotExist):
 		err = stopReturnedFunc(replacement)
 	}

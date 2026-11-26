@@ -515,6 +515,9 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 	noRecord := func(string) (session.CurrentSession, error) { return session.CurrentSession{}, os.ErrNotExist }
 	ownRecord := func(string) (session.CurrentSession, error) { return replacement, nil }
 	otherRecord := func(string) (session.CurrentSession, error) {
+		sameIDOtherProcess := func(string) (session.CurrentSession, error) {
+			return session.CurrentSession{ID: replacement.ID, PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper}, nil
+		}
 		return session.CurrentSession{ID: "other", PID: 7777}, nil
 	}
 	cases := []struct {
@@ -542,6 +545,8 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 			record: noRecord, wantEvents: "stop,start,stop-handle", wantErr: "is unknown"},
 		{name: "B3 another session's record is left alone", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
 			record: otherRecord, wantEvents: "stop,start", wantErr: "left alone"},
+		{name: "same ID, other process: its record is left alone", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
+			record: sameIDOtherProcess, wantEvents: "stop,start", wantErr: "left alone"},
 		{name: "B4 no record, stopped through its own handle", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running, gone},
 			record: noRecord, wantEvents: "stop,start,stop-handle,start"},
 		{name: "B4 handle stop fails, recorded for vless-tun stop", returned: replacement, startErr: errors.New("exited"), checks: []outcome{running},
@@ -557,7 +562,7 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 	t.Cleanup(func() {
 		sessionStoppedFunc = guards[0].(func(session.CurrentSession) (bool, error))
 		loadCurrentFunc = guards[1].(func(string) (session.CurrentSession, error))
-		stopCurrentIfFunc = guards[2].(func(string, string, config.PrivilegedLaunchConfig, bool, time.Duration) (session.CurrentSession, string, error))
+		stopCurrentIfFunc = guards[2].(func(string, session.CurrentSession, config.PrivilegedLaunchConfig, bool, time.Duration) (session.CurrentSession, string, error))
 		stopReturnedFunc = guards[3].(func(session.CurrentSession) error)
 		saveCurrentIfAbsentFunc = guards[4].(func(string, session.CurrentSession) error)
 	})
@@ -589,9 +594,9 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 				}
 				return tc.record(dir)
 			}
-			stopCurrentIfFunc = func(_, id string, _ config.PrivilegedLaunchConfig, _ bool, _ time.Duration) (session.CurrentSession, string, error) {
-				if id != replacement.ID {
-					t.Fatalf("record stop for %q", id)
+			stopCurrentIfFunc = func(_ string, expected session.CurrentSession, _ config.PrivilegedLaunchConfig, _ bool, _ time.Duration) (session.CurrentSession, string, error) {
+				if !session.SameSession(expected, replacement) {
+					t.Fatalf("record stop for %+v", expected)
 				}
 				h.events = append(h.events, "stop-record")
 				return replacement, "stopped", tc.stopErr

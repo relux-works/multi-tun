@@ -29,7 +29,7 @@ func init() {
 	loadCurrentFunc = func(string) (session.CurrentSession, error) {
 		return session.CurrentSession{}, errUnsanctionedSessionCall
 	}
-	stopCurrentIfFunc = func(string, string, config.PrivilegedLaunchConfig, bool, time.Duration) (session.CurrentSession, string, error) {
+	stopCurrentIfFunc = func(string, session.CurrentSession, config.PrivilegedLaunchConfig, bool, time.Duration) (session.CurrentSession, string, error) {
 		return session.CurrentSession{}, "", errUnsanctionedSessionCall
 	}
 	stopReturnedFunc = func(session.CurrentSession) error { return errUnsanctionedSessionCall }
@@ -52,7 +52,7 @@ func TestSessionSeamsAreGuardedInTests(t *testing.T) {
 	if _, err := loadCurrentFunc(t.TempDir()); !errors.Is(err, errUnsanctionedSessionCall) {
 		t.Fatalf("record-read seam = %v, want the guard", err)
 	}
-	if _, _, err := stopCurrentIfFunc(t.TempDir(), "x", config.PrivilegedLaunchConfig{}, false, 0); !errors.Is(err, errUnsanctionedSessionCall) {
+	if _, _, err := stopCurrentIfFunc(t.TempDir(), session.CurrentSession{ID: "x"}, config.PrivilegedLaunchConfig{}, false, 0); !errors.Is(err, errUnsanctionedSessionCall) {
 		t.Fatalf("record-stop seam = %v, want the guard", err)
 	}
 	if err := stopReturnedFunc(session.CurrentSession{PID: 1}); !errors.Is(err, errUnsanctionedSessionCall) {
