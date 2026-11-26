@@ -20,11 +20,14 @@ func withProcessIdentity(t *testing.T, comm string, started time.Time, err error
 
 // Stale metadata whose PID now belongs to an unrelated live process (the test
 // binary itself, through the real kern.proc lookup) is not a running session.
+// The record carries a full sing-box identity; a record without one is covered
+// by TestSessionAliveRequiresNameAndStartPair.
 func TestSessionAliveRejectsLivePIDOfAnotherProgram(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("process identity is darwin-only")
 	}
-	current := CurrentSession{PID: os.Getpid(), Command: []string{"/opt/homebrew/bin/sing-box", "run"}, StartedAt: time.Now()}
+	current := CurrentSession{PID: os.Getpid(), Command: []string{"/opt/homebrew/bin/sing-box", "run"}, StartedAt: time.Now(),
+		ProcessComm: "sing-box", ProcessStart: time.Now().Add(-time.Hour)}
 	alive, _, err := SessionAlive(current)
 	if err != nil || alive {
 		t.Fatalf("SessionAlive(live unrelated pid) = (%v, %v), want (false, nil)", alive, err)

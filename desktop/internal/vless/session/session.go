@@ -660,6 +660,12 @@ func SessionAlive(current CurrentSession) (bool, int, error) {
 	}
 	if alive {
 		matches, err := sessionProcessMatches(current)
+		launchdByLabel := current.LaunchMode == config.LaunchModeLaunchd && current.LaunchLabel != ""
+		if errors.Is(err, errIncompleteRecordedIdentity) && launchdByLabel {
+			// A launchd session is identified and stopped by its label, never by this PID:
+			// leave the PID alone and ask launchd below.
+			matches, err = false, nil
+		}
 		if err != nil {
 			// Unknown identity: refuse to call the process ours or gone, so
 			// callers neither signal a possibly unrelated process nor drop
