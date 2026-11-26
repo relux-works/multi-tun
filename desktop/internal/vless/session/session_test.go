@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -159,64 +158,56 @@ func TestProcessAliveCurrentProcess(t *testing.T) {
 
 // Claim: a process found at start by a sidecar's executable and config path is never signalled:
 // cleanupOrphanSidecars returns errOrphanSidecarRunning naming exactly the matching PID (not a process
-// with another config path, not an unrelated command that mentions the path) and states only what it
-// knows: PID, config, command and the start time read at discovery (only when the looked-up name
-// matches the listed executable; a reused PID is reported as such with no start time); that the process may be another
-// vless-tun session's sidecar or another program; a ps check bound to that start time, with a reused
-// PID left alone; stop through the owner; how to confirm the original is gone. It names no owner and
-// no stop or kill command. If the start time cannot be read, it gives no stop step and says to leave
-// the PID alone. No PID or group signal is sent in any case. Positive control: no matching process
-// gives no error. Limit: the process list, identity lookup and signals are fakes.
+// with another config path, not an unrelated command that mentions the path) and states only what one
+// ps row observed: PID, config, command and the start time from that same row; that the process may
+// be another vless-tun session's sidecar or another program; a ps check bound to that start time, with
+// a reused PID left alone; stop through the owner; how to confirm the original is gone. The start time
+// is never looked up again by PID, so a same-name process that reused the PID cannot lend its start
+// time. A row without a start time gives no check or stop step. No owner, no stop or kill command, no
+// PID or group signal in any case. Positive control: no matching process gives no error. Limit: the
+// process list and signals are fakes.
 func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
-	prevList, prevAlive := sidecarProcessListSession, sidecarProcessAliveSession
+	prevList, prevAlive, prevIdentity := sidecarProcessListSession, sidecarProcessAliveSession, processIdentitySession
 	prevSignalPID, prevSignalGroup := sidecarSignalPIDSession, sidecarSignalGroupSession
 	t.Cleanup(func() {
-		sidecarProcessListSession, sidecarProcessAliveSession = prevList, prevAlive
+		sidecarProcessListSession, sidecarProcessAliveSession, processIdentitySession = prevList, prevAlive, prevIdentity
 		sidecarSignalPIDSession, sidecarSignalGroupSession = prevSignalPID, prevSignalGroup
 	})
 	var signals []int
 	sidecarSignalPIDSession = func(pid int, _ syscall.Signal) error { signals = append(signals, pid); return nil }
 	sidecarSignalGroupSession = func(pid int, _ syscall.Signal) error { signals = append(signals, -pid); return nil }
 	sidecarProcessAliveSession = func(int) (bool, error) { return true, nil }
+	// A later lookup by PID would see a same-name process that reused the PID (another start time).
+	reused := time.Date(2026, 11, 26, 7, 45, 0, 0, time.UTC)
+	identityLookups := 0
+	processIdentitySession = func(int) (string, time.Time, error) { identityLookups++; return "xray", reused, nil }
 	options := []SidecarOptions{{Name: "xray", Executable: "/opt/homebrew/opt/xray/libexec/xray", Args: []string{"run", "-c", "/tmp/xray_freedom.json"}}}
 	const cmd = "/opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json"
-	discovered := time.Date(2026, 11, 26, 5, 0, 7, 0, time.UTC)
-	other := discovered.Add(90 * time.Minute)
-	type identity struct {
-		comm    string
-		started time.Time
-		err     error
+	row := func(pid, pgid string, start time.Time) string {
+		return " " + pid + "   1 " + pgid + " " + start.UTC().Format(psStartLayout) + " " + cmd
 	}
+	listed := time.Date(2026, 11, 26, 5, 0, 7, 0, time.UTC)
+	later := time.Date(2026, 11, 6, 6, 30, 7, 0, time.UTC) // single-digit day: lstart pads it with a space
 	for _, tc := range []struct {
-		name     string
-		listing  []string
-		identity map[int]identity // what kern.proc reports now, by PID
-		pid      string           // the matching PID, or "" for no error
-		mode     string           // "started", "unreadable" or "reused"
+		name    string
+		listing []string
+		pid     string    // the matching PID, or "" for no error
+		start   time.Time // the start in that PID's row; zero when the row has none
 	}{
 		{"matching leftover", []string{
-			" 111   1 111 " + cmd,
-			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
-			" 333   1 333 /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
-		}, map[int]identity{111: {"xray", discovered, nil}, 222: {"xray", other, nil}, 333: {"rg", other, nil}}, "111", "started"},
-		{"process group differs, another start", []string{" 444   1 999 " + cmd}, map[int]identity{444: {"xray", other, nil}}, "444", "started"},
-		{"start time unreadable", []string{" 555   1 555 " + cmd}, map[int]identity{555: {"", time.Time{}, errors.New("identity denied")}}, "555", "unreadable"},
-		{"PID reused by another program", []string{" 666   1 666 " + cmd}, map[int]identity{666: {"zsh", other, nil}}, "666", "reused"},
+			row("111", "111", listed),
+			" 222   1 222 " + listed.Format(psStartLayout) + " /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
+			" 333   1 333 " + listed.Format(psStartLayout) + " /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
+		}, "111", listed},
+		{"process group differs, another start", []string{row("444", "999", later)}, "444", later},
+		{"same-name process reuses the PID after the listing", []string{row("666", "666", listed)}, "666", listed},
+		{"row without a start time", []string{" 555   1 555 " + cmd}, "555", time.Time{}},
 		{"no matching process", []string{
-			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
-		}, map[int]identity{222: {"xray", other, nil}}, "", ""},
+			" 222   1 222 " + listed.Format(psStartLayout) + " /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
+		}, "", time.Time{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			signals = nil
-			prevIdentity := processIdentitySession
-			processIdentitySession = func(pid int) (string, time.Time, error) {
-				id, ok := tc.identity[pid]
-				if !ok {
-					t.Fatalf("identity lookup for unlisted pid %d", pid)
-				}
-				return id.comm, id.started, id.err
-			}
-			t.Cleanup(func() { processIdentitySession = prevIdentity })
+			signals, identityLookups = nil, 0
 			sidecarProcessListSession = func() ([]byte, error) { return []byte(strings.Join(tc.listing, "\n")), nil }
 			logPath := filepath.Join(t.TempDir(), "session.log")
 			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -225,8 +216,8 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 			}
 			err = cleanupOrphanSidecars(options, logFile, time.Millisecond)
 			_ = logFile.Close()
-			if len(signals) != 0 {
-				t.Fatalf("signals sent: %v", signals)
+			if len(signals) != 0 || identityLookups != 0 {
+				t.Fatalf("signals sent %v, identity lookups %d", signals, identityLookups)
 			}
 			if tc.pid == "" {
 				if err != nil {
@@ -246,29 +237,25 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 				"it may belong to another vless-tun session that uses the same Xray config, or to another program",
 				"then start again",
 			}
-			pidNum, _ := strconv.Atoi(tc.pid)
-			switch tc.mode {
-			case "unreadable", "reused":
-				if tc.mode == "unreadable" {
-					want = append(want, "leave pid "+tc.pid+" alone unless whoever owns it can confirm it is this process")
-				} else {
-					want = append(want, "pid "+tc.pid+" now belongs to another process (\"zsh\", not \"xray\"): the listed process is gone; leave pid "+tc.pid+" alone")
-				}
+			if tc.start.IsZero() {
+				want = append(want, "leave pid "+tc.pid+" alone unless whoever owns it can confirm it is this process")
 				for _, absent := range []string{"started:", "check it:", "stop it:"} {
 					if strings.Contains(msg, absent) {
-						t.Fatalf("%s: %q given without a matching identity:\n%s", tc.mode, absent, msg)
+						t.Fatalf("%q given without a start time:\n%s", absent, msg)
 					}
 				}
-			default:
-				st := tc.identity[pidNum].started
-				shown := st.UTC().Format(psStartLayout)
+			} else {
+				shown := tc.start.UTC().Format(psStartLayout)
 				want = append(want,
-					"started:   "+shown+" UTC ("+st.UTC().Format(time.RFC3339)+")",
+					"started:   "+shown+" UTC ("+tc.start.UTC().Format(time.RFC3339)+")",
 					"check it:  LC_ALL=C TZ=UTC0 ps -o pid,lstart,command -p "+tc.pid,
 					"a start time other than "+shown+" means the original is gone and pid "+tc.pid+" was reused: leave that process alone",
 					"stop it:   through the session or program that owns it",
 					"confirm:   the original is gone once `ps` shows no process "+tc.pid+" or one with another start time",
 				)
+				if strings.Contains(msg, reused.Format(psStartLayout)) {
+					t.Fatalf("the reusing process's start time was printed:\n%s", msg)
+				}
 			}
 			for _, line := range want {
 				if !strings.Contains(msg, line) {
@@ -286,6 +273,30 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 				t.Fatalf("session log:\n%s", body)
 			}
 		})
+	}
+}
+
+// Claim: the process list reads each process's start time from the same row as its command, in the
+// pinned C locale and UTC, including a space-padded single-digit day; a row without a start time
+// still parses with a zero start. Limit: fixed rows, no live ps.
+func TestParseSidecarProcessesReadsStartFromTheSameRow(t *testing.T) {
+	got := parseSidecarProcesses([]byte(strings.Join([]string{
+		" 111   1 111 Thu Nov 26 05:00:07 2026 /opt/bin/xray run -c /tmp/a.json",
+		" 222   1 222 Fri Nov  6 06:30:07 2026 /opt/bin/xray run -c /tmp/b.json",
+		" 333   1 333 /opt/bin/xray run -c /tmp/c.json",
+	}, "\n")))
+	want := []sidecarProcess{
+		{PID: 111, PPID: 1, PGID: 111, Started: time.Date(2026, 11, 26, 5, 0, 7, 0, time.UTC), Command: "/opt/bin/xray run -c /tmp/a.json"},
+		{PID: 222, PPID: 1, PGID: 222, Started: time.Date(2026, 11, 6, 6, 30, 7, 0, time.UTC), Command: "/opt/bin/xray run -c /tmp/b.json"},
+		{PID: 333, PPID: 1, PGID: 333, Command: "/opt/bin/xray run -c /tmp/c.json"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parsed %d rows: %+v", len(got), got)
+	}
+	for i := range want {
+		if got[i].PID != want[i].PID || got[i].Command != want[i].Command || !got[i].Started.Equal(want[i].Started) {
+			t.Fatalf("row %d = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 
@@ -827,22 +838,31 @@ func TestWaitForStartupDNSReadinessTimeoutIncludesLastIssue(t *testing.T) {
 	}
 }
 
-// Claim: the shown check and the printed start time compare as text in any locale and time zone. On
-// this test's own process, the shown check command, run by a shell under fr_FR.UTF-8 and
-// Pacific/Auckland, prints exactly the printed start time; the same ps without the pinned
-// LC_ALL=C TZ=UTC0 does not (negative control: the environment really differs). Limit: darwin only
-// (kern.proc and BSD ps); the process is this test binary, read-only.
+// Claim: in a French locale and a non-UTC zone, the real process list still yields this test
+// process's start time, and the shown check command prints exactly the printed start time; the same
+// ps without the pinned LC_ALL=C TZ=UTC0 does not (negative control: the environment really differs).
+// Limit: darwin only (BSD ps); the process is this test binary, read-only.
 func TestOrphanGuidanceCheckMatchesPsInAnyLocale(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		t.Skip("kern.proc identity and BSD ps are darwin-only")
+		t.Skip("BSD ps lstart is checked on darwin")
 	}
-	pid := os.Getpid()
-	comm, started, err := processIdentitySession(pid)
+	t.Setenv("LANG", "fr_FR.UTF-8")
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+	t.Setenv("TZ", "Pacific/Auckland")
+	out, err := sidecarProcessListSession()
 	if err != nil {
 		t.Fatal(err)
 	}
-	listed := os.Args[0] + " -test.run TestOrphanGuidanceCheckMatchesPsInAnyLocale"
-	text := orphanSidecarGuidance(orphanSidecarTarget{Name: "xray", ConfigPath: "/tmp/x.json"}, sidecarProcess{PID: pid, Command: listed}, comm, started, nil)
+	var self sidecarProcess
+	for _, p := range parseSidecarProcesses(out) {
+		if p.PID == os.Getpid() {
+			self = p
+		}
+	}
+	if self.PID == 0 || self.Started.IsZero() {
+		t.Fatalf("own row %+v: no start time from the process list", self)
+	}
+	text := orphanSidecarGuidance(orphanSidecarTarget{Name: "xray", ConfigPath: "/tmp/x.json"}, self)
 	line := func(prefix string) string {
 		for _, l := range strings.Split(text, "\n") {
 			if i := strings.Index(l, prefix); i >= 0 {
@@ -854,11 +874,8 @@ func TestOrphanGuidanceCheckMatchesPsInAnyLocale(t *testing.T) {
 	}
 	shown := strings.TrimSuffix(strings.SplitN(line("started:"), " (", 2)[0], " UTC")
 	check := line("check it:")
-	env := append(os.Environ(), "LANG=fr_FR.UTF-8", "LC_ALL=fr_FR.UTF-8", "TZ=Pacific/Auckland")
 	run := func(command string) string {
-		c := exec.Command("/bin/sh", "-c", command)
-		c.Env = env
-		out, err := c.CombinedOutput()
+		out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", command, err, out)
 		}

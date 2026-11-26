@@ -982,8 +982,8 @@ A VLESS primary or sidecar record without the name and start pair (from an older
 client) is unverifiable: it is never signalled and never treated as gone, and the
 stop returns an error. A leftover sidecar found at start by its executable and
 config path is reported and not signalled, and the start refuses until it is
-stopped. The message names its PID, config, command and the start time read when
-it was found, says it may be another vless-tun session's sidecar (caches can share
+stopped. The message names its PID, config, command and the start time from the
+same `ps` row, says it may be another vless-tun session's sidecar (caches can share
 an Xray config) or another program, and gives a `ps` check bound to that start
 time; it names no owner and no stop or kill command. A launchd session is stopped only under the configured launch label. OpenConnect status shows retained recovery context
 with unknown liveness on identity errors. Both clients share the read-only macOS `kern.proc.pid` lookup in

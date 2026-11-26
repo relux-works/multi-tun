@@ -14,8 +14,12 @@ import (
 )
 
 var (
+	// The listing pins the C locale and UTC so lstart parses the same way on every host, and takes
+	// each process's start time from the same row as its command.
 	sidecarProcessListSession = func() ([]byte, error) {
-		return execCommand("ps", "-axo", "pid=,ppid=,pgid=,command=").CombinedOutput()
+		cmd := execCommand("ps", "-axo", "pid=,ppid=,pgid=,lstart=,command=")
+		cmd.Env = append(os.Environ(), "LC_ALL=C", "TZ=UTC0")
+		return cmd.CombinedOutput()
 	}
 	sidecarProcessAliveSession = ProcessAlive
 	sidecarSignalPIDSession    = func(pid int, signal syscall.Signal) error {
@@ -32,6 +36,7 @@ type sidecarProcess struct {
 	PID     int
 	PPID    int
 	PGID    int
+	Started time.Time // from the same ps row as Command; zero when the listing has no start time
 	Command string
 }
 
@@ -41,7 +46,9 @@ type orphanSidecarTarget struct {
 	ConfigPath     string
 }
 
-var psProcessLinePattern = regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$`)
+// psProcessLinePattern reads "pid ppid pgid [lstart] command"; lstart ("Thu Nov 26 05:00:07 2026",
+// C locale) is optional so a listing without it still parses, with no start time.
+var psProcessLinePattern = regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+(\d+)\s+(?:([A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4})\s+)?(.+?)\s*$`)
 
 func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout time.Duration) error {
 	targets := orphanSidecarTargets(options)
@@ -55,10 +62,10 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout 
 		return fmt.Errorf("list sidecar processes: %w", err)
 	}
 
-	// A process found here by a sidecar's executable and config path has no session record, so
-	// nothing proves who owns it: another vless-tun session can share the config, or another program
-	// can use it. Each one is reported with what can be observed now (orphanSidecarGuidance) and is
-	// never signalled; the start refuses while any is found.
+	// This scan cannot establish who owns a process it finds by a sidecar's executable and config
+	// path: another vless-tun session can share the config (and may have its own record), or another
+	// program can use it. Each one is reported with what one ps row observed (orphanSidecarGuidance)
+	// and is never signalled; the start refuses while any is found.
 	processes := parseSidecarProcesses(out)
 	var found []string
 	seen := map[int]struct{}{}
@@ -75,8 +82,7 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout 
 			}
 			seen[process.PID] = struct{}{}
 			writeSessionLog(logFile, logLevelWarn, "orphan_sidecar_found name=%s pid=%d pgid=%d command=%s\n", target.Name, process.PID, process.PGID, process.Command)
-			comm, started, identityErr := processIdentitySession(process.PID)
-			found = append(found, orphanSidecarGuidance(target, process, comm, started, identityErr))
+			found = append(found, orphanSidecarGuidance(target, process))
 		}
 	}
 	if len(found) > 0 {
@@ -92,41 +98,28 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout 
 const psStartLayout = "Mon Jan _2 15:04:05 2006"
 
 // orphanSidecarGuidance describes one process found by a sidecar's executable and config path and
-// states only what the client observed. The start time comes from a kern.proc lookup of the PID,
-// which reads whoever holds the PID at that moment, so it is shown only when the looked-up process
-// name matches the executable in the listed command; otherwise the PID already belongs to another
-// process and only that is said. The process may be another vless-tun session's sidecar (caches can
-// share an Xray config) or another program, so no owner and no stop or kill command is named. The
-// client itself signals nothing.
-func orphanSidecarGuidance(target orphanSidecarTarget, process sidecarProcess, comm string, started time.Time, identityErr error) string {
+// states only what one ps row observed: PID, start time and command come from the same row, so the
+// start time always belongs to the listed command, even if the PID has been reused since. The
+// process may be another vless-tun session's sidecar (caches can share an Xray config) or another
+// program, so no owner and no stop or kill command is named. Without a start time in the row there
+// is nothing to tell a reused PID apart, so no check or stop step is given. The client itself
+// signals nothing.
+func orphanSidecarGuidance(target orphanSidecarTarget, process sidecarProcess) string {
 	pid := process.PID
 	head := fmt.Sprintf("leftover %s sidecar process: pid %d, config %s, command %s\n"+
 		"  it may belong to another vless-tun session that uses the same Xray config, or to another program\n",
 		target.Name, pid, target.ConfigPath, process.Command)
-	if identityErr != nil || started.IsZero() {
-		return head + fmt.Sprintf("  its start time could not be read, so `ps` cannot tell it from a later process that reuses pid %d;\n"+
+	if process.Started.IsZero() {
+		return head + fmt.Sprintf("  the process list gave no start time, so `ps` cannot tell it from a later process that reuses pid %d;\n"+
 			"  leave pid %d alone unless whoever owns it can confirm it is this process", pid, pid)
 	}
-	if listed := listedProcessName(process.Command); comm != listed {
-		return head + fmt.Sprintf("  pid %d now belongs to another process (%q, not %q): the listed process is gone; leave pid %d alone", pid, comm, listed, pid)
-	}
-	shown := started.UTC().Format(psStartLayout)
+	shown := process.Started.UTC().Format(psStartLayout)
 	return head + fmt.Sprintf("  started:   %s UTC (%s)\n"+
 		"  check it:  LC_ALL=C TZ=UTC0 ps -o pid,lstart,command -p %d\n"+
 		"             a start time other than %s means the original is gone and pid %d was reused: leave that process alone\n"+
 		"  stop it:   through the session or program that owns it\n"+
 		"  confirm:   the original is gone once `ps` shows no process %d or one with another start time",
-		shown, started.UTC().Format(time.RFC3339), pid, shown, pid, pid)
-}
-
-// listedProcessName is the process name kern.proc reports for the listed command's executable:
-// its base name, cut to MAXCOMLEN (16) bytes.
-func listedProcessName(command string) string {
-	name := processCommandBase(command)
-	if len(name) > 16 {
-		name = name[:16]
-	}
-	return name
+		shown, process.Started.UTC().Format(time.RFC3339), pid, shown, pid, pid)
 }
 
 // errOrphanSidecarRunning marks a start refused because a process using a sidecar's executable and
@@ -226,7 +219,13 @@ func parseSidecarProcesses(out []byte) []sidecarProcess {
 		if err != nil {
 			continue
 		}
-		command := strings.TrimSpace(match[4])
+		var started time.Time
+		if match[4] != "" {
+			if t, err := time.ParseInLocation(psStartLayout, match[4], time.UTC); err == nil {
+				started = t
+			}
+		}
+		command := strings.TrimSpace(match[5])
 		if command == "" {
 			continue
 		}
@@ -234,6 +233,7 @@ func parseSidecarProcesses(out []byte) []sidecarProcess {
 			PID:     pid,
 			PPID:    ppid,
 			PGID:    pgid,
+			Started: started,
 			Command: command,
 		})
 	}
