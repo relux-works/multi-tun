@@ -716,7 +716,31 @@ var identityRetryDelay = 100 * time.Millisecond
 // is the recorded one. Records carrying ProcessComm/ProcessStart must match
 // both; legacy records are matched by the recorded executable's name only.
 // An identity lookup failure is returned as an error, never guessed.
+// sessionProcessMatches reports whether the live process at the session's PID is the recorded main
+// process. Only the recorded process name and start time as a pair identify it: a name alone is
+// shared by any later process of the same program, so a record without the pair is unverifiable
+// and returns errIncompleteRecordedIdentity, never "alive" (which leads to a signal) or "gone".
 func sessionProcessMatches(current CurrentSession) (bool, error) {
+	if current.ProcessComm == "" || current.ProcessStart.IsZero() {
+		return false, fmt.Errorf("%w (pid %d)", errIncompleteRecordedIdentity, current.PID)
+	}
+	comm, started, err := processIdentitySession(current.PID)
+	if errors.Is(err, errProcessIdentityUnsupported) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("verify identity of pid %d: %w", current.PID, err)
+	}
+	return processidentity.Matches(comm, started, current.ProcessComm, current.ProcessStart, ""), nil
+}
+
+// errIncompleteRecordedIdentity marks a main-process record (written by an older client) without
+// the process name and start time pair; that process is neither signalled nor treated as gone.
+var errIncompleteRecordedIdentity = errors.New("cannot verify the session process: its record has no process name and start time; stop it with the client that started it")
+
+// sidecarProcessMatches keeps the sidecar identity rule unchanged: the recorded name and start pair
+// when present, otherwise the legacy executable-name check for records from older clients.
+func sidecarProcessMatches(current CurrentSession) (bool, error) {
 	comm, started, err := processIdentitySession(current.PID)
 	if errors.Is(err, errProcessIdentityUnsupported) {
 		return true, nil
@@ -889,7 +913,7 @@ func sidecarAlive(sidecar SidecarSession) (bool, error) {
 	}
 	current := CurrentSession{PID: sidecar.PID, Command: sidecar.Command, ProcessComm: sidecar.ProcessComm, ProcessStart: sidecar.ProcessStart}
 	if sidecar.ProcessComm != "" || !isSidecarWrapper(filepath.Base(sidecar.Command[0])) {
-		return sessionProcessMatches(current)
+		return sidecarProcessMatches(current)
 	}
 	comm, started, err := processIdentitySession(sidecar.PID)
 	if errors.Is(err, errProcessIdentityUnsupported) {

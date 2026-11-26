@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"runtime"
@@ -134,16 +135,57 @@ func TestLaunchdStopPollKeepsRecordedIdentity(t *testing.T) {
 	}
 }
 
-// Legacy records without a recorded identity are checked by name only.
-func TestSessionAliveLegacyRecordChecksNameOnly(t *testing.T) {
-	current := CurrentSession{PID: os.Getpid(), Command: []string{"/usr/local/bin/sing-box"}}
-	withProcessIdentity(t, "sing-box", time.Now(), nil)
-	if alive, _, _ := SessionAlive(current); !alive {
-		t.Fatal("legacy record with matching name: want alive")
+// Claim: a main-process record without the recorded name and start pair is unverifiable: SessionAlive
+// returns errIncompleteRecordedIdentity (never alive, never gone) for a legacy record, a name-only
+// record and a start-only record, even while a process with the expected name holds the PID. A
+// complete record is alive only when the live process has the same name and a start within the
+// one-second tolerance: the same program started three hours later is not alive. Positive control:
+// the exact pair is alive. Limit: process identity is a fake.
+func TestSessionAliveRequiresNameAndStartPair(t *testing.T) {
+	recorded := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	withProcessIdentity(t, "sing-box", recorded, nil)
+	for name, current := range map[string]CurrentSession{
+		"legacy record": {PID: os.Getpid(), Command: []string{"/usr/local/bin/sing-box"}},
+		"name only":     {PID: os.Getpid(), ProcessComm: "sing-box"},
+		"start only":    {PID: os.Getpid(), ProcessStart: recorded},
+	} {
+		alive, _, err := SessionAlive(current)
+		if alive || !errors.Is(err, errIncompleteRecordedIdentity) {
+			t.Errorf("%s: alive=%v err=%v, want unverifiable", name, alive, err)
+		}
 	}
-	withProcessIdentity(t, "zsh", time.Now(), nil)
-	if alive, _, _ := SessionAlive(current); alive {
-		t.Fatal("legacy record with another program's name: want not alive")
+	complete := CurrentSession{PID: os.Getpid(), ProcessComm: "sing-box", ProcessStart: recorded}
+	if alive, _, err := SessionAlive(complete); !alive || err != nil {
+		t.Fatalf("exact pair: alive=%v err=%v, want alive", alive, err)
+	}
+	withProcessIdentity(t, "sing-box", recorded.Add(3*time.Hour), nil)
+	if alive, _, err := SessionAlive(complete); alive || err != nil {
+		t.Fatalf("same name started 3 h later: alive=%v err=%v, want not alive", alive, err)
+	}
+}
+
+// Claim: an ordinary Stop of a direct-mode record without the name and start pair stops before any
+// signal: it returns errIncompleteRecordedIdentity while the PID is live, and the record stays
+// byte-for-byte, so the session is still tracked. The identity check runs before every signal path
+// in Stop, so the error proves no signal was sent. Limit: liveness and identity are fakes; the PID
+// is above the macOS PID range, so a wrongly reached kill(2) would only return ESRCH.
+func TestStopDirectRecordWithoutIdentityPairSendsNoSignal(t *testing.T) {
+	prevAlive := processAliveSession
+	processAliveSession = func(int) (bool, error) { return true, nil }
+	t.Cleanup(func() { processAliveSession = prevAlive })
+	withProcessIdentity(t, "sing-box", time.Now().Add(3*time.Hour), nil)
+	cache := t.TempDir()
+	legacy := CurrentSession{ID: "legacy", PID: 999999, LaunchMode: config.LaunchModeDirect, Command: []string{"/usr/local/bin/sing-box"}}
+	if err := SaveCurrent(cache, legacy); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(CurrentPath(cache))
+	_, _, err := Stop(cache, config.PrivilegedLaunchConfig{Mode: config.LaunchModeDirect}, true, time.Second)
+	if !errors.Is(err, errIncompleteRecordedIdentity) {
+		t.Fatalf("stop err=%v, want errIncompleteRecordedIdentity before any signal", err)
+	}
+	if after, err := os.ReadFile(CurrentPath(cache)); err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("record changed or removed: %v", err)
 	}
 }
 
