@@ -515,10 +515,10 @@ func TestReconnectReconcilesUncertainStartBeforeRestore(t *testing.T) {
 	noRecord := func(string) (session.CurrentSession, error) { return session.CurrentSession{}, os.ErrNotExist }
 	ownRecord := func(string) (session.CurrentSession, error) { return replacement, nil }
 	otherRecord := func(string) (session.CurrentSession, error) {
-		sameIDOtherProcess := func(string) (session.CurrentSession, error) {
-			return session.CurrentSession{ID: replacement.ID, PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper}, nil
-		}
 		return session.CurrentSession{ID: "other", PID: 7777}, nil
+	}
+	sameIDOtherProcess := func(string) (session.CurrentSession, error) {
+		return session.CurrentSession{ID: replacement.ID, PID: 7777, Handle: "other-handle", LaunchMode: config.LaunchModeHelper}, nil
 	}
 	cases := []struct {
 		name       string
