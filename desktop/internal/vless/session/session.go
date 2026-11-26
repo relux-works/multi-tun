@@ -921,12 +921,13 @@ func sidecarAlive(sidecar SidecarSession) (bool, error) {
 	if err != nil || !alive {
 		return alive, err
 	}
-	// Like the main process, a live sidecar is identified only by its recorded name and start pair;
-	// a record without it (an older client) is unverifiable and never signalled.
-	if sidecar.ProcessComm == "" || sidecar.ProcessStart.IsZero() {
-		return false, fmt.Errorf("sidecar %q: %w (pid %d)", sidecar.Name, errIncompleteRecordedIdentity, sidecar.PID)
+	// Like the main process, a live sidecar is identified only by its recorded name and start pair
+	// (sessionProcessMatches); a record without it (an older client) is unverifiable, never signalled.
+	matches, err := sessionProcessMatches(CurrentSession{PID: sidecar.PID, ProcessComm: sidecar.ProcessComm, ProcessStart: sidecar.ProcessStart})
+	if err != nil {
+		return false, fmt.Errorf("sidecar %q: %w", sidecar.Name, err)
 	}
-	return sessionProcessMatches(CurrentSession{PID: sidecar.PID, ProcessComm: sidecar.ProcessComm, ProcessStart: sidecar.ProcessStart})
+	return matches, nil
 }
 
 func stopSidecar(sidecar SidecarSession, force bool, timeout time.Duration) error {
