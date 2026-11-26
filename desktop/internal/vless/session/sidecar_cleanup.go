@@ -75,14 +75,41 @@ func cleanupOrphanSidecars(options []SidecarOptions, logFile io.Writer, timeout 
 			}
 			seen[process.PID] = struct{}{}
 			writeSessionLog(logFile, logLevelWarn, "orphan_sidecar_found name=%s pid=%d pgid=%d command=%s\n", target.Name, process.PID, process.PGID, process.Command)
-			found = append(found, fmt.Sprintf("%s pid %d (%s)", target.Name, process.PID, process.Command))
+			_, started, identityErr := processIdentitySession(process.PID)
+			found = append(found, orphanSidecarGuidance(target, process, started, identityErr))
 		}
 	}
 	if len(found) > 0 {
-		return fmt.Errorf("%w: %s; stop it, then start again", errOrphanSidecarRunning, strings.Join(found, "; "))
+		return fmt.Errorf("%w:\n%s\nthen start again", errOrphanSidecarRunning, strings.Join(found, "\n"))
 	}
 	writeSessionLog(logFile, logLevelInfo, "orphan_sidecar_cleanup_done found=0\n")
 	return nil
+}
+
+// psStartLayout is how `ps -o lstart` prints a start time (local time zone).
+const psStartLayout = "Mon Jan _2 15:04:05 2006"
+
+// orphanSidecarGuidance describes one process found by a sidecar's executable and config path and
+// states only what the client knows: its PID, the start time read at discovery, its config and
+// command. It may be another vless-tun session's sidecar (caches can share an Xray config) or
+// another program, so it names no owner and no stop or kill command. The check compares the start
+// time, so a reused PID is told apart and left alone. The client itself signals nothing.
+func orphanSidecarGuidance(target orphanSidecarTarget, process sidecarProcess, started time.Time, identityErr error) string {
+	pid := process.PID
+	head := fmt.Sprintf("leftover %s sidecar process: pid %d, config %s, command %s\n"+
+		"  it may belong to another vless-tun session that uses the same Xray config, or to another program\n",
+		target.Name, pid, target.ConfigPath, process.Command)
+	if identityErr != nil || started.IsZero() {
+		return head + fmt.Sprintf("  its start time could not be read, so `ps` cannot tell it from a later process that reuses pid %d;\n"+
+			"  leave pid %d alone unless whoever owns it can confirm it is this process", pid, pid)
+	}
+	local := started.In(time.Local).Format(psStartLayout)
+	return head + fmt.Sprintf("  started:   %s (%s)\n"+
+		"  check it:  ps -o pid,lstart,command -p %d\n"+
+		"             a start time other than %s means the original is gone and pid %d was reused: leave that process alone\n"+
+		"  stop it:   through the session or program that owns it\n"+
+		"  confirm:   the original is gone once `ps` shows no process %d or one with another start time",
+		local, started.UTC().Format(time.RFC3339), pid, local, pid, pid)
 }
 
 // errOrphanSidecarRunning marks a start refused because a process using a sidecar's executable and

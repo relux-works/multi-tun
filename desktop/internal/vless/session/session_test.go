@@ -155,12 +155,15 @@ func TestProcessAliveCurrentProcess(t *testing.T) {
 	}
 }
 
-// Claim: a process found at start by a sidecar's executable and config path is never signalled,
-// because nothing records its name and start pair: cleanupOrphanSidecars returns errOrphanSidecarRunning
-// naming exactly the matching PID (not a process with another config path, not an unrelated command
-// that mentions the path), sends no PID or group signal, and logs what it found. Positive control: with
-// no matching process it returns nil, still without signals. Limit: the process list and the signal
-// functions are fakes.
+// Claim: a process found at start by a sidecar's executable and config path is never signalled:
+// cleanupOrphanSidecars returns errOrphanSidecarRunning naming exactly the matching PID (not a process
+// with another config path, not an unrelated command that mentions the path) and states only what it
+// knows: PID, config, command and the start time read at discovery; that the process may be another
+// vless-tun session's sidecar or another program; a ps check bound to that start time, with a reused
+// PID left alone; stop through the owner; how to confirm the original is gone. It names no owner and
+// no stop or kill command. If the start time cannot be read, it gives no stop step and says to leave
+// the PID alone. No PID or group signal is sent in any case. Positive control: no matching process
+// gives no error. Limit: the process list, identity lookup and signals are fakes.
 func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 	prevList, prevAlive := sidecarProcessListSession, sidecarProcessAliveSession
 	prevSignalPID, prevSignalGroup := sidecarSignalPIDSession, sidecarSignalGroupSession
@@ -173,24 +176,30 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 	sidecarSignalGroupSession = func(pid int, _ syscall.Signal) error { signals = append(signals, -pid); return nil }
 	sidecarProcessAliveSession = func(int) (bool, error) { return true, nil }
 	options := []SidecarOptions{{Name: "xray", Executable: "/opt/homebrew/opt/xray/libexec/xray", Args: []string{"run", "-c", "/tmp/xray_freedom.json"}}}
+	const cmd = "/opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json"
+	discovered := time.Date(2026, 11, 26, 5, 0, 7, 0, time.UTC)
+	other := discovered.Add(90 * time.Minute)
 	for _, tc := range []struct {
-		name    string
-		listing []string
-		want    string // the matching PID in the error, or "" for no error
+		name      string
+		listing   []string
+		started   time.Time
+		lookupErr error
+		pid       string // the matching PID, or "" for no error
 	}{
 		{"matching leftover", []string{
-			" 111   1 111 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json",
+			" 111   1 111 " + cmd,
 			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
 			" 333   1 333 /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
-		}, "pid 111"},
-		{"process group differs", []string{" 444   1 999 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_freedom.json"}, "pid 444"},
+		}, discovered, nil, "111"},
+		{"process group differs, another start", []string{" 444   1 999 " + cmd}, other, nil, "444"},
+		{"start time unreadable", []string{" 555   1 555 " + cmd}, time.Time{}, errors.New("identity denied"), "555"},
 		{"no matching process", []string{
 			" 222   1 222 /opt/homebrew/Cellar/xray/26.3.27/libexec/xray run -c /tmp/xray_other.json",
-			" 333   1 333 /opt/homebrew/bin/rg xray /tmp/xray_freedom.json",
-		}, ""},
+		}, discovered, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			signals = nil
+			withProcessIdentity(t, "xray", tc.started, tc.lookupErr)
 			sidecarProcessListSession = func() ([]byte, error) { return []byte(strings.Join(tc.listing, "\n")), nil }
 			logPath := filepath.Join(t.TempDir(), "session.log")
 			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -202,17 +211,52 @@ func TestCleanupOrphanSidecarsReportsWithoutSignal(t *testing.T) {
 			if len(signals) != 0 {
 				t.Fatalf("signals sent: %v", signals)
 			}
-			if tc.want == "" {
+			if tc.pid == "" {
 				if err != nil {
 					t.Fatalf("no matching process: err %v", err)
 				}
 				return
 			}
-			if !errors.Is(err, errOrphanSidecarRunning) || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "pid 222") || strings.Contains(err.Error(), "pid 333") {
-				t.Fatalf("err = %v, want errOrphanSidecarRunning naming only %s", err, tc.want)
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			}
+			if !errors.Is(err, errOrphanSidecarRunning) || strings.Contains(msg, "pid 222") || strings.Contains(msg, "pid 333") {
+				t.Fatalf("err = %v, want errOrphanSidecarRunning naming only pid %s", err, tc.pid)
+			}
+			want := []string{
+				"leftover xray sidecar process: pid " + tc.pid + ", config /tmp/xray_freedom.json, command " + cmd,
+				"it may belong to another vless-tun session that uses the same Xray config, or to another program",
+				"then start again",
+			}
+			if tc.lookupErr != nil {
+				want = append(want, "leave pid "+tc.pid+" alone unless whoever owns it can confirm it is this process")
+				if strings.Contains(msg, "stop it:") {
+					t.Fatalf("a stop step without a start time:\n%s", msg)
+				}
+			} else {
+				local := tc.started.In(time.Local).Format(psStartLayout)
+				want = append(want,
+					"started:   "+local+" ("+tc.started.UTC().Format(time.RFC3339)+")",
+					"check it:  ps -o pid,lstart,command -p "+tc.pid,
+					"a start time other than "+local+" means the original is gone and pid "+tc.pid+" was reused: leave that process alone",
+					"stop it:   through the session or program that owns it",
+					"confirm:   the original is gone once `ps` shows no process "+tc.pid+" or one with another start time",
+				)
+			}
+			for _, line := range want {
+				if !strings.Contains(msg, line) {
+					t.Fatalf("refusal lacks %q:\n%s", line, msg)
+				}
+			}
+			// Negative: no stop or kill command and no ownership claim.
+			for _, forbidden := range []string{"vless-tun stop", "kill ", "no vless-tun session record"} {
+				if strings.Contains(msg, forbidden) {
+					t.Fatalf("refusal contains %q:\n%s", forbidden, msg)
+				}
 			}
 			body, _ := os.ReadFile(logPath)
-			if !strings.Contains(string(body), "orphan_sidecar_found name=xray "+strings.Replace(tc.want, "pid ", "pid=", 1)) {
+			if !strings.Contains(string(body), "orphan_sidecar_found name=xray pid="+tc.pid) {
 				t.Fatalf("session log:\n%s", body)
 			}
 		})
