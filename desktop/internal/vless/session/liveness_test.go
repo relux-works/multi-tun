@@ -85,7 +85,7 @@ func TestLaunchdLookupErrorPreservesSession(t *testing.T) {
 			if _, err := InspectLaunchd(current.LaunchLabel); !errors.Is(err, failure) {
 				t.Fatalf("InspectLaunchd err=%v", err)
 			}
-			if _, _, err := Stop(cache, config.PrivilegedLaunchConfig{}, true, time.Millisecond); !errors.Is(err, failure) {
+			if _, _, err := Stop(cache, config.PrivilegedLaunchConfig{Label: current.LaunchLabel}, true, time.Millisecond); !errors.Is(err, failure) {
 				t.Fatalf("Stop err=%v", err)
 			}
 			after, err := os.ReadFile(CurrentPath(cache))
