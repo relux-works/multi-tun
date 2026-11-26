@@ -148,7 +148,9 @@ func withSidecarSeams(t *testing.T, identity func(int) (string, time.Time, error
 	return &signals
 }
 
-// Sidecar identity matches allow signals; reused PIDs, unreadable identities, and legacy name mismatches never do.
+// Claim: only a sidecar whose recorded name and start pair match is signalled; reused PIDs, unreadable
+// identities and legacy records without the pair (even with a matching live name) never are, and a
+// legacy record returns errIncompleteRecordedIdentity.
 func TestStopSidecarIdentity(t *testing.T) {
 	started := time.Date(2026, 10, 19, 1, 0, 0, 0, time.UTC)
 	failure := errors.New("identity denied")
@@ -163,7 +165,7 @@ func TestStopSidecarIdentity(t *testing.T) {
 		{"reused start", "xray", started.Add(time.Hour), nil, false, 0},
 		{"reused command", "zsh", started, nil, false, 0},
 		{"unreadable", "", time.Time{}, failure, false, 0},
-		{"legacy match", "xray", started, nil, true, 2},
+		{"legacy match", "xray", started, nil, true, 0},
 		{"legacy mismatch", "zsh", started, nil, true, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -173,7 +175,11 @@ func TestStopSidecarIdentity(t *testing.T) {
 				sidecar.ProcessComm, sidecar.ProcessStart = "", time.Time{}
 			}
 			err := stopSidecar(sidecar, true, 0)
-			if !errors.Is(err, tt.lookupErr) || len(*signals) != tt.count {
+			wantErr := tt.lookupErr
+			if tt.legacy {
+				wantErr = errIncompleteRecordedIdentity
+			}
+			if !errors.Is(err, wantErr) || len(*signals) != tt.count {
 				t.Fatalf("err=%v signals=%v", err, *signals)
 			}
 			if tt.count == 2 && ((*signals)[0] != syscall.SIGTERM || (*signals)[1] != syscall.SIGKILL) {
@@ -218,7 +224,7 @@ func TestStopPreservesRecordOnSidecarIdentityError(t *testing.T) {
 	setDNSServersPrivilegedSession = func(string, string, int, string, []string) error { dnsCalls++; return nil }
 	t.Cleanup(func() { processAliveSession, setDNSServersPrivilegedSession = previousAlive, previousDNS })
 	cache := t.TempDir()
-	current := CurrentSession{ID: "keep", Sidecars: []SidecarSession{{PID: 1234, Command: []string{"xray"}}}, DNSHandoffService: "Wi-Fi", DNSHandoffServers: []string{"127.0.0.1"}}
+	current := CurrentSession{ID: "keep", Sidecars: []SidecarSession{{PID: 1234, Command: []string{"xray"}, ProcessComm: "xray", ProcessStart: time.Now().Add(-time.Hour)}}, DNSHandoffService: "Wi-Fi", DNSHandoffServers: []string{"127.0.0.1"}}
 	if err := SaveCurrent(cache, current); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +238,8 @@ func TestStopPreservesRecordOnSidecarIdentityError(t *testing.T) {
 	}
 }
 
-// Old sidecar JSON loads without identity fields and uses the recorded executable's base name.
+// Claim: old sidecar JSON still loads (no identity fields), and stopping such a sidecar is
+// unverifiable: errIncompleteRecordedIdentity and no signal, whatever program holds the PID.
 func TestLegacySidecarJSON(t *testing.T) {
 	cache := t.TempDir()
 	if err := os.MkdirAll(RuntimeDir(cache), 0o755); err != nil {
@@ -249,14 +256,57 @@ func TestLegacySidecarJSON(t *testing.T) {
 	if sidecar.ProcessComm != "" || !sidecar.ProcessStart.IsZero() {
 		t.Fatalf("identity=%+v", sidecar)
 	}
-	signals := withSidecarSeams(t, func(int) (string, time.Time, error) { return "xray", time.Now(), nil })
-	if err := stopSidecar(sidecar, true, 0); err != nil || len(*signals) != 2 {
-		t.Fatalf("err=%v signals=%v", err, *signals)
+	for _, live := range []string{"xray", "zsh"} {
+		signals := withSidecarSeams(t, func(int) (string, time.Time, error) { return live, time.Now(), nil })
+		if err := stopSidecar(sidecar, true, 0); !errors.Is(err, errIncompleteRecordedIdentity) || len(*signals) != 0 {
+			t.Fatalf("live %s: err=%v signals=%v", live, err, *signals)
+		}
 	}
-	processIdentitySession = func(int) (string, time.Time, error) { return "zsh", time.Now(), nil }
-	*signals = nil
-	if err := stopSidecar(sidecar, true, 0); err != nil || len(*signals) != 0 {
-		t.Fatalf("err=%v signals=%v", err, *signals)
+}
+
+// Claim: every legacy sidecar record form (plain command, wrapper command, no command, name only,
+// start only), with force on or off, is unverifiable: stopSidecar returns errIncompleteRecordedIdentity,
+// sends no signal and makes no identity lookup. A Stop of a stale session that carries such a sidecar
+// fails before touching anything: no signal, DNS not restored, record kept byte-for-byte. Limit:
+// liveness, identity, DNS and signals are fakes.
+func TestLegacySidecarRecordsFailClosed(t *testing.T) {
+	started := time.Date(2026, 10, 19, 1, 0, 0, 0, time.UTC)
+	for name, sidecar := range map[string]SidecarSession{
+		"plain command":   {Name: "xray", PID: 1234, Command: []string{"/opt/bin/xray", "run", "-c", "/x.json"}},
+		"wrapper command": {Name: "xray", PID: 1234, Command: []string{"sudo", "/opt/bin/xray", "run"}},
+		"no command":      {Name: "xray", PID: 1234},
+		"name only":       {Name: "xray", PID: 1234, ProcessComm: "xray"},
+		"start only":      {Name: "xray", PID: 1234, ProcessStart: started},
+	} {
+		for _, force := range []bool{false, true} {
+			lookups := 0
+			signals := withSidecarSeams(t, func(int) (string, time.Time, error) { lookups++; return "xray", started, nil })
+			err := stopSidecar(sidecar, force, 0)
+			if !errors.Is(err, errIncompleteRecordedIdentity) || len(*signals) != 0 || lookups != 0 {
+				t.Fatalf("%s force=%v: err=%v signals=%v lookups=%d", name, force, err, *signals, lookups)
+			}
+		}
+	}
+
+	signals := withSidecarSeams(t, func(int) (string, time.Time, error) { return "xray", started, nil })
+	previousAlive, previousDNS := processAliveSession, setDNSServersPrivilegedSession
+	processAliveSession = func(int) (bool, error) { return false, nil }
+	dnsCalls := 0
+	setDNSServersPrivilegedSession = func(string, string, int, string, []string) error { dnsCalls++; return nil }
+	t.Cleanup(func() { processAliveSession, setDNSServersPrivilegedSession = previousAlive, previousDNS })
+	cache := t.TempDir()
+	current := CurrentSession{ID: "stale", PID: 4242, ProcessComm: "sing-box", ProcessStart: started,
+		Sidecars:          []SidecarSession{{Name: "xray", PID: 1234, Command: []string{"sudo", "/opt/bin/xray", "run"}}},
+		DNSHandoffService: "Wi-Fi", DNSHandoffServers: []string{"127.0.0.1"}}
+	if err := SaveCurrent(cache, current); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(CurrentPath(cache))
+	if _, _, err := Stop(cache, config.PrivilegedLaunchConfig{}, true, 0); !errors.Is(err, errIncompleteRecordedIdentity) {
+		t.Fatalf("Stop err=%v", err)
+	}
+	if after, err := os.ReadFile(CurrentPath(cache)); err != nil || !bytes.Equal(before, after) || dnsCalls != 0 || len(*signals) != 0 {
+		t.Fatalf("record err=%v dns=%d signals=%v", err, dnsCalls, *signals)
 	}
 }
 
@@ -441,137 +491,6 @@ func TestLaunchdStartLookupErrorPreservesRecord(t *testing.T) {
 	after, err := os.ReadFile(CurrentPath(cache))
 	if err != nil || !bytes.Equal(before, after) || commandsAfterFailure != 0 {
 		t.Fatalf("record err=%v commands after failure=%d", err, commandsAfterFailure)
-	}
-}
-
-// Legacy sidecars without a recorded executable cannot claim a sing-box PID and return a specific error without signals.
-func TestLegacySidecarWithoutCommandFailsClosed(t *testing.T) {
-	for _, command := range [][]string{nil, {""}, {" "}} {
-		signals := withSidecarSeams(t, func(int) (string, time.Time, error) { return "sing-box", time.Now(), nil })
-		err := stopSidecar(SidecarSession{PID: 1234, Command: command}, true, 0)
-		if err == nil || !strings.Contains(err.Error(), "missing recorded command") || len(*signals) != 0 {
-			t.Fatalf("err=%v signals=%v", err, *signals)
-		}
-	}
-}
-
-// Known legacy wrappers accept supervisor and payload names with either force setting; a known unrelated PID is gone without signals.
-func TestStopLegacyWrappedSidecar(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		command []string
-	}{
-		{"sudo", []string{"/usr/bin/sudo", "-n", "/opt/bin/xray", "run"}},
-		{"env", []string{"env", "XRAY_MODE=test", "/opt/bin/xray", "run"}},
-		{"nice", []string{"nice", "-n", "5", "/opt/bin/xray", "run"}},
-		{"nohup", []string{"nohup", "--", "/opt/bin/xray", "run"}},
-		{"caffeinate", []string{"caffeinate", "-dimsu", "-t", "30", "/opt/bin/xray", "run"}},
-		{"nested", []string{"sudo", "-n", "-u", "root", "env", "-i", "XRAY_MODE=test", "nice", "-n", "5", "nohup", "caffeinate", "-i", "/opt/bin/xray", "run"}},
-	} {
-		for _, liveName := range []string{"xray", "unrelated", filepath.Base(tt.command[0])} {
-			for _, force := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/force=%t", tt.name, liveName, force), func(t *testing.T) {
-					signals := withSidecarSeams(t, func(pid int) (string, time.Time, error) {
-						if pid != 1234 {
-							t.Fatalf("identity PID=%d, want sidecar PID 1234", pid)
-						}
-						return liveName, time.Now(), nil
-					})
-					sidecarProcessAliveSession = func(int) (bool, error) { return len(*signals) == 0, nil }
-					err := stopSidecar(SidecarSession{Name: "xray", PID: 1234, Command: tt.command}, force, time.Second)
-					wantSignals := 1
-					if liveName == "unrelated" {
-						wantSignals = 0
-					}
-					if err != nil || len(*signals) != wantSignals || (wantSignals > 0 && (*signals)[0] != syscall.SIGTERM) {
-						t.Fatalf("err=%v signals=%v want=%d TERM", err, *signals, wantSignals)
-					}
-				})
-			}
-		}
-	}
-}
-
-// The stale-primary Stop branch used by CLI restart cleanup terminates a live legacy supervisor, restores DNS and clears its record.
-func TestStopStaleSessionWithLegacyWrapperSupervisor(t *testing.T) {
-	for _, wrapper := range []string{"sudo", "caffeinate"} {
-		t.Run(wrapper, func(t *testing.T) {
-			signals := withSidecarSeams(t, func(int) (string, time.Time, error) { return wrapper, time.Now(), nil })
-			sidecarProcessAliveSession = func(int) (bool, error) { return len(*signals) == 0, nil }
-			previousAlive, previousDNS := processAliveSession, setDNSServersPrivilegedSession
-			processAliveSession = func(int) (bool, error) { return false, nil }
-			dnsCalls := 0
-			setDNSServersPrivilegedSession = func(string, string, int, string, []string) error { dnsCalls++; return nil }
-			t.Cleanup(func() { processAliveSession, setDNSServersPrivilegedSession = previousAlive, previousDNS })
-			cache := t.TempDir()
-			current := CurrentSession{ID: "stale-wrapper", PID: 4321,
-				Sidecars:          []SidecarSession{{Name: "xray", PID: 1234, Command: []string{wrapper, "/opt/bin/xray", "run"}}},
-				DNSHandoffService: "Wi-Fi", DNSHandoffServers: []string{"127.0.0.1"}}
-			if err := SaveCurrent(cache, current); err != nil {
-				t.Fatal(err)
-			}
-			stopped, state, err := Stop(cache, config.PrivilegedLaunchConfig{}, true, 1500*time.Millisecond)
-			_, readErr := LoadCurrent(cache)
-			if err != nil || state != "stale" || stopped.ID != current.ID || len(*signals) != 1 || (*signals)[0] != syscall.SIGTERM || !errors.Is(readErr, os.ErrNotExist) || dnsCalls != 1 {
-				t.Fatalf("state=%s err=%v signals=%v record=%v DNS=%d", state, err, *signals, readErr, dnsCalls)
-			}
-		})
-	}
-}
-
-// Unsupported flags or missing payloads reject other live names with actionable context; the wrapper's own name still authorizes Stop.
-func TestLegacySidecarAmbiguousWrapperFailsClosed(t *testing.T) {
-	for _, command := range [][]string{
-		{"sudo"}, {"sudo", "-u"}, {"sudo", "--unknown", "xray"},
-		{"env", "-S", "xray run"}, {"nice", "--unknown", "xray"},
-		{"nohup", "--unknown", "xray"}, {"caffeinate", "-t"}, {"sudo", "-n", ""},
-	} {
-		for _, liveName := range []string{"xray", filepath.Base(command[0])} {
-			t.Run(strings.Join(command, " ")+"/"+liveName, func(t *testing.T) {
-				signals := withSidecarSeams(t, func(int) (string, time.Time, error) { return liveName, time.Now(), nil })
-				sidecarProcessAliveSession = func(int) (bool, error) { return len(*signals) == 0, nil }
-				previousAlive, previousDNS := processAliveSession, setDNSServersPrivilegedSession
-				processAliveSession = func(int) (bool, error) { return false, nil }
-				dnsCalls := 0
-				setDNSServersPrivilegedSession = func(string, string, int, string, []string) error { dnsCalls++; return nil }
-				t.Cleanup(func() { processAliveSession, setDNSServersPrivilegedSession = previousAlive, previousDNS })
-				cache := t.TempDir()
-				current := CurrentSession{ID: "ambiguous-wrapper",
-					Sidecars:          []SidecarSession{{Name: "legacy-worker", PID: 1234, Command: command}},
-					DNSHandoffService: "Wi-Fi", DNSHandoffServers: []string{"127.0.0.1"}}
-				if err := SaveCurrent(cache, current); err != nil {
-					t.Fatal(err)
-				}
-				before, readErr := os.ReadFile(CurrentPath(cache))
-				if readErr != nil {
-					t.Fatal(readErr)
-				}
-				_, _, err := Stop(cache, config.PrivilegedLaunchConfig{}, true, time.Second)
-				after, readErr := os.ReadFile(CurrentPath(cache))
-				if liveName == "xray" {
-					if err == nil || len(*signals) != 0 || readErr != nil || !bytes.Equal(before, after) || dnsCalls != 0 {
-						t.Fatalf("err=%v signals=%v record=%v DNS=%d", err, *signals, readErr, dnsCalls)
-					}
-					for _, context := range []string{"cannot verify legacy wrapped sidecar", `"legacy-worker"`, "pid 1234", `live process "xray"`} {
-						if !strings.Contains(err.Error(), context) {
-							t.Errorf("error %q missing %q", err, context)
-						}
-					}
-				} else if err != nil || len(*signals) != 1 || (*signals)[0] != syscall.SIGTERM || !errors.Is(readErr, os.ErrNotExist) || dnsCalls != 1 {
-					t.Fatalf("wrapper err=%v signals=%v record=%v DNS=%d", err, *signals, readErr, dnsCalls)
-				}
-			})
-		}
-	}
-}
-
-// A wrapper's identity lookup failure never authorizes a signal, even with force.
-func TestLegacyWrapperIdentityLookupErrorNeverSignals(t *testing.T) {
-	failure := errors.New("identity denied")
-	signals := withSidecarSeams(t, func(int) (string, time.Time, error) { return "", time.Time{}, failure })
-	err := stopSidecar(SidecarSession{Name: "xray", PID: 1234, Command: []string{"sudo", "xray"}}, true, 0)
-	if !errors.Is(err, failure) || len(*signals) != 0 {
-		t.Fatalf("err=%v signals=%v", err, *signals)
 	}
 }
 

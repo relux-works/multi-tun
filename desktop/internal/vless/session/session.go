@@ -449,9 +449,30 @@ func stopResolved(cacheDir string, current CurrentSession, force bool, timeout t
 	}
 }
 
+// boundLaunchdLabel refuses a launchd record whose label is missing or differs from the configured
+// launch label. The label selects the service a privileged `launchctl bootout` acts on, so it must
+// come from the configuration, never from the (user-writable) record alone.
+func boundLaunchdLabel(current CurrentSession, launch config.PrivilegedLaunchConfig) error {
+	if current.LaunchMode != config.LaunchModeLaunchd {
+		return nil
+	}
+	want := strings.TrimSpace(launch.Label)
+	if want == "" || current.LaunchLabel != want {
+		return fmt.Errorf("%w: record label %q, configured label %q", errLaunchdLabelMismatch, current.LaunchLabel, want)
+	}
+	return nil
+}
+
+// errLaunchdLabelMismatch marks a launchd record that is not bound to the configured label; nothing
+// is booted out for it.
+var errLaunchdLabelMismatch = errors.New("refusing to stop a launchd session whose label is not the configured one")
+
 func ResolveCurrent(cacheDir string, launch config.PrivilegedLaunchConfig) (CurrentSession, error) {
 	current, err := LoadCurrent(cacheDir)
 	if err == nil {
+		if err := boundLaunchdLabel(current, launch); err != nil {
+			return CurrentSession{}, err
+		}
 		return current, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -742,24 +763,10 @@ func sessionProcessMatches(current CurrentSession) (bool, error) {
 
 // errIncompleteRecordedIdentity marks a main-process record (written by an older client) without
 // the process name and start time pair; that process is neither signalled nor treated as gone.
-var errIncompleteRecordedIdentity = errors.New("cannot verify the session process: its record has no process name and start time; stop it with the client that started it")
+var errIncompleteRecordedIdentity = errors.New("cannot verify the process: its record has no process name and start time; stop it with the client that started it")
 
-// sidecarProcessMatches keeps the sidecar identity rule unchanged: the recorded name and start pair
-// when present, otherwise the legacy executable-name check for records from older clients.
-func sidecarProcessMatches(current CurrentSession) (bool, error) {
-	comm, started, err := processIdentitySession(current.PID)
-	if errors.Is(err, errProcessIdentityUnsupported) {
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("verify identity of pid %d: %w", current.PID, err)
-	}
-	want := "sing-box"
-	if len(current.Command) > 0 && strings.TrimSpace(current.Command[0]) != "" {
-		want = filepath.Base(current.Command[0])
-	}
-	return processidentity.Matches(comm, started, current.ProcessComm, current.ProcessStart, want), nil
-}
+// signalProcessGroupSession signals a session's process group; tests replace it with a spy.
+var signalProcessGroupSession = signalGroup
 
 func SessionsDir(cacheDir string) string {
 	return filepath.Join(cacheDir, "sessions")
@@ -914,99 +921,12 @@ func sidecarAlive(sidecar SidecarSession) (bool, error) {
 	if err != nil || !alive {
 		return alive, err
 	}
-	if sidecar.ProcessComm == "" && (len(sidecar.Command) == 0 || strings.TrimSpace(sidecar.Command[0]) == "") {
-		return false, fmt.Errorf("cannot verify sidecar pid %d: missing recorded command", sidecar.PID)
+	// Like the main process, a live sidecar is identified only by its recorded name and start pair;
+	// a record without it (an older client) is unverifiable and never signalled.
+	if sidecar.ProcessComm == "" || sidecar.ProcessStart.IsZero() {
+		return false, fmt.Errorf("sidecar %q: %w (pid %d)", sidecar.Name, errIncompleteRecordedIdentity, sidecar.PID)
 	}
-	current := CurrentSession{PID: sidecar.PID, Command: sidecar.Command, ProcessComm: sidecar.ProcessComm, ProcessStart: sidecar.ProcessStart}
-	if sidecar.ProcessComm != "" || !isSidecarWrapper(filepath.Base(sidecar.Command[0])) {
-		return sidecarProcessMatches(current)
-	}
-	comm, started, err := processIdentitySession(sidecar.PID)
-	if errors.Is(err, errProcessIdentityUnsupported) {
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("verify identity of pid %d: %w", sidecar.PID, err)
-	}
-	// Legacy records may hold either the supervisor PID or its discovered child.
-	if processidentity.Matches(comm, started, "", time.Time{}, filepath.Base(sidecar.Command[0])) {
-		return true, nil
-	}
-	payload, err := legacySidecarPayload(sidecar.Command)
-	if err != nil {
-		return false, fmt.Errorf("cannot verify legacy wrapped sidecar %q pid %d (live process %q): %w", sidecar.Name, sidecar.PID, comm, err)
-	}
-	return processidentity.Matches(comm, started, "", time.Time{}, payload), nil
-}
-
-func isSidecarWrapper(name string) bool {
-	switch name {
-	case "sudo", "env", "nice", "nohup", "caffeinate":
-		return true
-	}
-	return false
-}
-
-// Parse only wrapper arguments whose boundaries are known. Shell strings and
-// unsupported flags remain uncertain instead of guessing a process to signal.
-func legacySidecarPayload(command []string) (string, error) {
-	for len(command) > 0 {
-		name := filepath.Base(command[0])
-		if !isSidecarWrapper(name) {
-			if strings.TrimSpace(command[0]) == "" {
-				break
-			}
-			return name, nil
-		}
-		command = command[1:]
-		for len(command) > 0 {
-			arg := command[0]
-			if arg == "--" {
-				command = command[1:]
-				break
-			}
-			if name == "env" && strings.Contains(arg, "=") && !strings.HasPrefix(arg, "-") {
-				command = command[1:]
-				continue
-			}
-			if !strings.HasPrefix(arg, "-") {
-				break
-			}
-			takesValue, known := false, false
-			switch name {
-			case "sudo":
-				switch arg {
-				case "-n", "-E", "-H", "-S", "-k", "-b":
-					known = true
-				case "-u", "-g", "-h", "-p", "-C", "-T", "-r", "-t", "-D", "-R":
-					takesValue, known = true, true
-				}
-			case "env":
-				switch arg {
-				case "-i", "--ignore-environment":
-					known = true
-				case "-u", "--unset", "-C", "--chdir":
-					takesValue, known = true, true
-				}
-			case "nice":
-				takesValue, known = arg == "-n", arg == "-n"
-			case "caffeinate":
-				if arg == "-t" || arg == "-w" {
-					takesValue, known = true, true
-				} else {
-					known = len(arg) > 1 && strings.Trim(arg[1:], "dimsu") == ""
-				}
-			}
-			if !known || (takesValue && len(command) < 2) {
-				return "", fmt.Errorf("unsupported or incomplete %s argument %q", name, arg)
-			}
-			command = command[1:]
-			if takesValue {
-				command = command[1:]
-			}
-		}
-	}
-	return "", errors.New("missing wrapper payload")
+	return sessionProcessMatches(CurrentSession{PID: sidecar.PID, ProcessComm: sidecar.ProcessComm, ProcessStart: sidecar.ProcessStart})
 }
 
 func stopSidecar(sidecar SidecarSession, force bool, timeout time.Duration) error {
@@ -1068,7 +988,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func stopProcessSession(cacheDir string, current CurrentSession, force bool, timeout time.Duration, clear func() error) (CurrentSession, string, error) {
-	if err := signalGroup(current.PID, syscall.SIGTERM); err != nil {
+	if err := signalProcessGroupSession(current.PID, syscall.SIGTERM); err != nil {
 		return CurrentSession{}, "", err
 	}
 
@@ -1097,7 +1017,7 @@ func stopProcessSession(cacheDir string, current CurrentSession, force bool, tim
 		return current, "timeout", fmt.Errorf("timeout waiting for sing-box pid %d to stop", current.PID)
 	}
 
-	if err := signalGroup(current.PID, syscall.SIGKILL); err != nil {
+	if err := signalProcessGroupSession(current.PID, syscall.SIGKILL); err != nil {
 		return CurrentSession{}, "", err
 	}
 	for i := 0; i < 10; i++ {
@@ -1219,6 +1139,9 @@ func StopIfCurrent(cacheDir string, expected CurrentSession, launch config.Privi
 	if !SameSession(current, expected) {
 		return CurrentSession{}, "", fmt.Errorf("the current record is session %s (pid %d), not %s (pid %d); left alone", current.ID, current.PID, expected.ID, expected.PID)
 	}
+	if err := boundLaunchdLabel(current, launch); err != nil {
+		return CurrentSession{}, "", err
+	}
 	// Stop exactly the checked session, never a record read again later, and drop the record only
 	// while it still is that session: a start that replaced it meanwhile keeps its record.
 	return stopResolved(cacheDir, current, force, timeout, func() error { return clearCurrentIfSame(cacheDir, current) })
@@ -1260,7 +1183,7 @@ func stopStartedSession(current CurrentSession) error {
 			stopErr = err
 		}
 	default:
-		if err := signalGroup(current.PID, syscall.SIGKILL); err != nil {
+		if err := signalProcessGroupSession(current.PID, syscall.SIGKILL); err != nil {
 			stopErr = err
 		}
 	}

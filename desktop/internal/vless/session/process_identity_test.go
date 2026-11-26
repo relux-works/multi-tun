@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -170,12 +172,14 @@ func TestSessionAliveRequiresNameAndStartPair(t *testing.T) {
 // Claim: an ordinary Stop of a direct-mode record without the name and start pair stops before any
 // signal: it returns errIncompleteRecordedIdentity while the PID is live, and the record stays
 // byte-for-byte, so the session is still tracked. The identity check runs before every signal path
-// in Stop, so the error proves no signal was sent. Limit: liveness and identity are fakes; the PID
-// is above the macOS PID range, so a wrongly reached kill(2) would only return ESRCH.
+// in Stop; a spy on the process-group signal confirms none is sent, and a positive control with the
+// identity pair shows the spy does see signals. Limit: liveness and identity are fakes.
 func TestStopDirectRecordWithoutIdentityPairSendsNoSignal(t *testing.T) {
-	prevAlive := processAliveSession
+	prevAlive, prevSignal := processAliveSession, signalProcessGroupSession
 	processAliveSession = func(int) (bool, error) { return true, nil }
-	t.Cleanup(func() { processAliveSession = prevAlive })
+	var signals []syscall.Signal
+	signalProcessGroupSession = func(_ int, sig syscall.Signal) error { signals = append(signals, sig); return nil }
+	t.Cleanup(func() { processAliveSession, signalProcessGroupSession = prevAlive, prevSignal })
 	withProcessIdentity(t, "sing-box", time.Now().Add(3*time.Hour), nil)
 	cache := t.TempDir()
 	legacy := CurrentSession{ID: "legacy", PID: 999999, LaunchMode: config.LaunchModeDirect, Command: []string{"/usr/local/bin/sing-box"}}
@@ -187,8 +191,18 @@ func TestStopDirectRecordWithoutIdentityPairSendsNoSignal(t *testing.T) {
 	if !errors.Is(err, errIncompleteRecordedIdentity) {
 		t.Fatalf("stop err=%v, want errIncompleteRecordedIdentity before any signal", err)
 	}
-	if after, err := os.ReadFile(CurrentPath(cache)); err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("record changed or removed: %v", err)
+	if after, err := os.ReadFile(CurrentPath(cache)); err != nil || !bytes.Equal(before, after) || len(signals) != 0 {
+		t.Fatalf("record changed or removed (%v) or signals sent %v", err, signals)
+	}
+	// Positive control: the same record with the identity pair of the live process is signalled.
+	complete := legacy
+	complete.ProcessComm, complete.ProcessStart = "sing-box", time.Now().Add(3*time.Hour)
+	if err := SaveCurrent(cache, complete); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = Stop(cache, config.PrivilegedLaunchConfig{Mode: config.LaunchModeDirect}, true, 50*time.Millisecond)
+	if len(signals) == 0 {
+		t.Fatal("complete identity: no signal reached the spy, so the spy cannot see signals")
 	}
 }
 
@@ -224,5 +238,61 @@ func TestKillHelperSessionSignalsOnlyByHandle(t *testing.T) {
 	}
 	if len(signalled) != 1 || signalled[0] != (sent{"h-test-1", "-KILL"}) {
 		t.Fatalf("signals = %v, want exactly one -KILL to h-test-1", signalled)
+	}
+}
+
+// Claim: a launchd record is stopped only when its label is the configured launch label. A missing
+// label or another valid label (another service) is refused with errLaunchdLabelMismatch: no
+// launchctl bootout runs, no launchd stop is called, and the record stays byte-for-byte; the same
+// holds through StopIfCurrent. Positive control: the configured label reaches the launchd stop.
+// Limit: launchd lookups, launchctl and the launchd stop are fakes.
+func TestStopRefusesLaunchdRecordWithForeignLabel(t *testing.T) {
+	started := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	launch := config.PrivilegedLaunchConfig{Mode: config.LaunchModeLaunchd, Label: "works.relux.vless-tun", PlistPath: "/Library/LaunchDaemons/works.relux.vless-tun.plist"}
+	prevExec, prevPID, prevStop, prevAlive := execCombinedOutput, launchdPIDSession, stopLaunchdSessionFunc, processAliveSession
+	var commands []string
+	execCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+	launchdPIDSession = func(string) (int, error) { return 570, nil }
+	launchdStops := 0
+	stopLaunchdSessionFunc = func(CurrentSession, time.Duration) error { launchdStops++; return nil }
+	processAliveSession = func(int) (bool, error) { return false, nil }
+	t.Cleanup(func() {
+		execCombinedOutput, launchdPIDSession, stopLaunchdSessionFunc, processAliveSession = prevExec, prevPID, prevStop, prevAlive
+	})
+	record := func(label string) CurrentSession {
+		return CurrentSession{ID: "20261125T220000Z", PID: 570, LaunchMode: config.LaunchModeLaunchd, LaunchLabel: label, ProcessComm: "sing-box", ProcessStart: started}
+	}
+	for name, label := range map[string]string{"missing label": "", "another service": "com.apple.mDNSResponder"} {
+		for _, viaCheck := range []bool{false, true} {
+			cache := t.TempDir()
+			rec := record(label)
+			if err := SaveCurrent(cache, rec); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(CurrentPath(cache))
+			var err error
+			if viaCheck {
+				_, _, err = StopIfCurrent(cache, rec, launch, true, time.Second)
+			} else {
+				_, _, err = Stop(cache, launch, true, time.Second)
+			}
+			after, _ := os.ReadFile(CurrentPath(cache))
+			// Through StopIfCurrent a record without a label is already not a complete identity, so it
+			// is refused one step earlier ("left alone"); every other case must name the label mismatch.
+			refused := errors.Is(err, errLaunchdLabelMismatch) || (viaCheck && label == "" && err != nil && strings.Contains(err.Error(), "left alone"))
+			if !refused || len(commands) != 0 || launchdStops != 0 || !bytes.Equal(before, after) {
+				t.Fatalf("%s viaCheck=%v: err=%v commands=%v launchd stops=%d record changed=%v", name, viaCheck, err, commands, launchdStops, !bytes.Equal(before, after))
+			}
+		}
+	}
+	cache := t.TempDir()
+	if err := SaveCurrent(cache, record(launch.Label)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Stop(cache, launch, true, time.Second); err != nil || launchdStops != 1 {
+		t.Fatalf("configured label: err=%v launchd stops=%d, want the launchd stop", err, launchdStops)
 	}
 }
