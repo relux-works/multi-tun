@@ -1,3 +1,5 @@
+> Historical research (2026-07-14). Current LAUNCH.md safety rules supersede local test instructions: live VPN/TUN work is restricted to work-mac over SSH after stopping its Claude/Codex sessions. Legacy .temp evidence was moved to the private audit recovery archive; this document is not current runtime certification.
+
 # Dedicated SSH TUN Preflight
 
 - Board task: `TASK-260714-dslhb4` — Probe dedicated SSH TUN prerequisites

@@ -1,3 +1,5 @@
+> Historical research (2026-07-14). Current LAUNCH.md safety rules supersede local test instructions: live VPN/TUN work is restricted to work-mac over SSH after stopping its Claude/Codex sessions. Legacy .temp evidence was moved to the private audit recovery archive; this document is not current runtime certification.
+
 # SSH Proxy Product Contract
 
 - Board task: `TASK-260714-2zf19z` — Define SSH proxy product contract
