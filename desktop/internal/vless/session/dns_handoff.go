@@ -69,13 +69,15 @@ func applySystemDNSHandoff(current *CurrentSession, options StartOptions) error 
 
 	dnsServers := normalizeDNSServerList(options.SystemDNSServers)
 	if len(dnsServers) == 0 {
-		return fmt.Errorf("no system DNS servers configured for overlay handoff")
+		return fmt.Errorf("no system DNS servers configured for DNS handoff")
 	}
 
-	if err := applyScutilDNSHandoff(current, options, dnsServers); err == nil {
-		return nil
-	} else {
-		appendSessionLog(*current, logLevelWarn, "dns_handoff_scutil_failed interface=%s err=%v\n", strings.TrimSpace(options.InterfaceName), err)
+	if options.OverlayDNSActive {
+		if err := applyScutilDNSHandoff(current, options, dnsServers); err == nil {
+			return nil
+		} else {
+			appendSessionLog(*current, logLevelWarn, "dns_handoff_scutil_failed interface=%s err=%v\n", strings.TrimSpace(options.InterfaceName), err)
+		}
 	}
 
 	return applyNetworkServiceDNSHandoff(current, dnsServers)

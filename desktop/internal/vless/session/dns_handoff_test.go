@@ -304,3 +304,66 @@ func TestShouldApplySystemDNSHandoffDefaultsOnAndRespectsDisableEnv(t *testing.T
 		t.Fatal("shouldApplySystemDNSHandoff() = true with explicit disable env")
 	}
 }
+
+func TestApplyAndRestoreStandaloneSystemDNSHandoffUsesNetworkService(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-specific DNS handoff")
+	}
+
+	prevDefaultRoute := defaultRouteGetSession
+	prevServiceOrder := networkServiceOrderSession
+	prevDNSServers := networkDNSServersSession
+	prevSetDNSServers := setDNSServersPrivilegedSession
+	prevRunScutil := runScutilPrivilegedSession
+	t.Cleanup(func() {
+		defaultRouteGetSession = prevDefaultRoute
+		networkServiceOrderSession = prevServiceOrder
+		networkDNSServersSession = prevDNSServers
+		setDNSServersPrivilegedSession = prevSetDNSServers
+		runScutilPrivilegedSession = prevRunScutil
+	})
+
+	defaultRouteGetSession = func() ([]byte, error) { return []byte("  interface: en0\n"), nil }
+	networkServiceOrderSession = func() ([]byte, error) {
+		return []byte("(1) Wi-Fi\n(Hardware Port: Wi-Fi, Device: en0)\n"), nil
+	}
+	networkDNSServersSession = func(service string) ([]byte, error) {
+		return []byte("There aren't any DNS Servers set on Wi-Fi.\n"), nil
+	}
+	runScutilPrivilegedSession = func(string, string, int, string) error {
+		t.Fatal("standalone TUN handoff should update the primary network service DNS rather than only a scoped scutil entry")
+		return nil
+	}
+	var calls [][]string
+	setDNSServersPrivilegedSession = func(launchMode, logPath string, maxLines int, service string, servers []string) error {
+		calls = append(calls, append([]string{service}, servers...))
+		return nil
+	}
+
+	current := CurrentSession{
+		ID:         "20261128T132500Z",
+		LogPath:    t.TempDir() + "/session.log",
+		LaunchMode: config.LaunchModeHelper,
+		Mode:       config.RenderModeTun,
+	}
+	options := StartOptions{
+		Mode:             config.RenderModeTun,
+		InterfaceName:    "utun233",
+		TunAddresses:     []string{"172.19.0.1/30"},
+		OverlayDNSActive: false,
+		SystemDNSServers: []string{"1.1.1.1"},
+	}
+
+	if err := applySystemDNSHandoff(&current, options); err != nil {
+		t.Fatalf("applySystemDNSHandoff(standalone) error = %v", err)
+	}
+	if current.DNSHandoffMode != dnsHandoffModeFallback || current.DNSHandoffService != "Wi-Fi" || !current.DNSHandoffRestoreAuto {
+		t.Fatalf("unexpected standalone handoff record: %+v", current)
+	}
+	if err := restoreSystemDNSHandoff(current); err != nil {
+		t.Fatalf("restoreSystemDNSHandoff(standalone) error = %v", err)
+	}
+	if len(calls) != 2 || strings.Join(calls[0], ",") != "Wi-Fi,1.1.1.1" || strings.Join(calls[1], ",") != "Wi-Fi" {
+		t.Fatalf("unexpected DNS set/restore calls: %#v", calls)
+	}
+}
