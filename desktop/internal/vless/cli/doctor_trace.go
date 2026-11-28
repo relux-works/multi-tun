@@ -49,16 +49,17 @@ func newDiagnosticsDeps(path string, timeout time.Duration) diag.Deps {
 			return c
 		}
 		c.HelperRequired = cfg.LaunchOrDefault().Mode == config.LaunchModeHelper || cfg.LaunchOrDefault().Mode == config.LaunchModeAuto
+		c.Stack = append([]string(nil), cfg.Stack...)
 		policy, err := cfg.FailClosedPolicy()
 		c.Policy = policy
 		if err != nil {
 			c.Error = "invalid fail_closed policy"
 		}
 		effective, _, err := cfg.Effective(config.SelectionOptions{AllowMissingProfile: true})
-		if err == nil {
+		if err == nil && effective.EngineType() != config.EngineOpenConnect {
 			c.ConfigPath = effective.SingboxConfigPath()
 		} else {
-			c.ConfigPath = cfg.SingboxConfigPath()
+			c.ConfigPath = resolveDiagnosticSingBoxConfigPath(cfg)
 		}
 		if len(cfg.Servers) == 0 {
 			c.Auth = append(c.Auth, diagnosticAuth("default", cfg))
@@ -82,7 +83,15 @@ func newDiagnosticsDeps(path string, timeout time.Duration) diag.Deps {
 	d.VPNCore = func(context.Context) diag.VPNCoreHealth {
 		svc := vpncore.DefaultServiceConfig()
 		s, err := vpncore.InspectService(svc)
-		h := diag.VPNCoreHealth{Reachable: s.Reachable, Label: s.Label, SocketPath: s.SocketPath, DaemonPID: s.DaemonPID, Compatibility: s.Compatibility}
+		h := diag.VPNCoreHealth{
+			Reachable:       s.Reachable,
+			Label:           s.Label,
+			SocketPath:      s.SocketPath,
+			DaemonPID:       s.DaemonPID,
+			ProtocolVersion: s.ProtocolVersion,
+			Capabilities:    append([]string(nil), s.Capabilities...),
+			Compatibility:   s.Compatibility,
+		}
 		if err != nil {
 			h.Error = err.Error()
 		}
@@ -93,6 +102,11 @@ func newDiagnosticsDeps(path string, timeout time.Duration) diag.Deps {
 			h.ActiveRequests = s.HelperSnapshot.ActiveRequests
 			h.QueuedRequests = s.HelperSnapshot.QueuedRequests
 			h.LastCompletedRequest = s.HelperSnapshot.LastCompletedRequest
+		}
+		if s.Reachable && s.ProtocolVersion >= 2 {
+			if pins, pinErr := vpncore.QueryBinPins(svc, false); pinErr == nil {
+				h.PinnedBins = pins
+			}
 		}
 		drift, e := vpncore.ToolDrift(svc)
 		h.ToolDrift = drift
@@ -166,9 +180,48 @@ func newDiagnosticsDeps(path string, timeout time.Duration) diag.Deps {
 	return d
 }
 
+func resolveDiagnosticSingBoxConfigPath(cfg config.ProjectConfig) string {
+	for _, selector := range cfg.Stack {
+		serverName, profileName, _ := strings.Cut(selector, "/")
+		srv, ok := cfg.Servers[serverName]
+		if !ok || isOpenConnectServerCLI(srv) {
+			continue
+		}
+		if eff, _, err := cfg.Effective(config.SelectionOptions{Server: serverName, Profile: profileName, AllowMissingProfile: true}); err == nil && eff.SingboxConfigPath() != "" {
+			return eff.SingboxConfigPath()
+		}
+	}
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if isOpenConnectServerCLI(cfg.Servers[name]) {
+			continue
+		}
+		if eff, _, err := cfg.Effective(config.SelectionOptions{Server: name, AllowMissingProfile: true}); err == nil && eff.SingboxConfigPath() != "" {
+			return eff.SingboxConfigPath()
+		}
+	}
+	return cfg.SingboxConfigPath()
+}
+
 // Authentication diagnostics inspect only metadata, never credential contents,
 // keychain values, subscription URLs or headers.
 func diagnosticAuth(name string, cfg config.ProjectConfig) diag.AuthHealth {
+	if cfg.SourceMode() == config.SourceModeOpenConnect || cfg.EngineType() == config.EngineOpenConnect {
+		a := diag.AuthHealth{Server: name, Mode: config.SourceModeOpenConnect, Storage: "interactive", Status: "ok", Detail: "openconnect interactive/browser authentication configured"}
+		if cfg.OpenConnect != nil && cfg.OpenConnect.Auth != nil {
+			ocAuth := cfg.OpenConnect.Auth
+			if ocAuth.UsernameKeychainAccount != "" || ocAuth.PasswordKeychainAccount != "" || ocAuth.TOTPKeychainAccount != "" ||
+				(ocAuth.SecondFactor != nil && ocAuth.SecondFactor.TOTPKeychainAccount != "") {
+				a.Storage = "keychain"
+				a.Detail = "openconnect keychain references configured; secrets not read"
+			}
+		}
+		return a
+	}
 	a := diag.AuthHealth{Server: name, Mode: cfg.SourceMode(), Storage: "missing", Status: "error", Detail: "no authentication storage configured"}
 	if auth := cfg.Source.Auth; auth != nil {
 		switch auth.Mode {
@@ -197,10 +250,38 @@ func diagnosticAuth(name string, cfg config.ProjectConfig) diag.AuthHealth {
 	}
 	return a
 }
+func inspectOpenConnectSessionHealth(name, cacheDir string) diag.SessionHealth {
+	item := diag.SessionHealth{Name: name, Kind: "openconnect", State: "none"}
+	current, err := openconnect.LoadCurrent(openconnect.ResolveCacheDir(cacheDir))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			item.State = "unknown"
+			item.Error = "openconnect session cache could not be read"
+		}
+		return item
+	}
+	item.SessionID = current.ID
+	item.PID = current.PID
+	item.Interface = current.Interface
+	item.Profile = current.Profile
+	item.LogPath = current.LogPath
+	alive, pid, e := openconnect.SessionAlive(current)
+	item.PID = pid
+	item.State = "stale"
+	if alive {
+		item.State = "active"
+	}
+	if e != nil {
+		item.State = "unknown"
+		item.Error = "openconnect process identity could not be verified"
+	}
+	return item
+}
 func diagnosticSessions(cfg config.ProjectConfig, present bool) ([]diag.SessionHealth, error) {
 	var out []diag.SessionHealth
 	type target struct{ name, cache, kind string }
 	var targets []target
+	var ocTargets []target
 	if present {
 		if len(cfg.Servers) == 0 {
 			targets = append(targets, target{"default", cfg.CacheDir, cfg.EngineType()})
@@ -214,6 +295,17 @@ func diagnosticSessions(cfg config.ProjectConfig, present bool) ([]diag.SessionH
 				e, _, err := cfg.Effective(config.SelectionOptions{Server: name, AllowMissingProfile: true})
 				if err != nil {
 					out = append(out, diag.SessionHealth{Name: name, State: "unknown", Error: "server configuration unavailable"})
+					continue
+				}
+				if isOpenConnectServerCLI(cfg.Servers[name]) {
+					ocCache := ""
+					if e.OpenConnect != nil {
+						ocCache = e.OpenConnect.CacheDir
+					}
+					if ocCache == "" {
+						ocCache = cfg.Servers[name].CacheDir
+					}
+					ocTargets = append(ocTargets, target{name, openconnect.ResolveCacheDir(ocCache), "openconnect"})
 					continue
 				}
 				targets = append(targets, target{name, e.CacheDir, e.EngineType()})
@@ -251,31 +343,16 @@ func diagnosticSessions(cfg config.ProjectConfig, present bool) ([]diag.SessionH
 		}
 		out = append(out, item)
 	}
-	item := diag.SessionHealth{Name: "openconnect", Kind: "openconnect", State: "none"}
-	current, err := openconnect.LoadCurrent(openconnect.DefaultCacheDir())
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			item.State = "unknown"
-			item.Error = "openconnect session cache could not be read"
-		}
-	} else {
-		item.SessionID = current.ID
-		item.PID = current.PID
-		item.Interface = current.Interface
-		item.Profile = current.Profile
-		item.LogPath = current.LogPath
-		alive, pid, e := openconnect.SessionAlive(current)
-		item.PID = pid
-		item.State = "stale"
-		if alive {
-			item.State = "active"
-		}
-		if e != nil {
-			item.State = "unknown"
-			item.Error = "openconnect process identity could not be verified"
-		}
+	seenOCCaches := map[string]bool{}
+	for _, target := range ocTargets {
+		seenOCCaches[target.cache] = true
+		out = append(out, inspectOpenConnectSessionHealth(target.name, target.cache))
 	}
-	return append(out, item), nil
+	defaultOCCache := openconnect.ResolveCacheDir("")
+	if !seenOCCaches[defaultOCCache] {
+		out = append(out, inspectOpenConnectSessionHealth("openconnect", defaultOCCache))
+	}
+	return out, nil
 }
 func diagnosticArgs(args []string) ([]string, error) {
 	var flags, pos []string

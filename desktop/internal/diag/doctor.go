@@ -20,11 +20,14 @@ type VPNCoreHealth struct {
 	Label                string                            `json:"label"`
 	SocketPath           string                            `json:"socket_path"`
 	DaemonPID            int                               `json:"daemon_pid"`
+	ProtocolVersion      int                               `json:"protocol_version,omitempty"`
+	Capabilities         []string                          `json:"capabilities,omitempty"`
 	Compatibility        string                            `json:"compatibility,omitempty"`
 	MaintenanceActive    bool                              `json:"maintenance_active"`
 	ActiveRequests       []vpncore.RequestSnapshot         `json:"active_requests,omitempty"`
 	QueuedRequests       []vpncore.RequestSnapshot         `json:"queued_requests,omitempty"`
 	LastCompletedRequest *vpncore.CompletedRequestSnapshot `json:"last_completed_request,omitempty"`
+	PinnedBins           []vpncore.PinnedBinaryStatus      `json:"pinned_bins,omitempty"`
 	ToolDrift            []string                          `json:"tool_drift,omitempty"`
 	Error                string                            `json:"error,omitempty"`
 }
@@ -89,6 +92,7 @@ type DoctorReport struct {
 	Timestamp  string             `json:"timestamp"`
 	Verdict    string             `json:"verdict"`
 	Healthy    bool               `json:"healthy"`
+	Stack      []string           `json:"stack,omitempty"`
 	VPNCore    VPNCoreHealth      `json:"vpn_core"`
 	Interfaces []TUNInterfaceInfo `json:"interfaces"`
 	Guard      GuardHealth        `json:"guard"`
@@ -104,6 +108,7 @@ type Configuration struct {
 	Present        bool
 	Error          string
 	HelperRequired bool
+	Stack          []string
 	Policy         failclosed.Policy
 	ConfigPath     string
 	Auth           []AuthHealth
@@ -152,6 +157,9 @@ func collect(ctx context.Context, d Deps) (DoctorReport, Configuration, ScutilDN
 	c := Configuration{}
 	if d.Configuration != nil {
 		c = d.Configuration(ctx)
+		if len(c.Stack) > 0 {
+			r.Stack = append([]string(nil), c.Stack...)
+		}
 	}
 	check := func(name, status, detail string) {
 		r.Checks = append(r.Checks, DoctorCheck{name, status, clean(detail, 512)})
@@ -297,7 +305,10 @@ func Doctor(ctx context.Context, d Deps) DoctorReport { r, _, _ := collect(ctx, 
 func FormatDoctorText(r DoctorReport) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Doctor: %s (%s)\n", clean(r.Verdict, 40), clean(r.Timestamp, 80))
-	fmt.Fprintf(&b, "vpn-core: reachable=%t pid=%d label=%s socket=%s compatibility=%s maintenance=%t active=%d queued=%d\n", r.VPNCore.Reachable, r.VPNCore.DaemonPID, clean(r.VPNCore.Label, 160), clean(r.VPNCore.SocketPath, 256), clean(r.VPNCore.Compatibility, 80), r.VPNCore.MaintenanceActive, len(r.VPNCore.ActiveRequests), len(r.VPNCore.QueuedRequests))
+	if len(r.Stack) > 0 {
+		fmt.Fprintf(&b, "Stack: %s\n", clean(strings.Join(r.Stack, ", "), 256))
+	}
+	fmt.Fprintf(&b, "vpn-core: reachable=%t pid=%d proto=%d caps=%s label=%s socket=%s compatibility=%s maintenance=%t active=%d queued=%d\n", r.VPNCore.Reachable, r.VPNCore.DaemonPID, r.VPNCore.ProtocolVersion, clean(strings.Join(r.VPNCore.Capabilities, ","), 120), clean(r.VPNCore.Label, 160), clean(r.VPNCore.SocketPath, 256), clean(r.VPNCore.Compatibility, 80), r.VPNCore.MaintenanceActive, len(r.VPNCore.ActiveRequests), len(r.VPNCore.QueuedRequests))
 	if r.VPNCore.LastCompletedRequest != nil {
 		last := r.VPNCore.LastCompletedRequest
 		fmt.Fprintf(&b, "  last request: %s %s (%dms)\n", clean(last.Action, 80), clean(last.Outcome, 80), last.DurationMillis)

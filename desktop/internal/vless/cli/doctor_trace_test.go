@@ -267,3 +267,82 @@ func TestDiagnosticSessionsScansEveryCache(t *testing.T) {
 		t.Fatal("corrupt session cache omitted")
 	}
 }
+
+func TestUnifiedStackDiagnosticsIntegration(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", root)
+	ocCache := filepath.Join(root, "oc-cache")
+	amzCache := filepath.Join(root, "amz-cache")
+	sbPath := filepath.Join(root, "sing-box.json")
+	cfgPath := filepath.Join(root, "config.json")
+	credPath := filepath.Join(root, "amnezia.key")
+	if err := os.WriteFile(credPath, []byte("vpn://redacted-fixture-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CacheDir = filepath.Join(root, "cache")
+	cfg.Artifacts.SingboxConfigPath = sbPath
+	cfg.Stack = []string{"mts/outside", "amnezia/us"}
+	cfg.Servers = map[string]config.ServerConfig{
+		"mts": {
+			Engine: &config.EngineConfig{Type: config.EngineOpenConnect},
+			Source: config.SourceConfig{Mode: config.SourceModeOpenConnect},
+			OpenConnect: &config.OpenConnectServerConfig{
+				ServerURL: "https://vpn.example.test",
+				CacheDir:  ocCache,
+			},
+			Profiles: map[string]config.ProfileConfig{
+				"outside": {},
+			},
+		},
+		"amnezia": {
+			CacheDir: amzCache,
+			Engine:   &config.EngineConfig{Type: config.EngineAWG},
+			Source: config.SourceConfig{
+				Mode: config.SourceModeAmnezia,
+				Auth: &config.SourceAuthConfig{Mode: "file", Path: credPath},
+			},
+			Profiles: map[string]config.ProfileConfig{
+				"us": {Match: &config.ProfileMatch{Country: "US"}},
+			},
+		},
+	}
+	if _, err := config.SaveConfig(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	deps := newDiagnosticsDeps(cfgPath, time.Second)
+	c := deps.Configuration(context.Background())
+	if !c.Present || c.Error != "" {
+		t.Fatalf("config error: %+v", c)
+	}
+	if len(c.Stack) != 2 || c.Stack[0] != "mts/outside" || c.Stack[1] != "amnezia/us" {
+		t.Fatalf("stack not propagated: %+v", c.Stack)
+	}
+	if c.ConfigPath != sbPath {
+		t.Fatalf("expected sing-box config path %s, got %s", sbPath, c.ConfigPath)
+	}
+	authByServer := map[string]diag.AuthHealth{}
+	for _, a := range c.Auth {
+		authByServer[a.Server] = a
+	}
+	if authByServer["mts"].Status != "ok" || authByServer["amnezia"].Status != "ok" {
+		t.Fatalf("unexpected auth health: %+v", c.Auth)
+	}
+	sessions, err := deps.Sessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundMTS := false
+	foundAmz := false
+	for _, s := range sessions {
+		if s.Name == "mts" && s.Kind == "openconnect" {
+			foundMTS = true
+		}
+		if s.Name == "amnezia" && s.Kind == config.EngineAWG {
+			foundAmz = true
+		}
+	}
+	if !foundMTS || !foundAmz {
+		t.Fatalf("unified sessions missing: %+v", sessions)
+	}
+}
