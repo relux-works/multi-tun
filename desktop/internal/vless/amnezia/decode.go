@@ -172,13 +172,19 @@ func decodeVPNBytes(encoded string) ([]byte, error) {
 	if len(raw) >= 6 {
 		zr, err := zlib.NewReader(bytes.NewReader(raw[4:]))
 		if err == nil {
-			defer zr.Close()
 			declared := binary.BigEndian.Uint32(raw[:4])
 			if declared == 0 || declared > MaxDecompressedBytes {
+				_ = zr.Close()
 				return nil, NewRefusal(CodeKeyInvalid, "amnezia payload exceeds maximum decompressed size")
 			}
-			body, err := io.ReadAll(io.LimitReader(zr, MaxDecompressedBytes+1))
-			if err != nil || len(body) > MaxDecompressedBytes || uint64(len(body)) != uint64(declared) {
+			body, readErr := io.ReadAll(io.LimitReader(zr, MaxDecompressedBytes+1))
+			closeErr := zr.Close()
+			// Qt's qUncompress treats the 4-byte big-endian prefix as an initial
+			// buffer hint and grows dynamically if inflate emits more bytes (real
+			// Amnezia Premium API v2 keys carry 0x000000ff with >255-byte JSON).
+			// Enforce both the bounded 4 MiB decompression cap and zlib checksum
+			// verification via zr.Close().
+			if readErr != nil || closeErr != nil || len(body) == 0 || len(body) > MaxDecompressedBytes {
 				return nil, invalidPayload()
 			}
 			return body, nil
@@ -215,10 +221,12 @@ func decodeExport(body []byte) (DecodedPayload, error) {
 	}
 	var root struct {
 		exportServer
-		Servers     []exportServer  `json:"servers"`
-		APIEndpoint json.RawMessage `json:"api_endpoint"`
-		APIKey      json.RawMessage `json:"api_key"`
-		APIConfig   json.RawMessage `json:"api_config"`
+		Servers       []exportServer  `json:"servers"`
+		ConfigVersion int             `json:"config_version"`
+		APIEndpoint   json.RawMessage `json:"api_endpoint"`
+		APIKey        json.RawMessage `json:"api_key"`
+		APIConfig     json.RawMessage `json:"api_config"`
+		AuthData      json.RawMessage `json:"auth_data"`
 	}
 	if err := json.Unmarshal(body, &root); err != nil || bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
 		return d, invalidPayload()
@@ -274,7 +282,7 @@ func decodeExport(body []byte) (DecodedPayload, error) {
 			}
 		}
 	}
-	if len(d.Profiles) == 0 && d.AWG == nil && (len(root.APIEndpoint) > 0 || len(root.APIKey) > 0 || len(root.APIConfig) > 0) {
+	if len(d.Profiles) == 0 && d.AWG == nil && (len(root.APIEndpoint) > 0 || len(root.APIKey) > 0 || len(root.APIConfig) > 0 || len(root.AuthData) > 0) {
 		return d, NewRefusal(CodeGatewayUnimplemented, "Amnezia Gateway API dynamic subscription fetch is not yet implemented (SPEC-005 TW-AMNZ-007)")
 	}
 	if staticErr != nil {

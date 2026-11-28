@@ -432,8 +432,28 @@ func TestDecodeDecompressionBoundaries(t *testing.T) {
 	if d, err := DecodeKey(key); err != nil || len(d.Profiles) != 1 {
 		t.Fatalf("valid exact limit: %v", err)
 	}
+	// Real Amnezia Premium API v2 exports carry a 0x000000ff (255) qUncompress
+	// hint header with >255-byte JSON (api_config + auth_data.api_key). Verify
+	// it decodes cleanly and surfaces AMNEZIA_GATEWAY_UNIMPLEMENTED (not invalid).
+	premiumV2Body := testJSON(t, map[string]any{
+		"name":           "Amnezia Premium",
+		"description":    "Amnezia Premium",
+		"config_version": 2,
+		"api_config": map[string]any{
+			"service_type":      "amnezia-premium",
+			"service_protocol":  "awg",
+			"user_country_code": "US",
+		},
+		"auth_data": map[string]any{
+			"api_key": testPrivateKey,
+		},
+	})
+	premiumV2Key := "vpn://" + base64.RawURLEncoding.EncodeToString(frame(premiumV2Body, 255))
+	if _, err := DecodeKey(premiumV2Key); !IsRefusalCode(err, CodeGatewayUnimplemented) || strings.Contains(err.Error(), testPrivateKey) {
+		t.Fatalf("Amnezia Premium v2 refusal = %v, want %s without secret", err, CodeGatewayUnimplemented)
+	}
 	bad := [][]byte{
-		frame(body, 0), frame(body, MaxDecompressedBytes+1), frame(body, 1), frame(body, uint32(len(body)+1)),
+		frame(body, 0), frame(body, MaxDecompressedBytes+1),
 		frame(bytes.Repeat([]byte("x"), MaxDecompressedBytes+1), 1),
 		{0, 0, 0, 1, 0x78, 0x9c},
 	}
