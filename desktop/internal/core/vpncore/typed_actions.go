@@ -36,143 +36,14 @@ var (
 	chownVPNCore       = os.Chown
 )
 
-type singBoxSchemaKind uint8
-
-const (
-	singBoxObject singBoxSchemaKind = iota
-	singBoxArray
-	singBoxString
-	singBoxBool
-	singBoxNumber
-)
-
-type singBoxSchemaNode struct {
-	kind          singBoxSchemaKind
-	fields        map[string]string
-	required      []string
-	element       string
-	discriminator string
-	variants      map[string]string
-	validate      func(any) error
-}
-
-// singBoxSchemas is the complete privileged sing-box input language. It is
-// intentionally derived from desktop/internal/vless/singbox/render.go rather
-// than from sing-box's much larger configuration language.
-var singBoxSchemas = map[string]singBoxSchemaNode{
-	"root": {kind: singBoxObject, fields: map[string]string{
-		"log": "log", "dns": "dns", "inbounds": "inbounds", "outbounds": "outbounds", "route": "route",
-	}},
-	"log": {kind: singBoxObject, fields: map[string]string{"level": "string"}},
-	"dns": {kind: singBoxObject, fields: map[string]string{
-		"servers": "dns_servers", "rules": "dns_rules", "final": "string", "strategy": "string", "reverse_mapping": "bool",
-	}},
-	"dns_servers": {kind: singBoxArray, element: "dns_server"},
-	"dns_server": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
-		"local": "dns_server_local", "tls": "dns_server_tls", "udp": "dns_server_udp",
-	}},
-	"dns_server_local": {kind: singBoxObject, fields: map[string]string{
-		"type": "string", "tag": "string", "detour": "string",
-	}},
-	"dns_server_tls": {kind: singBoxObject, fields: map[string]string{
-		"type": "string", "tag": "string", "server": "string", "server_port": "number", "detour": "string", "tls": "dns_tls",
-	}},
-	"dns_server_udp": {kind: singBoxObject, fields: map[string]string{
-		"type": "string", "tag": "string", "server": "string", "server_port": "number", "detour": "string",
-	}},
-	"dns_tls": {kind: singBoxObject, fields: map[string]string{
-		"enabled": "bool", "server_name": "string",
-	}},
-	"dns_rules": {kind: singBoxArray, element: "dns_rule"},
-	"dns_rule": {kind: singBoxObject, fields: map[string]string{
-		"domain_suffix": "strings", "rule_set": "strings", "action": "string", "server": "string",
-	}},
-	"inbounds": {kind: singBoxArray, element: "inbound"},
-	"inbound":  {kind: singBoxObject, discriminator: "type", variants: map[string]string{"tun": "inbound_tun"}},
-	"inbound_tun": {kind: singBoxObject, fields: map[string]string{
-		"type": "string", "tag": "string", "interface_name": "string", "address": "strings", "auto_route": "bool",
-		"strict_route": "bool", "mtu": "number", "route_exclude_address": "strings", "stack": "tun_stack",
-	}},
-	"outbounds": {kind: singBoxArray, element: "outbound"},
-	"outbound": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
-		"vless": "outbound_vless", "direct": "outbound_direct", "block": "outbound_block", "socks": "outbound_socks",
-	}},
-	"outbound_vless": {kind: singBoxObject, fields: map[string]string{
-		"type": "string", "tag": "string", "server": "string", "server_port": "number", "uuid": "string", "flow": "string",
-		"tls": "outbound_tls", "transport": "transport", "domain_resolver": "string",
-	}},
-	"outbound_direct": {kind: singBoxObject, fields: map[string]string{
-		"type": "string", "tag": "string", "domain_resolver": "string",
-	}},
-	"outbound_block": {kind: singBoxObject, fields: map[string]string{"type": "string", "tag": "string"}},
-	"outbound_socks": {kind: singBoxObject, required: []string{"server"}, fields: map[string]string{
-		"type": "string", "tag": "string", "server": "loopback_string", "server_port": "number", "version": "string",
-	}},
-	"outbound_tls": {kind: singBoxObject, fields: map[string]string{
-		"enabled": "bool", "server_name": "string", "utls": "utls", "reality": "reality", "fragment": "bool",
-		"fragment_fallback_delay": "string", "record_fragment": "bool", "curve_preferences": "strings",
-	}},
-	"utls": {kind: singBoxObject, fields: map[string]string{"enabled": "bool", "fingerprint": "string"}},
-	"reality": {kind: singBoxObject, fields: map[string]string{
-		"enabled": "bool", "public_key": "string", "short_id": "string",
-	}},
-	"transport": {kind: singBoxObject, discriminator: "type", variants: map[string]string{
-		"grpc": "transport_grpc",
-	}},
-	"transport_grpc": {kind: singBoxObject, fields: map[string]string{"type": "string", "service_name": "string"}},
-	"route": {kind: singBoxObject, fields: map[string]string{
-		"auto_detect_interface": "bool", "default_domain_resolver": "default_domain_resolver", "rule_set": "rule_sets",
-		"rules": "route_rules", "final": "string",
-	}},
-	"default_domain_resolver": {kind: singBoxObject, fields: map[string]string{"server": "string", "strategy": "string"}},
-	"rule_sets":               {kind: singBoxArray, element: "rule_set"},
-	"rule_set":                {kind: singBoxObject, discriminator: "type", variants: map[string]string{"inline": "rule_set_inline"}},
-	"rule_set_inline": {kind: singBoxObject, fields: map[string]string{
-		"type": "string", "tag": "string", "rules": "inline_rules",
-	}},
-	"inline_rules": {kind: singBoxArray, element: "inline_rule"},
-	"inline_rule": {kind: singBoxObject, fields: map[string]string{
-		"domain_suffix": "strings", "ip_cidr": "strings",
-	}},
-	"route_rules": {kind: singBoxArray, element: "route_rule"},
-	"route_rule": {kind: singBoxObject, fields: map[string]string{
-		"process_name": "strings", "protocol": "string", "ip_is_private": "bool", "rule_set": "strings", "sniffer": "strings",
-		"timeout": "string", "action": "string", "outbound": "string",
-	}},
-	"strings": {kind: singBoxArray, element: "string"},
-	"string":  {kind: singBoxString},
-	"bool":    {kind: singBoxBool},
-	"number":  {kind: singBoxNumber},
-	"tun_stack": {kind: singBoxString, validate: func(value any) error {
-		switch value.(string) {
-		case "system", "gvisor", "mixed":
-			return nil
-		}
-		return errors.New("must be system, gvisor or mixed")
-	}},
-	"loopback_string": {kind: singBoxString, validate: func(value any) error {
-		address, err := netip.ParseAddr(value.(string))
-		if err != nil || !address.IsLoopback() {
-			return errors.New("must be a loopback IP address")
-		}
-		return nil
-	}},
-}
-
-// validateSingBoxConfig checks a client-supplied sing-box config and returns
-// the canonical bytes root may hand to sing-box. sing-box matches JSON keys
-// case-insensitively, so every check here is case-insensitive, objects whose
-// keys collide ignoring case are refused, and the re-encoded tree (not the
-// client bytes) is what gets written, so duplicate keys cannot make the
-// validator and sing-box see different values.
-// ValidateSingBoxConfig reports whether the helper's sing-box schema accepts
-// data. Clients use it to refuse a config before stopping a running session.
+// ValidateSingBoxConfig checks OS confinement only. The pinned sing-box binary
+// owns protocol/schema validation through its check command before launch.
 func ValidateSingBoxConfig(data []byte) error {
-	_, err := validateSingBoxConfig(data)
+	_, err := validateSingBoxConfigSecurity(data)
 	return err
 }
 
-func validateSingBoxConfig(data []byte) ([]byte, error) {
+func validateSingBoxConfigSecurity(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, errors.New("config_json is required")
 	}
@@ -188,98 +59,127 @@ func validateSingBoxConfig(data []byte) ([]byte, error) {
 	if root == nil {
 		return nil, errors.New("sing-box $ must be an object")
 	}
-	if err := walkSingBoxSchema(root, "root", "$"); err != nil {
+	if err := walkSingBoxSecurity(root, "$"); err != nil {
 		return nil, err
 	}
-	canonical, err := json.Marshal(root)
-	if err != nil {
-		return nil, fmt.Errorf("encode sing-box config: %w", err)
-	}
-	return canonical, nil
+	// Re-encode the effective last-wins tree so shadowed duplicate values cannot
+	// produce a different interpretation in the privileged subprocess.
+	return json.Marshal(root)
 }
 
-func walkSingBoxSchema(value any, schemaName, location string) error {
-	schema, ok := singBoxSchemas[schemaName]
-	if !ok {
-		return fmt.Errorf("internal sing-box schema %q is missing", schemaName)
-	}
-	schemaError := func(want string) error {
-		return fmt.Errorf("sing-box %s must be %s", location, want)
-	}
-	switch schema.kind {
-	case singBoxObject:
-		object, ok := value.(map[string]any)
-		if !ok {
-			return schemaError("an object")
-		}
-		folded := make(map[string]string, len(object))
-		for key := range object {
-			canonical := strings.ToLower(key)
-			if previous, exists := folded[canonical]; exists {
-				return fmt.Errorf("sing-box keys %s.%s and %s.%s collide ignoring case", location, previous, location, key)
+func walkSingBoxSecurity(value any, location string) error {
+	switch v := value.(type) {
+	case map[string]any:
+		folded := make(map[string]bool, len(v))
+		for key, child := range v {
+			lower := strings.ToLower(key)
+			if folded[lower] {
+				return fmt.Errorf("sing-box keys at %s collide ignoring case", location)
 			}
-			folded[canonical] = key
-		}
-		if schema.discriminator != "" {
-			actualKey, exists := folded[schema.discriminator]
-			if !exists {
-				return fmt.Errorf("sing-box %s.%s is required", location, schema.discriminator)
+			folded[lower] = true
+			forbidden := false
+			for _, suffix := range []string{"_path", "_file", "_dir", "_directory"} {
+				forbidden = forbidden || strings.HasSuffix(lower, suffix)
 			}
-			variantName, ok := object[actualKey].(string)
-			if !ok {
-				return fmt.Errorf("sing-box %s.%s must be a string", location, actualKey)
+			switch lower {
+			case "executable", "extra_args", "external_controller", "external_ui", "cache_file", "clash_api", "v2ray_api":
+				forbidden = true
 			}
-			variant, allowed := schema.variants[variantName]
-			if !allowed {
-				return fmt.Errorf("sing-box %s.%s value %q is not allowed", location, actualKey, variantName)
+			if location == "$" && lower == "experimental" || location == "$.log" && lower == "output" {
+				forbidden = true
 			}
-			return walkSingBoxSchema(value, variant, location)
-		}
-		for _, required := range schema.required {
-			if _, exists := folded[required]; !exists {
-				return fmt.Errorf("sing-box %s.%s is required", location, required)
+			if forbidden {
+				return fmt.Errorf("sing-box key %s.%s escapes OS confinement", location, key)
 			}
-		}
-		for canonical, actual := range folded {
-			childSchema, allowed := schema.fields[canonical]
-			if !allowed {
-				return fmt.Errorf("sing-box key %s.%s is not allowed", location, actual)
+			if (location == "$.outbounds[]" || location == "$.outbounds") && lower == "type" {
+				if kind, ok := child.(string); ok && (strings.EqualFold(kind, "tor") || strings.EqualFold(kind, "ssh")) {
+					return errors.New("sing-box outbound type escapes OS confinement")
+				}
 			}
-			if err := walkSingBoxSchema(object[actual], childSchema, location+"."+actual); err != nil {
+			if err := walkSingBoxSecurity(child, location+"."+lower); err != nil {
 				return err
 			}
 		}
-	case singBoxArray:
-		array, ok := value.([]any)
-		if !ok {
-			return schemaError("an array")
-		}
-		for index, child := range array {
-			if err := walkSingBoxSchema(child, schema.element, fmt.Sprintf("%s[%d]", location, index)); err != nil {
-				return err
+		if location == "$.route.rule_set[]" || location == "$.route.rule_set" {
+			inline := false
+			for key, child := range v {
+				if strings.EqualFold(key, "type") {
+					kind, ok := child.(string)
+					inline = ok && strings.EqualFold(kind, "inline")
+				}
+			}
+			if !inline {
+				return errors.New("sing-box rule_set must be inline")
 			}
 		}
-	case singBoxString:
-		if _, ok := value.(string); !ok {
-			return schemaError("a string")
-		}
-	case singBoxBool:
-		if _, ok := value.(bool); !ok {
-			return schemaError("a boolean")
-		}
-	case singBoxNumber:
-		if _, ok := value.(json.Number); !ok {
-			return schemaError("a number")
-		}
-	default:
-		return fmt.Errorf("internal sing-box schema %q has invalid kind", schemaName)
-	}
-	if schema.validate != nil {
-		if err := schema.validate(value); err != nil {
-			return fmt.Errorf("sing-box %s %w", location, err)
+	case []any:
+		for _, child := range v {
+			if err := walkSingBoxSecurity(child, location+"[]"); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+var singBoxCheckVPNCore = runSingBoxCheck
+
+func runSingBoxCheck(toolPath, configPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := execCommandContextVPNCore(ctx, toolPath, "check", "-c", configPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if detail := sanitizeSingBoxCheckOutput(out); detail != "" {
+			return fmt.Errorf("%w (%s)", err, detail)
+		}
+		return err
+	}
+	return nil
+}
+
+func sanitizeSingBoxCheckOutput(raw []byte) string {
+	var b strings.Builder
+	for _, r := range string(raw) {
+		if r == '\n' || r == '\r' || r == '\t' {
+			r = ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		if b.Len() >= 512 {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// prepareSingBox validates the canonical staged bytes before any old slot is
+// stopped. The caller owns removing dir until the new child's cleanup takes it.
+func (d *serviceDaemon) prepareSingBox(data []byte) (dir, configPath string, err error) {
+	canonical, err := validateSingBoxConfigSecurity(data)
+	if err != nil {
+		return "", "", err
+	}
+	dir, err = d.newRuntimeDir()
+	if err != nil {
+		return "", "", err
+	}
+	configPath = filepath.Join(dir, "config.json")
+	if err = os.WriteFile(configPath, canonical, 0o600); err == nil {
+		if checkErr := singBoxCheckVPNCore(d.cfg.ToolPath("sing-box"), configPath); checkErr != nil {
+			err = fmt.Errorf("sing-box check failed: %w", checkErr)
+		}
+	}
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", "", err
+	}
+	return dir, configPath, nil
 }
 
 func (d *serviceDaemon) newRuntimeDir() (string, error) {
@@ -331,30 +231,29 @@ func (d *serviceDaemon) handleSingBoxStart(request Request, logFile *os.File) (i
 	if logFile == nil {
 		return 0, "", errors.New("singbox.start requires a log file descriptor")
 	}
-	canonical, err := validateSingBoxConfig(request.ConfigJSON)
+	dir, configPath, err := d.prepareSingBox(request.ConfigJSON)
 	if err != nil {
 		return 0, "", err
 	}
-	dir, err := d.newRuntimeDir()
-	if err != nil {
-		return 0, "", err
-	}
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, canonical, 0o600); err != nil {
-		_ = os.RemoveAll(dir)
-		return 0, "", err
-	}
+	return d.startPreparedSingBox(request, logFile, dir, configPath, "")
+}
+
+func (d *serviceDaemon) startPreparedSingBox(request Request, logFile *os.File, dir, configPath, slot string) (int, string, error) {
 	writer := newPassedLogWriter(logFile, request.LogMaxLines)
 	cmd := execCommandVPNCore(d.cfg.ToolPath("sing-box"), "run", "-c", configPath)
 	cmd.Stdout = writer
 	cmd.Stderr = writer
-	return d.startManagedChild(cmd, request.SetPGID, "", func() {
+	return d.startManagedChildWithSlot(cmd, request.SetPGID, "", slot, func() {
 		_ = writer.Close()
 		_ = os.RemoveAll(dir)
 	}, "sing-box")
 }
 
 func (d *serviceDaemon) startManagedChild(cmd *exec.Cmd, setPGID bool, resultPath string, cleanup func(), kind ...string) (int, string, error) {
+	return d.startManagedChildWithSlot(cmd, setPGID, resultPath, "", cleanup, kind...)
+}
+
+func (d *serviceDaemon) startManagedChildWithSlot(cmd *exec.Cmd, setPGID bool, resultPath, slot string, cleanup func(), kind ...string) (int, string, error) {
 	if setPGID {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
@@ -363,7 +262,7 @@ func (d *serviceDaemon) startManagedChild(cmd *exec.Cmd, setPGID bool, resultPat
 		return 0, "", err
 	}
 	pid := cmd.Process.Pid
-	handle, err := d.children.add(pid, setPGID, resultPath, kind...)
+	handle, err := d.children.addWithSlot(pid, setPGID, resultPath, slot, kind...)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -573,6 +472,10 @@ func buildTCPDumpCommand(interfaceName string, filter []string, applePCAPNG bool
 }
 
 func (d *serviceDaemon) handleTCPDumpStart(request Request) (int, string, error) {
+	return d.startTCPDumpWithSlot(request, "")
+}
+
+func (d *serviceDaemon) startTCPDumpWithSlot(request Request, slot string) (int, string, error) {
 	if !request.RunAsUser {
 		return 0, "", errors.New("tcpdump.start requires run_as_user=true")
 	}
@@ -593,7 +496,7 @@ func (d *serviceDaemon) handleTCPDumpStart(request Request) (int, string, error)
 		return 0, "", err
 	}
 	cmd := execCommandVPNCore(command[0], command[1:]...)
-	return d.startManagedChild(cmd, false, outputPath, func() {
+	return d.startManagedChildWithSlot(cmd, request.SetPGID, outputPath, slot, func() {
 		if err := chownVPNCore(outputPath, d.clientUID, d.clientGID); err == nil {
 			_ = chownVPNCore(dir, d.clientUID, d.clientGID)
 		}

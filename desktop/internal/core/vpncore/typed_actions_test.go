@@ -15,51 +15,59 @@ import (
 	"multi-tun/desktop/internal/vless/singbox"
 )
 
-func TestSingBoxConfigValidationRejectsOutsideRendererSchema(t *testing.T) {
-	// This negative table proves executable/file primitives, non-rendered types, non-loopback SOCKS, collisions, and an unknown key at every object position are refused.
-	cases := map[string]string{
-		"tor executable and args": `{"outbounds":[{"type":"tor","executable_path":"/tmp/run-me","extra_args":["--anything"]}]}`,
-		"ssh private key":         `{"outbounds":[{"type":"ssh","private_key_path":"/private/key"}]}`,
-		"tls certificate path":    `{"outbounds":[{"type":"vless","tls":{"certificate_path":"/private/cert"}}]}`,
-		"tls key path":            `{"outbounds":[{"type":"vless","tls":{"key_path":"/private/key"}}]}`,
-		"tls ech config path":     `{"outbounds":[{"type":"vless","tls":{"ech":{"config_path":"/private/ech"}}}]}`,
-		"tls acme data directory": `{"outbounds":[{"type":"vless","tls":{"acme":{"data_directory":"/private/acme"}}}]}`,
-		"non-loopback socks":      `{"outbounds":[{"type":"socks","server":"192.0.2.1"}]}`,
-		"missing socks server":    `{"outbounds":[{"type":"socks"}]}`,
-		"unknown top level":       `{"unknown":true}`,
-		"unknown log":             `{"log":{"unknown":true}}`,
-		"unknown dns":             `{"dns":{"unknown":true}}`,
-		"unknown dns server":      `{"dns":{"servers":[{"type":"local","unknown":true}]}}`,
-		"unknown dns tls":         `{"dns":{"servers":[{"type":"tls","tls":{"unknown":true}}]}}`,
-		"unknown dns rule":        `{"dns":{"rules":[{"unknown":true}]}}`,
-		"unknown inbound":         `{"inbounds":[{"type":"tun","unknown":true}]}`,
-		"unknown outbound":        `{"outbounds":[{"type":"direct","unknown":true}]}`,
-		"unknown vless tls":       `{"outbounds":[{"type":"vless","tls":{"unknown":true}}]}`,
-		"unknown reality":         `{"outbounds":[{"type":"vless","tls":{"reality":{"unknown":true}}}]}`,
-		"unknown utls":            `{"outbounds":[{"type":"vless","tls":{"utls":{"unknown":true}}}]}`,
-		"unknown transport":       `{"outbounds":[{"type":"vless","transport":{"type":"grpc","unknown":true}}]}`,
-		"unknown route":           `{"route":{"unknown":true}}`,
-		"unknown resolver":        `{"route":{"default_domain_resolver":{"unknown":true}}}`,
-		"unknown route rule":      `{"route":{"rules":[{"unknown":true}]}}`,
-		"unknown rule set":        `{"route":{"rule_set":[{"type":"inline","unknown":true}]}}`,
-		"unknown inline rule":     `{"route":{"rule_set":[{"type":"inline","rules":[{"unknown":true}]}]}}`,
-		"remote rule set":         `{"route":{"rule_set":[{"type":"remote","url":"https://example.test/rules"}]}}`,
-		"non-tun inbound":         `{"inbounds":[{"type":"mixed","listen":"127.0.0.1"}]}`,
-		"case unknown":            `{"log":{"Output":"/tmp/x"}}`,
-		"case colliding keys":     `{"route":{"rule_set":[{"type":"inline","Type":"inline"}]}}`,
-		"case top-level dup":      `{"log":{},"LOG":{}}`,
+func TestSingBoxConfigSecurityRejectsEscapes(t *testing.T) {
+	cases := []string{
+		`{"outbounds":[{"type":"tor"}]}`, `{"outbounds":[{"TYPE":"SSH"}]}`,
+		`{"outbounds":{"type":"tor"}}`, `{"outbounds":{"TYPE":"SSH"}}`,
+		`{"outbounds":[{"tls":{"certificate_path":"/private/cert"}}]}`,
+		`{"outbounds":[{"tls":{"key_path":"/private/key"}}]}`,
+		`{"outbounds":[{"tls":{"ech":{"config_path":"/private/ech"}}}]}`,
+		`{"outbounds":[{"tls":{"acme":{"data_directory":"/private/acme"}}}]}`,
+		`{"log":{"Output":"/tmp/x"}}`, `{"EXPERIMENTAL":{}}`,
+		`{"route":{"rule_set":[{"type":"local","path":"/private/data"}]}}`,
+		`{"route":{"rule_set":[{"type":"remote","url":"https://example.test/rules"}]}}`,
+		`{"route":{"rule_set":{"type":"local","path":"/private/data"}}}`,
+		`{"route":{"rule_set":{"type":"remote","url":"https://example.test/rules"}}}`,
+		`{"route":{"rule_set":[{}]}}`,
+		`{"route":{"rule_set":[{"type":"inline","Type":"inline"}]}}`,
+		`{"log":{},"LOG":{}}`, `{"nested":[{"new":{},"NEW":{}}]}`,
+		`{} {}`,
+		`[]`, `null`, `1`, `"text"`, ``,
+		`{"log":{"level":"warn"},"log":{"output":"/private/write"}}`,
 	}
-	for name, raw := range cases {
-		t.Run(name, func(t *testing.T) {
-			if _, err := validateSingBoxConfig([]byte(raw)); err == nil {
-				t.Fatalf("validateSingBoxConfig(%s) error = nil", raw)
+	for _, raw := range cases {
+		if _, err := validateSingBoxConfigSecurity([]byte(raw)); err == nil {
+			t.Errorf("unsafe config accepted: %s", raw)
+		}
+	}
+	for _, key := range []string{"secret_path", "secret_file", "secret_dir", "secret_directory", "executable", "extra_args", "external_controller", "external_ui", "cache_file", "clash_api", "v2ray_api"} {
+		for _, raw := range []string{fmt.Sprintf(`{"new":[{"%s":"value"}]}`, key), fmt.Sprintf(`{"%s":null}`, strings.ToUpper(key))} {
+			if _, err := validateSingBoxConfigSecurity([]byte(raw)); err == nil {
+				t.Errorf("escape accepted: %s", raw)
 			}
-		})
+		}
+	}
+}
+
+func TestSingBoxConfigSecurityAcceptsFutureSchemas(t *testing.T) {
+	cases := []string{
+		`{"outbounds":[{"type":"vless","transport":{"type":"xhttp","path":"/rpc","new_option":true}}]}`,
+		`{"outbounds":[{"type":"vless","transport":{"type":"ws","path":"/socket"}}]}`,
+		`{"outbounds":[{"type":"hysteria2"},{"type":"tuic"},{"type":"wireguard"},{"type":"socks","server":"192.0.2.1"}]}`,
+		`{"dns":{"servers":[{"type":"https","path":"/dns-query"},{"type":"h3"},{"type":"udp"},{"type":"tls"},{"type":"local"},{"type":"hosts"},{"type":"fakeip"}],"strategy":"ipv4_only"}}`,
+		`{"route":{"rules":[{"new_rule":[1,true,{}]}],"domain_resolver":"new","rule_set":[{"type":"INLINE","rules":[{"new_matcher":true}]}]}}`,
+		`{"inbounds":[{"type":"tun","stack":"future","new_option":true}],"future_top_level":{"future_nested":[]}}`,
+		`{}`,
+	}
+	for _, raw := range cases {
+		if err := ValidateSingBoxConfig([]byte(raw)); err != nil {
+			t.Errorf("safe future config refused: %s: %v", raw, err)
+		}
 	}
 }
 
 func TestSingBoxConfigValidationAcceptsEveryRendererVariant(t *testing.T) {
-	// These real-renderer controls prove the positive schema covers both engines, TUN/overlay/routing helpers, tcp/gRPC, TLS/Reality, flow, and process rules.
+	// These real-renderer controls prove the security filter accepts both engines, TUN/overlay/routing helpers, tcp/gRPC, TLS/Reality, flow, and process rules.
 	realityTCP := model.Profile{
 		UUID: "00000000-0000-0000-0000-000000000001", Host: "203.0.113.77", Port: 443, Network: "tcp",
 		Security: "reality", SNI: "example.com", Fingerprint: "chrome", PublicKey: "public-key", ShortID: "abcd",
@@ -115,24 +123,10 @@ func TestSingBoxConfigValidationAcceptsEveryRendererVariant(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := validateSingBoxConfig(data); err != nil {
+			if _, err := validateSingBoxConfigSecurity(data); err != nil {
 				t.Fatalf("validate rendered config: %v\n%s", err, data)
 			}
 		})
-	}
-}
-
-func TestSingBoxSchemaContainsNoFilesystemOrControlPlaneKeys(t *testing.T) {
-	// This schema guard proves future allowed-key additions cannot silently introduce path/file/exec/control-plane primitives.
-	for schemaName, schema := range singBoxSchemas {
-		for key := range schema.fields {
-			lower := strings.ToLower(key)
-			for _, forbidden := range []string{"path", "dir", "file", "executable", "args", "api", "controller", "cache", "output"} {
-				if strings.Contains(lower, forbidden) {
-					t.Fatalf("schema %q allows key %q containing forbidden fragment %q", schemaName, key, forbidden)
-				}
-			}
-		}
 	}
 }
 
@@ -271,49 +265,14 @@ func TestTCPDumpRefusesCallerControlledRunAsIdentity(t *testing.T) {
 // sing-box are the re-encoded tree, so an earlier hidden value never reaches it.
 func TestSingBoxConfigValidationWritesCanonicalTree(t *testing.T) {
 	raw := `{"log":{"output":"/etc/sudoers.d/x"},"log":{"level":"warn"}}`
-	canonical, err := validateSingBoxConfig([]byte(raw))
+	canonical, err := validateSingBoxConfigSecurity([]byte(raw))
 	if err != nil {
-		t.Fatalf("validateSingBoxConfig() error = %v, want the last-wins tree accepted", err)
+		t.Fatalf("validateSingBoxConfigSecurity() error = %v, want the last-wins tree accepted", err)
 	}
 	if strings.Contains(string(canonical), "output") || strings.Contains(string(canonical), "sudoers") {
 		t.Fatalf("canonical config = %s, still carries the shadowed value", canonical)
 	}
 	if !strings.Contains(string(canonical), `"level":"warn"`) {
 		t.Fatalf("canonical config = %s, lost the effective value", canonical)
-	}
-}
-
-// The renderer expresses TCP by omitting transport, so an explicit tcp
-// transport object is outside the renderer-derived schema and is refused,
-// while the grpc transport the renderer emits stays accepted.
-func TestSingBoxSchemaRefusesUnrenderedTCPTransport(t *testing.T) {
-	base := func(transport string) []byte {
-		return []byte(`{"outbounds":[{"type":"vless","tag":"proxy","server":"203.0.113.1","server_port":443,"uuid":"00000000-0000-0000-0000-000000000001","transport":` + transport + `}]}`)
-	}
-	if _, err := validateSingBoxConfig(base(`{"type":"tcp"}`)); err == nil {
-		t.Fatal("validateSingBoxConfig(tcp transport) error = nil, want refusal")
-	}
-	if _, err := validateSingBoxConfig(base(`{"type":"grpc","service_name":"svc"}`)); err != nil {
-		t.Fatalf("validateSingBoxConfig(grpc transport) error = %v, want accepted", err)
-	}
-}
-
-// Claim: the tun stack key accepts exactly system, gvisor and mixed (any case variant of the key is
-// folded by the case-insensitive walk), and refuses other values and non-string types; the rendered
-// stack is accepted end to end by TestSingBoxConfigValidationAcceptsEveryRendererVariant.
-func TestSingBoxSchemaTunStackValues(t *testing.T) {
-	base := `{"inbounds":[{"type":"tun","tag":"tun-in","stack":%s}]}`
-	for _, v := range []string{`"system"`, `"gvisor"`, `"mixed"`} {
-		if _, err := validateSingBoxConfig([]byte(fmt.Sprintf(base, v))); err != nil {
-			t.Errorf("stack %s refused: %v", v, err)
-		}
-	}
-	for _, v := range []string{`"lwip"`, `"GVISOR"`, `""`, `1`, `true`, `["gvisor"]`} {
-		if _, err := validateSingBoxConfig([]byte(fmt.Sprintf(base, v))); err == nil {
-			t.Errorf("stack %s accepted", v)
-		}
-	}
-	if _, err := validateSingBoxConfig([]byte(`{"outbounds":[{"type":"direct","tag":"direct","stack":"gvisor"}]}`)); err == nil {
-		t.Error("stack accepted on an outbound")
 	}
 }

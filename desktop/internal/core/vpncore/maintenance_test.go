@@ -26,6 +26,10 @@ func maintenanceEncodedRequest(t *testing.T, d *serviceDaemon, request Request) 
 	id := d.requests.enqueue()
 	done := make(chan struct{})
 	go func() { d.handleConn(server, id); close(done) }()
+	// A mocked legacy start still carries the minimal valid JSON config.
+	if request.Action == "singbox.start" && len(request.ConfigJSON) == 0 {
+		request.ConfigJSON = []byte(`{}`)
+	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +275,7 @@ func TestMaintenanceDrainSerializesWithSingBoxStart(t *testing.T) {
 		d := newMaintenanceTestDaemon(t)
 		d.startSingBox = func(request Request, log *os.File) (int, string, error) {
 			defer log.Close()
-			if _, err := validateSingBoxConfig(request.ConfigJSON); err != nil {
+			if _, err := validateSingBoxConfigSecurity(request.ConfigJSON); err != nil {
 				return 0, "", err
 			}
 			handle, err := d.children.add(0, false, "", "sing-box")

@@ -25,6 +25,8 @@ type ServiceConfig struct {
 }
 
 type ServiceStatus struct {
+	ProtocolVersion  int      `json:"protocol_version,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
 	Label            string
 	PlistPath        string
 	SocketPath       string

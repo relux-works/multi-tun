@@ -17,7 +17,7 @@ func StartSingBox(cfg ServiceConfig, configJSON []byte, logPath string, setPGID 
 		return 0, "", err
 	}
 	defer logFile.Close()
-	response, err := callActiveWithLog(cfg, Request{
+	response, err := callPrimitiveOrLegacy(cfg, Request{Action: "proc.ensure", ProcEnsure: &ProcEnsureRequest{Kind: "sing-box", ConfigJSON: configJSON, LogMaxLines: options.MaxLines, SetPGID: setPGID}}, Request{
 		Action:      "singbox.start",
 		ConfigJSON:  append([]byte(nil), configJSON...),
 		LogMaxLines: options.MaxLines,
@@ -42,7 +42,7 @@ func StartOpenConnect(cfg ServiceConfig, req OpenConnectStartRequest, logPath st
 		return 0, "", err
 	}
 	defer logFile.Close()
-	response, err := callActiveWithLog(cfg, Request{Action: "openconnect.start", OpenConnect: &req}, logFile)
+	response, err := callPrimitiveOrLegacy(cfg, Request{Action: "proc.ensure", ProcEnsure: &ProcEnsureRequest{Kind: "openconnect", OpenConnect: &req, SetPGID: true}}, Request{Action: "openconnect.start", OpenConnect: &req}, logFile)
 	if err != nil {
 		// Older typed daemons reject the new JSON field before checking Action.
 		// This exact explicit refusal proves no child was launched and is safe for
@@ -60,11 +60,11 @@ func StartOpenConnect(cfg ServiceConfig, req OpenConnectStartRequest, logPath st
 }
 
 func Signal(cfg ServiceConfig, handle, signal string) (string, error) {
-	response, err := callActive(cfg, Request{
+	response, err := callPrimitiveOrLegacy(cfg, Request{Action: "proc.stop", ProcStop: &ProcStopRequest{Handle: handle, Signal: signal}}, Request{
 		Action: "signal",
 		Handle: handle,
 		Signal: signal,
-	})
+	}, nil)
 	if err != nil {
 		if isUnavailable(err) {
 			return "", fmt.Errorf("vpn core is unavailable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
@@ -75,38 +75,38 @@ func Signal(cfg ServiceConfig, handle, signal string) (string, error) {
 }
 
 func RunSCUtil(cfg ServiceConfig, stdin string) error {
-	_, err := callActive(cfg, Request{Action: "dns.scutil", Stdin: stdin})
+	_, err := callPrimitiveOrLegacy(cfg, Request{Action: "net.dns", NetDNS: &NetDNSRequest{Op: "scutil", Stdin: stdin}}, Request{Action: "dns.scutil", Stdin: stdin}, nil)
 	return err
 }
 
 func RunNetworkSetup(cfg ServiceConfig, service string, servers []string) error {
-	_, err := callActive(cfg, Request{Action: "dns.networksetup", Service: service, Servers: append([]string(nil), servers...)})
+	_, err := callPrimitiveOrLegacy(cfg, Request{Action: "net.dns", NetDNS: &NetDNSRequest{Op: "networksetup", Service: service, Servers: append([]string(nil), servers...)}}, Request{Action: "dns.networksetup", Service: service, Servers: append([]string(nil), servers...)}, nil)
 	return err
 }
 
 func CleanupResolvers(cfg ServiceConfig) error {
-	_, err := callActive(cfg, Request{Action: "resolver.cleanup"})
+	_, err := callPrimitiveOrLegacy(cfg, Request{Action: "net.dns", NetDNS: &NetDNSRequest{Op: "resolver_cleanup"}}, Request{Action: "resolver.cleanup"}, nil)
 	return err
 }
 
 // ApplyFailClosed asks the helper to enforce the fail-closed anchor.
 func ApplyFailClosed(cfg ServiceConfig, interfaces, table []string) error {
-	_, err := callActive(cfg, Request{Action: "failclosed.apply", FailClosed: &FailClosedRequest{
+	_, err := callPrimitiveOrLegacy(cfg, Request{Action: "pf.anchor", PFAnchor: &PFAnchorRequest{Op: "apply", FailClosed: &FailClosedRequest{Interfaces: append([]string(nil), interfaces...), Table: append([]string(nil), table...)}}}, Request{Action: "failclosed.apply", FailClosed: &FailClosedRequest{
 		Interfaces: append([]string(nil), interfaces...), Table: append([]string(nil), table...),
-	}})
+	}}, nil)
 	return err
 }
 
 // ClearFailClosed removes the fail-closed anchor and keeps it off after reboot.
 // It never touches the tunnel.
 func ClearFailClosed(cfg ServiceConfig) error {
-	_, err := callActive(cfg, Request{Action: "failclosed.clear"})
+	_, err := callPrimitiveOrLegacy(cfg, Request{Action: "pf.anchor", PFAnchor: &PFAnchorRequest{Op: "clear"}}, Request{Action: "failclosed.clear"}, nil)
 	return err
 }
 
 // FailClosedState reports the helper's fail-closed state without changing it.
 func FailClosedState(cfg ServiceConfig) (FailClosedStatus, error) {
-	response, err := callActive(cfg, Request{Action: "failclosed.status"})
+	response, err := callPrimitiveOrLegacy(cfg, Request{Action: "pf.anchor", PFAnchor: &PFAnchorRequest{Op: "status"}}, Request{Action: "failclosed.status"}, nil)
 	if err != nil {
 		return FailClosedStatus{}, err
 	}
@@ -117,7 +117,7 @@ func FailClosedState(cfg ServiceConfig) (FailClosedStatus, error) {
 }
 
 func StartTCPDump(cfg ServiceConfig, interfaceName string, filter []string, applePCAPNG, runAsUser bool) (int, string, error) {
-	response, err := callActive(cfg, Request{Action: "tcpdump.start", Interface: interfaceName, Filter: append([]string(nil), filter...), ApplePCAPNG: applePCAPNG, RunAsUser: runAsUser})
+	response, err := callPrimitiveOrLegacy(cfg, Request{Action: "proc.ensure", ProcEnsure: &ProcEnsureRequest{Kind: "tcpdump", Interface: interfaceName, Filter: append([]string(nil), filter...), ApplePCAPNG: applePCAPNG, RunAsUser: runAsUser}}, Request{Action: "tcpdump.start", Interface: interfaceName, Filter: append([]string(nil), filter...), ApplePCAPNG: applePCAPNG, RunAsUser: runAsUser}, nil)
 	if err != nil {
 		return 0, "", err
 	}

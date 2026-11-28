@@ -459,21 +459,40 @@ func TestOpenConnectOldDaemonFieldRefusalSupportsSafeFallback(t *testing.T) {
 			withRPCServerIdentity(t, uint32(os.Getuid()), func(*net.UnixConn) (uint32, error) { return uint32(os.Getuid()), nil })
 			done := make(chan error, 1)
 			go func() {
-				conn, err := listener.AcceptUnix()
-				if err != nil {
-					done <- err
-					return
+				for i := 0; i < 2; i++ {
+					conn, err := listener.AcceptUnix()
+					if err != nil {
+						done <- err
+						return
+					}
+					request, log, err := readRequest(conn)
+					if log != nil {
+						_ = log.Close()
+					}
+					if err != nil {
+						_ = conn.Close()
+						done <- err
+						return
+					}
+					want := "proc.ensure"
+					reply := `json: unknown field "proc_ensure"`
+					if i == 1 {
+						want = "openconnect.start"
+						reply = message
+					}
+					if request.Action != want {
+						_ = conn.Close()
+						done <- fmt.Errorf("action=%s, want %s", request.Action, want)
+						return
+					}
+					err = writeResponse(conn, Response{Error: reply})
+					_ = conn.Close()
+					if err != nil {
+						done <- err
+						return
+					}
 				}
-				defer conn.Close()
-				_, log, err := readRequest(conn)
-				if log != nil {
-					defer log.Close()
-				}
-				if err != nil {
-					done <- err
-					return
-				}
-				done <- writeResponse(conn, Response{Error: message})
+				done <- nil
 			}()
 			_, _, err := StartOpenConnect(cfg, OpenConnectStartRequest{Cookie: "COOKIE_TEST_SECRET"}, filepath.Join(t.TempDir(), "client.log"))
 			if serverErr := <-done; serverErr != nil {

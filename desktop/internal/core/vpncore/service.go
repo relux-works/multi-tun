@@ -99,6 +99,8 @@ func inspectExactServiceWithTimeout(cfg ServiceConfig, timeout time.Duration) (S
 	}
 	status.Reachable = resp.OK
 	status.DaemonPID = resp.DaemonPID
+	status.ProtocolVersion = resp.ProtocolVersion
+	status.Capabilities = resp.Capabilities
 	status.HelperSnapshot = resp.HelperSnapshot
 	status.MaintenanceDrain = resp.MaintenanceDrain
 	return status, nil
@@ -608,11 +610,11 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 		_ = writeResponse(conn, Response{Error: err.Error()})
 		return
 	}
-	if logFile != nil && request.Action != "singbox.start" && request.Action != "openconnect.start" {
+	if logFile != nil && request.Action != "singbox.start" && request.Action != "openconnect.start" && request.Action != "proc.ensure" {
 		defer logFile.Close()
 	}
 
-	mutating := request.Action != "ping" && request.Action != "failclosed.status"
+	mutating := requestMutates(request)
 	if mutating {
 		d.mutation.Lock()
 		defer d.mutation.Unlock()
@@ -628,8 +630,11 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 		_ = writeResponse(conn, response)
 		return
 	}
-	switch request.Action {
+	dispatch := primitiveRequest(request)
+	switch dispatch.Action {
 	case "ping":
+		response.ProtocolVersion = 2
+		response.Capabilities = []string{"proc", "net", "pf", "bin"}
 		response.HelperSnapshot = d.requests.snapshot()
 		response.MaintenanceDrain = d.maintenanceDrainState()
 	case "maintenance.drain":
@@ -643,57 +648,43 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 		if response.OK {
 			response.Token = request.Token
 		}
-	case "singbox.start":
-		pid, handle, err := d.startSingBox(request, logFile)
-		if err != nil {
-			_ = logFile.Close()
-			response.OK = false
-			response.Error = err.Error()
-		} else {
-			response.PID = pid
-			response.Handle = handle
-		}
-	case "openconnect.start":
-		pid, handle, err := d.handleOpenConnectStart(request, logFile)
-		if err != nil {
-			if logFile != nil {
-				_ = logFile.Close()
-			}
-			responseError(&response, err)
-		} else {
-			response.PID, response.Handle = pid, handle
-		}
-	case "dns.scutil":
-		responseError(&response, d.handleSCUtil(request))
-	case "dns.networksetup":
-		responseError(&response, d.handleNetworkSetup(request))
-	case "resolver.cleanup":
-		responseError(&response, d.handleResolverCleanup())
-	case "tcpdump.start":
-		pid, handle, err := d.handleTCPDumpStart(request)
-		if err != nil {
-			response.OK = false
-			response.Error = err.Error()
-		} else {
-			response.PID = pid
-			response.Handle = handle
-		}
-	case "failclosed.apply":
-		responseError(&response, d.failClosed.Apply(*request.FailClosed))
-	case "failclosed.clear":
-		responseError(&response, d.failClosed.Clear())
-	case "failclosed.status":
-		status, err := d.failClosed.Status()
+	case "proc.ensure":
+		result, err := d.handleProcEnsure(*dispatch.ProcEnsure, logFile)
 		responseError(&response, err)
-		response.FailClosed = &status
-	case "signal":
-		path, err := d.handleSignal(request)
-		if err != nil {
-			response.OK = false
-			response.Error = err.Error()
-		} else {
-			response.Path = path
+		response.PID, response.Handle, response.Slot, response.Kind, response.Running, response.Path = result.PID, result.Handle, result.Slot, result.Kind, result.Running, result.Path
+	case "proc.stop":
+		result, err := d.handleProcStop(*dispatch.ProcStop)
+		responseError(&response, err)
+		response.Path, response.Stopped = result.Path, result.Stopped
+	case "proc.status":
+		filter := ProcStatusRequest{}
+		if dispatch.ProcStatus != nil {
+			filter = *dispatch.ProcStatus
 		}
+		response.Processes = d.children.status(filter)
+	case "net.dns":
+		responseError(&response, d.handleNetDNS(*dispatch.NetDNS))
+	case "net.route":
+		responseError(&response, d.handleNetRoute(*dispatch.NetRoute))
+	case "pf.anchor":
+		switch dispatch.PFAnchor.Op {
+		case "apply":
+			responseError(&response, d.failClosed.Apply(*dispatch.PFAnchor.FailClosed))
+		case "clear":
+			responseError(&response, d.failClosed.Clear())
+		case "status":
+			status, err := d.failClosed.Status()
+			responseError(&response, err)
+			response.FailClosed = &status
+		}
+	case "bin.pin":
+		req := BinPinRequest{}
+		if dispatch.BinPin != nil {
+			req = *dispatch.BinPin
+		}
+		pins, err := d.handleBinPin(req)
+		responseError(&response, err)
+		response.PinnedBins = pins
 	default:
 		response.OK = false
 		response.Error = fmt.Sprintf("unsupported vpn core action %q", request.Action)
@@ -838,7 +829,7 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 		return Request{}, nil, err
 	}
 
-	wantsLog := request.Action == "singbox.start" || request.Action == "openconnect.start"
+	wantsLog := request.Action == "singbox.start" || request.Action == "openconnect.start" || request.Action == "proc.ensure" && request.ProcEnsure != nil && request.ProcEnsure.Kind != "tcpdump"
 	if wantsLog && len(receivedFDs) != 1 {
 		closeFDs()
 		return Request{}, nil, fmt.Errorf("%s requires exactly one log file descriptor", request.Action)
@@ -869,6 +860,12 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 }
 
 func validateRequestShape(request Request) error {
+	if primitiveAction(request.Action) {
+		return validatePrimitiveShape(request)
+	}
+	if request.ProcEnsure != nil || request.ProcStop != nil || request.ProcStatus != nil || request.NetDNS != nil || request.NetRoute != nil || request.PFAnchor != nil || request.BinPin != nil {
+		return errors.New("vpn core action contains fields outside its typed schema")
+	}
 	unexpected := false
 	if request.OpenConnect != nil && request.Action != "openconnect.start" {
 		return errors.New("openconnect fields are only accepted by openconnect.start")
@@ -927,6 +924,9 @@ func validateRequestShape(request Request) error {
 }
 
 func knownAction(action string) bool {
+	if primitiveAction(action) {
+		return true
+	}
 	switch action {
 	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "openconnect.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal",
 		"failclosed.apply", "failclosed.clear", "failclosed.status":
@@ -972,6 +972,8 @@ func (d *serviceDaemon) handleSignal(request Request) (string, error) {
 }
 
 type childRecord struct {
+	slot       string
+	startedAt  time.Time
 	kind       string
 	pid        int
 	setPGID    bool
@@ -985,6 +987,9 @@ type childRegistry struct {
 
 func newChildRegistry() *childRegistry { return &childRegistry{children: make(map[string]childRecord)} }
 func (r *childRegistry) add(pid int, setPGID bool, resultPath string, kind ...string) (string, error) {
+	return r.addWithSlot(pid, setPGID, resultPath, "", kind...)
+}
+func (r *childRegistry) addWithSlot(pid int, setPGID bool, resultPath, slot string, kind ...string) (string, error) {
 	var raw [24]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("generate child handle: %w", err)
@@ -995,7 +1000,7 @@ func (r *childRegistry) add(pid int, setPGID bool, resultPath string, kind ...st
 	if len(kind) != 0 {
 		childKind = kind[0]
 	}
-	r.children[handle] = childRecord{pid: pid, setPGID: setPGID, resultPath: resultPath, kind: childKind}
+	r.children[handle] = childRecord{pid: pid, setPGID: setPGID, resultPath: resultPath, slot: slot, kind: childKind, startedAt: time.Now()}
 	r.mu.Unlock()
 	return handle, nil
 }

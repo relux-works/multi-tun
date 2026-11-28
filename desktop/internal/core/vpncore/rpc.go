@@ -27,6 +27,13 @@ var (
 )
 
 type Request struct {
+	ProcEnsure  *ProcEnsureRequest       `json:"proc_ensure,omitempty"`
+	ProcStop    *ProcStopRequest         `json:"proc_stop,omitempty"`
+	ProcStatus  *ProcStatusRequest       `json:"proc_status,omitempty"`
+	NetDNS      *NetDNSRequest           `json:"net_dns,omitempty"`
+	NetRoute    *NetRouteRequest         `json:"net_route,omitempty"`
+	PFAnchor    *PFAnchorRequest         `json:"pf_anchor,omitempty"`
+	BinPin      *BinPinRequest           `json:"bin_pin,omitempty"`
 	OpenConnect *OpenConnectStartRequest `json:"openconnect,omitempty"`
 	Token       string                   `json:"token,omitempty"`
 	Action      string                   `json:"action"`
@@ -47,6 +54,14 @@ type Request struct {
 }
 
 type Response struct {
+	ProtocolVersion  int                    `json:"protocol_version,omitempty"`
+	Capabilities     []string               `json:"capabilities,omitempty"`
+	Slot             string                 `json:"slot,omitempty"`
+	Kind             string                 `json:"kind,omitempty"`
+	Running          bool                   `json:"running,omitempty"`
+	Stopped          bool                   `json:"stopped,omitempty"`
+	Processes        []ManagedProcessInfo   `json:"processes,omitempty"`
+	PinnedBins       []PinnedBinaryStatus   `json:"pinned_bins,omitempty"`
 	Token            string                 `json:"token,omitempty"`
 	OK               bool                   `json:"ok"`
 	Error            string                 `json:"error,omitempty"`

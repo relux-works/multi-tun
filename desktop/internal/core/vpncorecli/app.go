@@ -218,7 +218,7 @@ func printPinnedTools(out io.Writer, tools []vpncore.PinnedTool) {
 		fmt.Fprintf(out, "pinned: %s sha256=%s size=%d source=%s\n", tool.Name, hash, tool.Size, strconv.QuoteToASCII(tool.SourcePath))
 	}
 	fmt.Fprintln(out, "note: after a Homebrew upgrade of sing-box rerun vpn-core install-digest / install to pin the new binary")
-	fmt.Fprintln(out, "note: openconnect-tun start/stop will ask for your Mac password (sudo, cached about 5 min); vpn-core no longer runs openconnect")
+
 }
 
 func (a *App) runUninstall(args []string) int {
@@ -270,6 +270,12 @@ func (a *App) runStatus(args []string) int {
 	if status.Reachable {
 		fmt.Fprintln(a.stdout, "state: reachable")
 		fmt.Fprintf(a.stdout, "daemon_pid: %d\n", status.DaemonPID)
+		if status.ProtocolVersion != 0 {
+			fmt.Fprintf(a.stdout, "protocol_version: %d\n", status.ProtocolVersion)
+		}
+		if len(status.Capabilities) != 0 {
+			fmt.Fprintf(a.stdout, "capabilities: %s\n", strings.Join(status.Capabilities, ", "))
+		}
 		if status.MaintenanceDrain == nil {
 			fmt.Fprintln(a.stdout, "maintenance_drain: unadvertised")
 		} else {

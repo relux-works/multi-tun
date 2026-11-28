@@ -141,6 +141,9 @@ func durationMillis(value time.Duration) int64 {
 }
 
 func safeRequestAction(action string) string {
+	if primitiveAction(strings.TrimSpace(action)) {
+		return strings.TrimSpace(action)
+	}
 	switch strings.TrimSpace(action) {
 	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "openconnect.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal", "failclosed.apply", "failclosed.clear", "failclosed.status", "pending", "other":
 		return strings.TrimSpace(action)

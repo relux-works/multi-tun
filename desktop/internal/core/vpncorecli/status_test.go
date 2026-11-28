@@ -121,3 +121,26 @@ func TestStatusPrintsDriftOnlyWhenReported(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusPrintsPrimitiveCapabilitiesWhenAdvertised(t *testing.T) {
+	oldInspect, oldDrift := inspectServiceVPNCoreCLI, toolDriftVPNCoreCLI
+	defer func() { inspectServiceVPNCoreCLI, toolDriftVPNCoreCLI = oldInspect, oldDrift }()
+	toolDriftVPNCoreCLI = func(vpncore.ServiceConfig) ([]string, error) { return nil, nil }
+	for _, advertise := range []bool{false, true} {
+		inspectServiceVPNCoreCLI = func(vpncore.ServiceConfig) (vpncore.ServiceStatus, error) {
+			status := vpncore.ServiceStatus{Reachable: true}
+			if advertise {
+				status.ProtocolVersion = 2
+				status.Capabilities = []string{"proc", "net", "pf", "bin"}
+			}
+			return status, nil
+		}
+		var stdout, stderr bytes.Buffer
+		if code := New(&stdout, &stderr).Run([]string{"status"}); code != 0 {
+			t.Fatal(stderr.String())
+		}
+		if strings.Contains(stdout.String(), "protocol_version: 2") != advertise || strings.Contains(stdout.String(), "capabilities: proc, net, pf, bin") != advertise {
+			t.Fatalf("capability output: %q", stdout.String())
+		}
+	}
+}

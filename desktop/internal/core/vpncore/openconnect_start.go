@@ -179,6 +179,10 @@ func openConnectArgs(req OpenConnectStartRequest) []string {
 }
 
 func (d *serviceDaemon) handleOpenConnectStart(request Request, logFile *os.File) (int, string, error) {
+	return d.startOpenConnect(request, logFile, true, "")
+}
+
+func (d *serviceDaemon) startOpenConnect(request Request, logFile *os.File, setPGID bool, slot string) (int, string, error) {
 	if request.OpenConnect == nil || logFile == nil {
 		return 0, "", errors.New("openconnect.start requires typed options and a log descriptor")
 	}
@@ -204,7 +208,7 @@ func (d *serviceDaemon) handleOpenConnectStart(request Request, logFile *os.File
 	// os/exec supplies an anonymous pipe for this reader, closing it after copying.
 	cmd.Stdin = strings.NewReader(req.Cookie + "\n")
 	cmd.Stdout, cmd.Stderr = logFile, logFile
-	pid, handle, err := d.startManagedChild(cmd, true, "", func() { _ = logFile.Close() }, "openconnect")
+	pid, handle, err := d.startManagedChildWithSlot(cmd, setPGID, "", slot, func() { _ = logFile.Close() }, "openconnect")
 	if err != nil {
 		return 0, "", errors.New("openconnect child could not be started")
 	}
