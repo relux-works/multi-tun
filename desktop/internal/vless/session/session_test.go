@@ -906,3 +906,29 @@ func TestOrphanGuidanceCheckMatchesPsInAnyLocale(t *testing.T) {
 		t.Fatalf("control: %q under fr_FR/Auckland also printed %q; the test environment does not differ", unpinned, shown)
 	}
 }
+
+func TestStartAndStopSidecarReapsInSameProcess(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.MkdirAll(SessionsDir(cacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar, err := startSidecar(cacheDir, "reap-test", SidecarOptions{
+		Name:       "sleep-fixture",
+		Executable: "/bin/sleep",
+		Args:       []string{"30"},
+	})
+	if err != nil {
+		t.Fatalf("startSidecar() error = %v", err)
+	}
+	alive, err := sidecarAlive(sidecar)
+	if err != nil || !alive {
+		t.Fatalf("expected running sidecar, alive=%t err=%v", alive, err)
+	}
+	if err := stopSidecar(sidecar, false, 3*time.Second); err != nil {
+		t.Fatalf("stopSidecar() failed to reap same-process sidecar: %v", err)
+	}
+	alive, err = sidecarAlive(sidecar)
+	if err != nil || alive {
+		t.Fatalf("expected sidecar stopped and reaped, alive=%t err=%v", alive, err)
+	}
+}

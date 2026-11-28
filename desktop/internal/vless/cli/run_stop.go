@@ -513,7 +513,17 @@ func (a *App) runStop(args []string) int {
 	if err := fs.Parse(reorderStackFlags(args)); err != nil {
 		return 2
 	}
-	if handled, code := a.maybeStackStop(*configPath, *serverName, fs.Args(), *force, *timeout); handled {
+	stackTimeout := *timeout
+	timeoutExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "timeout" {
+			timeoutExplicit = true
+		}
+	})
+	if !timeoutExplicit {
+		stackTimeout = 20 * time.Second
+	}
+	if handled, code := a.maybeStackStop(*configPath, *serverName, fs.Args(), *force, stackTimeout); handled {
 		return code
 	}
 	selectionOptions, err := commandServerSelection(*serverName, fs.Args())

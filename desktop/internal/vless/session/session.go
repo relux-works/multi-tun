@@ -855,9 +855,14 @@ func startSidecar(cacheDir, sessionID string, option SidecarOptions) (SidecarSes
 		_ = cmd.Wait()
 		return SidecarSession{}, err
 	}
-	if err := cmd.Process.Release(); err != nil {
-		return SidecarSession{}, err
-	}
+	// Reap the sidecar if it exits during the lifetime of this process (e.g.
+	// during coordinated Order-B stack reconciliation where one invocation
+	// starts and later stops a sidecar). Calling Release() leaves a stopped
+	// child as an unreaped zombie that kill(pid, 0) falsely reports as alive.
+	// If this invocation exits first, init/launchd adopts the running sidecar.
+	go func(c *exec.Cmd) {
+		_ = c.Wait()
+	}(cmd)
 	startedSidecar, err := waitForSidecarStart(sidecar, option, 500*time.Millisecond)
 	if err != nil {
 		return SidecarSession{}, err

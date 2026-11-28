@@ -356,13 +356,13 @@ func unique(values []string) []string {
 	return out
 }
 func (c *Coordinator) rollback(ctx context.Context, started []MemberState, original *StackError, prior []MemberState) error {
-	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
 	defer cancel()
 	var failures []error
 	remaining := append([]MemberState(nil), prior...)
 	for i := len(started) - 1; i >= 0; i-- {
 		m := started[i]
-		stopped, err := c.providers[m.Spec.Kind].Stop(cleanup, m.Spec, true, 5*time.Second)
+		stopped, err := c.providers[m.Spec.Kind].Stop(cleanup, m.Spec, true, 20*time.Second)
 		if err != nil || stopped.Active {
 			failures = append(failures, fmt.Errorf("rollback %s: %v", m.Spec.Selector, err))
 			remaining = append(remaining, m)
@@ -662,7 +662,7 @@ func (c *Coordinator) Up(ctx context.Context, selector string, opts UpOptions) (
 }
 func defaultTimeout(timeout time.Duration) time.Duration {
 	if timeout <= 0 {
-		return 5 * time.Second
+		return 20 * time.Second
 	}
 	return timeout
 }

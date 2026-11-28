@@ -277,7 +277,7 @@ func (a *App) reconcileStackTUN(ctx context.Context, root config.ProjectConfig, 
 	if err := restoreFiles(payload.rendered); err != nil {
 		return stack.MemberState{}, errors.Join(err, restoreFiles(payload.previous))
 	}
-	stopped, state, err := stopCurrentSessionFunc(cfg.CacheDir, cfg.LaunchOrDefault(), false, 5*time.Second)
+	stopped, state, err := stopCurrentSessionFunc(cfg.CacheDir, cfg.LaunchOrDefault(), false, 15*time.Second)
 	if err != nil {
 		return stackTUNState(spec, stopped, state, true), errors.Join(err, restoreFiles(payload.previous))
 	}
@@ -403,7 +403,7 @@ func (a *App) runStackMember(command string, args []string) int {
 	refresh := fs.Bool("refresh", false, "Refresh the source")
 	replace := fs.Bool("replace", false, "Replace the active egress")
 	force := fs.Bool("force", false, "Force teardown")
-	timeout := fs.Duration("timeout", 5*time.Second, "Stop timeout")
+	timeout := fs.Duration("timeout", 20*time.Second, "Stop timeout")
 	if fs.Parse(reorderStackFlags(args)) != nil {
 		return 2
 	}
