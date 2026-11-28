@@ -436,6 +436,7 @@ type runOptions struct {
 	includeRoutes       []string
 	pacURL              string
 	pacScript           string
+	pacRewrites         []openconnectcfg.PACRewriteRule
 	dryRun              bool
 }
 
@@ -639,6 +640,7 @@ func (a *App) parseRunOptions(name string, args []string) (runOptions, int, erro
 		includeRoutes:       resolvedRoutes,
 		pacURL:              resolvedPACURL,
 		pacScript:           resolvedPACScript,
+		pacRewrites:         cfg.EffectivePAC(effectiveServer, resolvedProfile).Rewrites,
 		dryRun:              *dryRun,
 	}, 0, nil
 }
@@ -676,6 +678,7 @@ func (a *App) executeRun(options runOptions, reconnect bool, commandName string)
 		VPNNameservers: options.vpnNameservers,
 		PACURL:         options.pacURL,
 		PACScript:      options.pacScript,
+		PACRewrites:    options.pacRewrites,
 		Credentials: openconnect.Credentials{
 			Username:       options.username,
 			Password:       options.password,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -44,7 +45,7 @@ func TestEffectivePACPrecedence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got := cfg.EffectivePAC(tc.server, tc.profile)
-		if got != tc.want {
+		if !reflect.DeepEqual(got, tc.want) {
 			t.Fatalf("%s: EffectivePAC(%q, %q) = %+v, want %+v", tc.name, tc.server, tc.profile, got, tc.want)
 		}
 	}
@@ -58,7 +59,7 @@ func TestEffectivePACPrecedence(t *testing.T) {
 func TestEffectivePACAbsentIsDisabled(t *testing.T) {
 	cfg := Config{Servers: map[string]ServerConfig{"corp": {ServerURL: "https://vpn.corp.example"}}}
 	got := cfg.EffectivePAC("corp", "")
-	if got.Enabled() || got != (PACConfig{}) {
+	if got.Enabled() || !reflect.DeepEqual(got, PACConfig{}) {
 		t.Fatalf("EffectivePAC without config = %+v, want empty and disabled", got)
 	}
 	if err := got.Validate(); err != nil {
@@ -178,5 +179,24 @@ func TestSetCurrentKeepsRelativePACFile(t *testing.T) {
 	}
 	if got := back.Servers["corp"].Profiles["outside"].PAC.File; got != "outside.pac" {
 		t.Fatalf("rewritten pac.file = %q, want the original relative %q", got, "outside.pac")
+	}
+}
+
+func TestPACRewriteAdmissionGrammar(t *testing.T) {
+	for _, directive := range []string{"DIRECT", "PROXY 10.73.1.2:8080", "HTTPS proxy.example:443; DIRECT", "SOCKS proxy.example:1080; SOCKS5 [2001:db8::1]:1080; DIRECT"} {
+		for _, rule := range []PACRewriteRule{{Host: "mybonus.mts.ru", Return: directive}, {DomainSuffix: "MTS.RU", Return: directive}} {
+			for _, upstream := range []PACConfig{{}, {URL: "https://wpad.example/proxy.pac"}, {File: "/tmp/proxy.pac"}, {Script: "function FindProxyForURL(u,h){return 'DIRECT';}"}} {
+				upstream.Rewrites = []PACRewriteRule{rule}
+				if err := upstream.Validate(); err != nil || !upstream.Enabled() {
+					t.Fatalf("legitimate rewrite refused: %+v %v", upstream, err)
+				}
+			}
+		}
+	}
+	bad := []PACRewriteRule{{Return: "DIRECT"}, {Host: "a", DomainSuffix: "b", Return: "DIRECT"}, {Host: "bad_name", Return: "DIRECT"}, {DomainSuffix: "a\nb", Return: "DIRECT"}, {Host: "a", Return: ""}, {Host: "a", Return: "DIRECT\n"}, {Host: "a", Return: "DIRECT\r"}, {Host: "a", Return: "DIRECT\x00"}, {Host: "a", Return: "DIRECT; alert(1)"}, {Host: "a", Return: `PROXY x:80; "`}, {Host: "a", Return: `DIRECT';evil()`}, {Host: "a", Return: `PROXY x\\:80`}, {Host: "a", Return: "PROXY x:0"}, {Host: "a", Return: "PROXY x:65536"}, {Host: "a", Return: "PROXY x"}, {Host: "a", Return: "PROXY x:80;"}, {Host: "a", Return: "SOCKS4 x:80"}, {Host: "a", Return: "DIRECT; <script>"}, {Host: "a", Return: "PROXY a{b}:80"}}
+	for _, rule := range bad {
+		if err := (PACConfig{Rewrites: []PACRewriteRule{rule}}).Validate(); err == nil {
+			t.Fatalf("unsafe rewrite admitted: %+v", rule)
+		}
 	}
 }

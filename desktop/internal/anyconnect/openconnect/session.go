@@ -227,6 +227,12 @@ func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
 		return nil, nil
 	}
 
+	return SessionOverlayDNS(current), nil
+}
+
+// SessionOverlayDNS derives the routes and resolver settings emitted by an
+// identified session without discovering a different session on disk.
+func SessionOverlayDNS(current CurrentSession) *OverlayDNS {
 	spec := supplementalResolverSpecForConnect(current.Mode, current.Server, ConnectOptions{
 		IncludeRoutes:  append([]string(nil), current.IncludeRoutes...),
 		VPNDomains:     append([]string(nil), current.VPNDomains...),
@@ -234,7 +240,7 @@ func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
 		VPNNameservers: append([]string(nil), current.VPNNameservers...),
 	})
 	if spec == nil || len(spec.Domains) == 0 || len(spec.Nameservers) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	bypassDomains := spec.BypassDomains
@@ -247,7 +253,7 @@ func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
 		Domains:       append([]string(nil), spec.Domains...),
 		Nameservers:   append([]string(nil), spec.Nameservers...),
 		RouteExcludes: uniqueStrings(append(append([]string(nil), spec.RouteOverrides...), overlayGatewayRouteExcludes(current)...)),
-	}, nil
+	}
 }
 
 func SaveCurrent(cacheDir string, current CurrentSession) error {
@@ -582,6 +588,12 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 		_ = reconcileTunWaveOpenConnect(context.Background(), "openconnect-stop")
 	}
 	return current, status, err
+}
+
+// StopWithoutReconcile leaves the unified coordinator responsible for the
+// surviving personal tunnel's routes and DNS.
+func StopWithoutReconcile(cacheDir string, timeout time.Duration) (CurrentSession, string, error) {
+	return stopOpenConnect(cacheDir, timeout)
 }
 
 func stopOpenConnect(cacheDir string, timeout time.Duration) (CurrentSession, string, error) {

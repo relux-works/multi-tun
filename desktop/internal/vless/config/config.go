@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode"
 
+	"multi-tun/desktop/internal/anyconnect/openconnectcfg"
 	"multi-tun/desktop/internal/core/failclosed"
 )
 
@@ -22,6 +23,7 @@ const (
 	SourceModeProxy        = "proxy"
 	SourceModeDirect       = "direct"
 	SourceModeAmnezia      = "amnezia"
+	SourceModeOpenConnect  = "openconnect"
 	CanonicalConfigDirName = "tun-wave"
 	LegacyConfigDirName    = "vless-tun"
 	EnvConfigPath          = "TUN_WAVE_CONFIG"
@@ -29,9 +31,12 @@ const (
 
 	RenderModeTun = "tun"
 
-	EngineSingbox = "sing-box"
-	EngineXray    = "xray"
-	EngineAWG     = "amnezia-awg"
+	EngineSingbox      = "sing-box"
+	EngineXray         = "xray"
+	EngineAWG          = "amnezia-awg"
+	EngineOpenConnect  = "openconnect"
+	EngineVLESS        = "vless"
+	EngineVLESSReality = "vless-reality"
 
 	LaunchModeAuto    = "auto"
 	LaunchModeSudo    = "sudo"
@@ -57,18 +62,21 @@ var iso3166Alpha2 = func() map[string]struct{} {
 }()
 
 type ProjectConfig struct {
-	Current  *CurrentConfig          `json:"current,omitempty"`
-	Servers  map[string]ServerConfig `json:"servers,omitempty"`
-	CacheDir string                  `json:"cache_dir,omitempty"`
-	Source   SourceConfig            `json:"source,omitempty"`
-	Default  *DefaultConfig          `json:"default,omitempty"`
-	Network  NetworkConfig           `json:"network,omitempty"`
-	Launch   *LaunchConfig           `json:"launch,omitempty"`
-	Routing  RoutingConfig           `json:"routing,omitempty"`
-	Engine   *EngineConfig           `json:"engine,omitempty"`
-	Singbox  *SingboxConfig          `json:"singbox,omitempty"`
-	DNS      DNSConfig               `json:"dns,omitempty"`
-	Logging  LoggingConfig           `json:"logging,omitempty"`
+	Stack                 []string                 `json:"stack,omitempty"`
+	OpenConnectConfigPath string                   `json:"openconnect_config_path,omitempty"`
+	OpenConnect           *OpenConnectServerConfig `json:"-"`
+	Current               *CurrentConfig           `json:"current,omitempty"`
+	Servers               map[string]ServerConfig  `json:"servers,omitempty"`
+	CacheDir              string                   `json:"cache_dir,omitempty"`
+	Source                SourceConfig             `json:"source,omitempty"`
+	Default               *DefaultConfig           `json:"default,omitempty"`
+	Network               NetworkConfig            `json:"network,omitempty"`
+	Launch                *LaunchConfig            `json:"launch,omitempty"`
+	Routing               RoutingConfig            `json:"routing,omitempty"`
+	Engine                *EngineConfig            `json:"engine,omitempty"`
+	Singbox               *SingboxConfig           `json:"singbox,omitempty"`
+	DNS                   DNSConfig                `json:"dns,omitempty"`
+	Logging               LoggingConfig            `json:"logging,omitempty"`
 	// FailClosed lists services that must never leave by the direct route while
 	// the personal tunnel is down. Absent means enabled with the default list.
 	FailClosed *FailClosedConfig `json:"fail_closed,omitempty"`
@@ -111,25 +119,39 @@ type CurrentConfig struct {
 }
 
 type ServerConfig struct {
-	Source    SourceConfig             `json:"source,omitempty"`
-	CacheDir  string                   `json:"cache_dir,omitempty"`
-	Artifacts *ArtifactsConfig         `json:"artifacts,omitempty"`
-	Routing   *RoutingConfig           `json:"routing,omitempty"`
-	Engine    *EngineConfig            `json:"engine,omitempty"`
-	Singbox   *SingboxConfig           `json:"singbox,omitempty"`
-	Profiles  map[string]ProfileConfig `json:"profiles,omitempty"`
+	OpenConnect *OpenConnectServerConfig `json:"openconnect,omitempty"`
+	Source      SourceConfig             `json:"source,omitempty"`
+	CacheDir    string                   `json:"cache_dir,omitempty"`
+	Artifacts   *ArtifactsConfig         `json:"artifacts,omitempty"`
+	Routing     *RoutingConfig           `json:"routing,omitempty"`
+	Engine      *EngineConfig            `json:"engine,omitempty"`
+	Singbox     *SingboxConfig           `json:"singbox,omitempty"`
+	Profiles    map[string]ProfileConfig `json:"profiles,omitempty"`
 }
 
+type OpenConnectServerConfig struct {
+	ServerURL     string                              `json:"server_url,omitempty"`
+	Mode          string                              `json:"mode,omitempty"`
+	AuthMode      string                              `json:"auth_mode,omitempty"`
+	Auth          *openconnectcfg.AuthConfig          `json:"auth,omitempty"`
+	ClientMimicry *openconnectcfg.ClientMimicryConfig `json:"client_mimicry,omitempty"`
+	SplitInclude  *openconnectcfg.SplitIncludeConfig  `json:"split_include,omitempty"`
+	PAC           *openconnectcfg.PACConfig           `json:"pac,omitempty"`
+	CacheDir      string                              `json:"cache_dir,omitempty"`
+}
+type OpenConnectProfileConfig = openconnectcfg.ProfileConfig
+
 type ProfileConfig struct {
-	Selector           string         `json:"selector,omitempty"`
-	ProfileSelector    string         `json:"profile_selector,omitempty"`
-	Transport          string         `json:"transport,omitempty"`
-	PreferredTransport string         `json:"preferred_transport,omitempty"`
-	Match              *ProfileMatch  `json:"match,omitempty"`
-	Pick               string         `json:"pick,omitempty"`
-	Routing            *RoutingConfig `json:"routing,omitempty"`
-	Engine             *EngineConfig  `json:"engine,omitempty"`
-	Singbox            *SingboxConfig `json:"singbox,omitempty"`
+	OpenConnect        *OpenConnectProfileConfig `json:"openconnect,omitempty"`
+	Selector           string                    `json:"selector,omitempty"`
+	ProfileSelector    string                    `json:"profile_selector,omitempty"`
+	Transport          string                    `json:"transport,omitempty"`
+	PreferredTransport string                    `json:"preferred_transport,omitempty"`
+	Match              *ProfileMatch             `json:"match,omitempty"`
+	Pick               string                    `json:"pick,omitempty"`
+	Routing            *RoutingConfig            `json:"routing,omitempty"`
+	Engine             *EngineConfig             `json:"engine,omitempty"`
+	Singbox            *SingboxConfig            `json:"singbox,omitempty"`
 }
 
 type ProfileMatch struct {
@@ -622,6 +644,30 @@ func ResolveInitPath(path string) string {
 }
 
 func (c ProjectConfig) Validate() error {
+	seen := map[string]bool{}
+	for _, selector := range c.Stack {
+		if strings.TrimSpace(selector) != selector || selector == "" || strings.ContainsFunc(selector, unicode.IsSpace) || strings.ContainsFunc(selector, unicode.IsControl) {
+			return errors.New("stack: invalid empty or whitespace selector")
+		}
+		parts := strings.Split(selector, "/")
+		if len(parts) > 2 || parts[0] == "" || (len(parts) == 2 && parts[1] == "") {
+			return errors.New("stack: invalid selector")
+		}
+		server, ok := c.Servers[parts[0]]
+		if !ok {
+			return fmt.Errorf("stack: unknown server %q", parts[0])
+		}
+		if seen[parts[0]] {
+			return fmt.Errorf("stack: duplicate server %q", parts[0])
+		}
+		seen[parts[0]] = true
+		if len(parts) == 2 {
+			if _, ok := server.Profiles[parts[1]]; !ok {
+				return fmt.Errorf("stack: unknown profile %q", selector)
+			}
+		}
+	}
+
 	if err := c.validateExplicitServerEngines(); err != nil {
 		return err
 	}
@@ -635,7 +681,28 @@ func (c ProjectConfig) Validate() error {
 	if err != nil {
 		return err
 	}
-	return effective.validateFlat()
+	if err := effective.validateFlat(); err != nil {
+		return err
+	}
+	for name, server := range c.Servers {
+		effective, _, err := c.Effective(SelectionOptions{Server: name, AllowMissingProfile: true})
+		if err != nil {
+			return fmt.Errorf("servers.%s: %w", name, err)
+		}
+		if err := effective.validateFlat(); err != nil {
+			return fmt.Errorf("servers.%s: %w", name, err)
+		}
+		for profile := range server.Profiles {
+			effective, _, err := c.Effective(SelectionOptions{Server: name, Profile: profile})
+			if err != nil {
+				return err
+			}
+			if err := effective.validateFlat(); err != nil {
+				return fmt.Errorf("servers.%s.profiles.%s: %w", name, profile, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (c ProjectConfig) validateProfileMatches() error {
@@ -722,9 +789,9 @@ func (c ProjectConfig) validateExplicitServerEngines() error {
 			return fmt.Errorf("servers.%s.engine.type is required; set it to one of: %s, %s, %s. Example: \"servers\": { %q: { \"engine\": { \"type\": %q } } }. Use %q for the Xray sidecar engine", name, EngineSingbox, EngineXray, EngineAWG, name, EngineSingbox, EngineXray)
 		}
 		switch normalizeEngineType(server.Engine.Type) {
-		case EngineSingbox, EngineXray, EngineAWG:
+		case EngineSingbox, EngineXray, EngineAWG, EngineOpenConnect:
 		default:
-			return fmt.Errorf("servers.%s.engine.type must be one of: %s, %s, %s", name, EngineSingbox, EngineXray, EngineAWG)
+			return fmt.Errorf("servers.%s.engine.type must be one of: %s, %s, %s, %s, %s, %s", name, EngineSingbox, EngineXray, EngineAWG, EngineOpenConnect, EngineVLESS, EngineVLESSReality)
 		}
 	}
 	return nil
@@ -755,9 +822,9 @@ func validateTransportValue(path, value string) error {
 
 func (c ProjectConfig) validateFlat() error {
 	switch c.SourceMode() {
-	case SourceModeProxy, SourceModeDirect, SourceModeAmnezia:
+	case SourceModeProxy, SourceModeDirect, SourceModeAmnezia, SourceModeOpenConnect:
 	default:
-		return errors.New("source.mode must be one of: proxy, direct, amnezia")
+		return errors.New("source.mode must be one of: proxy, direct, amnezia, openconnect")
 	}
 	if c.Source.Auth != nil {
 		for _, value := range []string{c.Source.Auth.Mode, c.Source.Auth.Record, c.Source.Auth.Service, c.Source.Auth.FallbackService, c.Source.Auth.Path} {
@@ -789,7 +856,7 @@ func (c ProjectConfig) validateFlat() error {
 				}
 			}
 		}
-	} else {
+	} else if c.SourceMode() != SourceModeOpenConnect {
 		if c.Source.Keychain != nil {
 			return errors.New("source.keychain is only supported when source.mode is amnezia")
 		}
@@ -803,13 +870,34 @@ func (c ProjectConfig) validateFlat() error {
 	if c.SourceMode() == SourceModeDirect && c.Source.Auth == nil && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.SourceURL())), "vless://") {
 		return errors.New("source.url must be a vless:// URI in direct mode")
 	}
+	if c.EngineType() == EngineOpenConnect || c.SourceMode() == SourceModeOpenConnect {
+		if c.EngineType() != EngineOpenConnect || c.SourceMode() != SourceModeOpenConnect {
+			return errors.New("openconnect requires matching engine and source mode")
+		}
+		if c.OpenConnect == nil {
+			return errors.New("openconnect configuration is required")
+		}
+		rawURL := firstNonEmpty(c.OpenConnect.ServerURL, c.SourceURL())
+		if rawURL == "" {
+			return errors.New("openconnect.server_url is required")
+		}
+		if strings.ContainsFunc(rawURL, unicode.IsControl) {
+			return errors.New("openconnect.server_url contains control characters")
+		}
+		if c.OpenConnect.PAC != nil {
+			if err := c.OpenConnect.PAC.Validate(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if c.SingboxConfigPath() == "" {
 		return errors.New("artifacts.singbox_config_path is required")
 	}
 	switch c.EngineType() {
-	case EngineSingbox, EngineXray, EngineAWG:
+	case EngineSingbox, EngineXray, EngineAWG, EngineOpenConnect:
 	default:
-		return errors.New("engine.type must be one of: sing-box, xray, amnezia-awg")
+		return errors.New("engine.type must be one of: sing-box, xray, amnezia-awg, openconnect, vless, vless-reality")
 	}
 	if err := validateAWGEngineConfig(c.EngineConfig().AWG); err != nil {
 		return err
@@ -932,6 +1020,13 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 		}, nil
 	}
 
+	if strings.TrimSpace(options.Server) == "" && currentServerName(c.Current) == "" && len(c.Stack) > 0 {
+		server, profile, _ := strings.Cut(c.Stack[0], "/")
+		options.Server = server
+		if options.Profile == "" {
+			options.Profile = profile
+		}
+	}
 	serverOverride := strings.TrimSpace(options.Server)
 	serverName, serverCfg, err := c.resolveServerConfig(serverOverride)
 	if err != nil {
@@ -946,18 +1041,43 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 	effective := c
 	effective.Current = nil
 	effective.Servers = nil
+	effective.Stack = nil
+	effective.OpenConnect = serverCfg.OpenConnect
+	if effective.OpenConnect != nil {
+		cp := *effective.OpenConnect
+		effective.OpenConnect = &cp
+	}
 	effective.Source = mergeSourceConfig(c.Source, serverCfg.Source)
 	effective.CacheDir = firstNonEmpty(serverCfg.CacheDir, c.CacheDir)
 	effective.Artifacts = mergeArtifactsConfig(c.Artifacts, serverCfg.Artifacts)
 	effective.Routing = mergeRoutingConfig(c.Routing, serverCfg.Routing)
 	effective.Engine = mergeEngineConfig(c.Engine, serverCfg.Engine)
 	effective.Singbox = mergeSingboxConfig(c.Singbox, serverCfg.Singbox)
+	if (serverCfg.Engine != nil && normalizeEngineType(serverCfg.Engine.Type) == EngineOpenConnect) || strings.EqualFold(serverCfg.Source.Mode, SourceModeOpenConnect) {
+		effective.Engine = &EngineConfig{Type: EngineOpenConnect}
+		effective.Source = serverCfg.Source
+		effective.Source.Mode = SourceModeOpenConnect
+		if effective.OpenConnect == nil {
+			effective.OpenConnect = &OpenConnectServerConfig{ServerURL: serverCfg.Source.URL}
+		}
+		if effective.OpenConnect != nil {
+			effective.CacheDir = firstNonEmpty(effective.OpenConnect.CacheDir, effective.CacheDir)
+		}
+	}
 
 	selector := firstNonEmpty(options.Selector, c.legacyDefaultProfileSelector())
 	transport := firstNonEmpty(options.Transport, c.legacyDefaultProfileTransport())
 	var match *ProfileMatch
 	var pick string
 	if hasProfile {
+		if profileCfg.OpenConnect != nil && effective.OpenConnect != nil {
+			if profileCfg.OpenConnect.PAC != nil {
+				effective.OpenConnect.PAC = profileCfg.OpenConnect.PAC
+			}
+			if profileCfg.OpenConnect.SplitInclude != nil {
+				effective.OpenConnect.SplitInclude = profileCfg.OpenConnect.SplitInclude
+			}
+		}
 		effective.Routing = mergeRoutingConfig(effective.Routing, profileCfg.Routing)
 		effective.Engine = mergeEngineConfig(effective.Engine, profileCfg.Engine)
 		effective.Singbox = mergeSingboxConfig(effective.Singbox, profileCfg.Singbox)
@@ -972,6 +1092,7 @@ func (c ProjectConfig) Effective(options SelectionOptions) (ProjectConfig, Effec
 			selector = ""
 		}
 	}
+	effective.OpenConnect = cloneOpenConnectServerConfig(effective.OpenConnect)
 	effective.setDefaultProfileSelector(selector)
 	effective.setDefaultProfileTransport(transport)
 
@@ -1386,6 +1507,35 @@ func normalizeTransport(value string) string {
 }
 
 func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
+	resolvePAC := func(p *openconnectcfg.PACConfig) {
+		if p != nil && p.File != "" && !filepath.IsAbs(p.File) {
+			p.File = filepath.Join(baseDir, p.File)
+		}
+	}
+	if c.OpenConnectConfigPath != "" && !filepath.IsAbs(c.OpenConnectConfigPath) {
+		c.OpenConnectConfigPath = filepath.Join(baseDir, c.OpenConnectConfigPath)
+	}
+	if c.Source.Auth != nil && c.Source.Auth.Path != "" && !filepath.IsAbs(c.Source.Auth.Path) && !strings.HasPrefix(c.Source.Auth.Path, "~/") {
+		c.Source.Auth.Path = filepath.Join(baseDir, c.Source.Auth.Path)
+	}
+	for name, server := range c.Servers {
+		if server.OpenConnect != nil {
+			if server.OpenConnect.CacheDir != "" && !filepath.IsAbs(server.OpenConnect.CacheDir) {
+				server.OpenConnect.CacheDir = filepath.Join(baseDir, server.OpenConnect.CacheDir)
+			}
+			resolvePAC(server.OpenConnect.PAC)
+		}
+		if server.Source.Auth != nil && server.Source.Auth.Path != "" && !filepath.IsAbs(server.Source.Auth.Path) && !strings.HasPrefix(server.Source.Auth.Path, "~/") {
+			server.Source.Auth.Path = filepath.Join(baseDir, server.Source.Auth.Path)
+		}
+		for _, profile := range server.Profiles {
+			if profile.OpenConnect != nil {
+				resolvePAC(profile.OpenConnect.PAC)
+			}
+		}
+		c.Servers[name] = server
+	}
+
 	if !filepath.IsAbs(c.CacheDir) {
 		c.CacheDir = filepath.Join(baseDir, c.CacheDir)
 	}
@@ -1820,7 +1970,7 @@ func normalizeStrings(values []string) []string {
 
 func normalizeEngineType(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
-	if value == "singbox" {
+	if value == "singbox" || value == EngineVLESS || value == EngineVLESSReality {
 		return EngineSingbox
 	}
 	return value
@@ -2185,4 +2335,40 @@ func (c ProjectConfig) AWGMTU() int {
 		return value.MTU
 	}
 	return 1280
+}
+
+func cloneOpenConnectServerConfig(value *OpenConnectServerConfig) *OpenConnectServerConfig {
+	if value == nil {
+		return nil
+	}
+	cp := *value
+	if value.Auth != nil {
+		auth := *value.Auth
+		auth.FallbackServers = cloneStrings(auth.FallbackServers)
+		if auth.SecondFactor != nil {
+			factor := *auth.SecondFactor
+			auth.SecondFactor = &factor
+		}
+		cp.Auth = &auth
+	}
+	if value.PAC != nil {
+		pac := *value.PAC
+		pac.Rewrites = append([]openconnectcfg.PACRewriteRule(nil), pac.Rewrites...)
+		cp.PAC = &pac
+	}
+	if value.SplitInclude != nil {
+		split := *value.SplitInclude
+		split.Routes = cloneStrings(split.Routes)
+		split.VPNDomains = cloneStrings(split.VPNDomains)
+		split.BypassSuffixes = cloneStrings(split.BypassSuffixes)
+		split.Nameservers = cloneStrings(split.Nameservers)
+		cp.SplitInclude = &split
+	}
+	if value.ClientMimicry != nil {
+		mimic := *value.ClientMimicry
+		mimic.AuthMethods = cloneStrings(mimic.AuthMethods)
+		mimic.HTTPHeaders = cloneStringMap(mimic.HTTPHeaders)
+		cp.ClientMimicry = &mimic
+	}
+	return &cp
 }

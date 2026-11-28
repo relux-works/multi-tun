@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"multi-tun/desktop/internal/anyconnect/openconnect"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/subscription"
 )
@@ -60,6 +61,10 @@ func (a *App) Run(args []string) int {
 		return a.runList(args[1:])
 	case "set-current":
 		return a.runSetCurrent(args[1:])
+	case openconnect.PACServeCommand:
+		return a.runPACServe(args[1:])
+	case "up", "down":
+		return a.runStackMember(args[0], args[1:])
 	case "start":
 		return a.runStart(args[1:])
 	case "run":
@@ -561,7 +566,9 @@ func (a *App) printUsage() {
 	fmt.Fprintf(a.stdout, "  %s refresh [--config path] [--server name | server]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s list [--config path] [--server name | server] [--refresh]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s set-current [--config path] [--server name | server [profile]] [--profile name]\n", a.programName)
-	fmt.Fprintf(a.stdout, "  %s start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s start [--config path] [profile...] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s up [--config path] [--refresh] [--replace] <profile>\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s down [--config path] [--force] [--timeout duration] <profile>\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh] [--timeout duration] [--force]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s reconcile [--config path] [--force] [--reason label]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--refresh]\n", a.programName)
@@ -571,9 +578,10 @@ func (a *App) printUsage() {
 	fmt.Fprintf(a.stdout, "  %s render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s failclosed status|apply|on|off [--config path]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s guard on|off|status [--config path]\n", a.programName)
-	fmt.Fprintf(a.stdout, "  %s auth amnezia [--stdin | --clipboard | --check | --delete] [--service name] [--fallback-service name] [--account name] [--allow-placeholder]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s auth <server|migrate> [--stdin | --clipboard | --check | --delete] [--service name] [--fallback-service name] [--account name] [--allow-placeholder]\n", a.programName)
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
+	fmt.Fprintf(a.stdout, "  %s auth amnezia [--stdin | --clipboard | --check | --delete]\n", a.programName)
 	fmt.Fprintln(a.stdout, "  vless-tun symlink compatibility uses the same CLI.")
 	fmt.Fprintln(a.stdout, "  run, connect -> start")
 	fmt.Fprintln(a.stdout, "  disconnect -> stop")
@@ -600,6 +608,9 @@ func refreshSource(cfg config.ProjectConfig) (subscription.CacheSnapshot, error)
 		}
 		sourceURL = resolvedURL
 		redactedRef = ref
+	}
+	if redactedRef != "" {
+		return refreshConfiguredSource(context.Background(), cfg, sourceURL, redactedRef)
 	}
 	snap, err := subscription.RefreshWithOptions(context.Background(), cfg.SourceMode(), sourceURL, cfg.CacheDir, subscription.FetchOptions{
 		UserAgent: cfg.SourceUserAgent(),

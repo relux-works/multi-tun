@@ -108,15 +108,30 @@ func (a *App) runDiagnoseConfig(args []string) int {
 		return 1
 	}
 	if cfg.SourceMode() == config.SourceModeAmnezia {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		status := amneziaStoreFunc().CheckKey(ctx, amneziaKeychainSpec(cfg))
-		cancel()
-		fmt.Fprintf(a.stdout, "keychain_service: %s\nkeychain_account: %s\nkeychain_state: %s\n", status.Service, status.Account, status.State)
-		if status.RefusalCode != "" {
-			fmt.Fprintf(a.stdout, "keychain_refusal_code: %s\n", status.RefusalCode)
-		}
-		if status.State != "present" {
-			return 1
+		if auth := cfg.SourceAuth(); auth != nil && auth.Mode == "file" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_, _, secretErr := resolveConfiguredSourceSecret(ctx, cfg)
+			cancel()
+			state := "present"
+			if secretErr != nil {
+				state = "invalid"
+			}
+			fmt.Fprintf(a.stdout, "auth_mode: file\nauth_state: %s\n", state)
+			if secretErr != nil {
+				fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", secretErr)
+				return 1
+			}
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			status := amneziaStoreFunc().CheckKey(ctx, amneziaKeychainSpec(cfg))
+			cancel()
+			fmt.Fprintf(a.stdout, "keychain_service: %s\nkeychain_account: %s\nkeychain_state: %s\n", status.Service, status.Account, status.State)
+			if status.RefusalCode != "" {
+				fmt.Fprintf(a.stdout, "keychain_refusal_code: %s\n", status.RefusalCode)
+			}
+			if status.State != "present" {
+				return 1
+			}
 		}
 	}
 

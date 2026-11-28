@@ -2,6 +2,7 @@ package openconnect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +13,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"multi-tun/desktop/internal/anyconnect/openconnectcfg"
 )
 
 const (
@@ -39,9 +43,15 @@ type pacProxySpec struct {
 	URL          string
 	ScriptPath   string
 	ServerBinary string
+	UpstreamURL  string
+	RewritesPath string
+	Rewrites     []openconnectcfg.PACRewriteRule
 }
 
 func pacSpecForConnect(options ConnectOptions) (*pacProxySpec, error) {
+	if err := (openconnectcfg.PACConfig{URL: options.PACURL, Script: options.PACScript, Rewrites: options.PACRewrites}).Validate(); err != nil {
+		return nil, err
+	}
 	url := strings.TrimSpace(options.PACURL)
 	script := options.PACScript
 	if url != "" && strings.TrimSpace(script) != "" {
@@ -51,15 +61,37 @@ func pacSpecForConnect(options ConnectOptions) (*pacProxySpec, error) {
 		if strings.ContainsAny(url, "\n\r\t") {
 			return nil, errors.New("pac: url must not contain control characters")
 		}
+		if len(options.PACRewrites) > 0 {
+			return &pacProxySpec{UpstreamURL: url, Rewrites: options.PACRewrites}, nil
+		}
 		return &pacProxySpec{URL: url}, nil
 	}
-	if strings.TrimSpace(script) == "" {
+	if strings.TrimSpace(script) == "" && len(options.PACRewrites) == 0 {
 		return nil, nil
 	}
 	if len(script) > pacMaxScriptBytes {
 		return nil, fmt.Errorf("pac: script is %d bytes, limit is %d", len(script), pacMaxScriptBytes)
 	}
-	return &pacProxySpec{}, nil
+	return &pacProxySpec{Rewrites: options.PACRewrites}, nil
+}
+
+// ResolvePAC loads an upstream source; rewrites are applied by Connect once
+// the session helper directory exists (and dynamically for HTTP upstreams).
+func ResolvePAC(cfg openconnectcfg.PACConfig) (string, string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(cfg.URL) != "" {
+		return strings.TrimSpace(cfg.URL), "", nil
+	}
+	if cfg.File != "" {
+		data, err := readPACScript(cfg.File)
+		return "", string(data), err
+	}
+	if len(cfg.Script) > pacMaxScriptBytes {
+		return "", "", errors.New("pac: script exceeds 1 MiB")
+	}
+	return "", cfg.Script, nil
 }
 
 // preparePACScript creates the session helper directory and writes the local
@@ -82,6 +114,22 @@ func materializePACScript(spec *pacProxySpec, helperDir string, script string) e
 		return nil
 	}
 	path := filepath.Join(helperDir, pacScriptFileName)
+	if spec.UpstreamURL != "" {
+		spec.RewritesPath = filepath.Join(helperDir, "pac-rewrites.json")
+		data, err := json.Marshal(spec.Rewrites)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(spec.RewritesPath, data, 0o644); err != nil {
+			return err
+		}
+	} else if len(spec.Rewrites) > 0 {
+		var err error
+		script, err = RewritePACScript(script, spec.Rewrites)
+		if err != nil {
+			return err
+		}
+	}
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		return fmt.Errorf("write pac script: %w", err)
 	}
@@ -103,10 +151,14 @@ func materializePACScript(spec *pacProxySpec, helperDir string, script string) e
 // PAC, so a backup left by a crashed session is put back.
 func pacProxyShellBlock(spec *pacProxySpec, backupPath string, networksetup string) string {
 	url, scriptPath, serverBinary := "", "", ""
+	upstreamURL, rewritesPath := "", ""
 	if spec != nil {
 		url, scriptPath, serverBinary = spec.URL, spec.ScriptPath, spec.ServerBinary
+		upstreamURL, rewritesPath = spec.UpstreamURL, spec.RewritesPath
 	}
-	return `pac_url=` + shellQuote(url) + `
+	return `pac_upstream_url=` + shellQuote(upstreamURL) + `
+pac_rewrites_file=` + shellQuote(rewritesPath) + `
+pac_url=` + shellQuote(url) + `
 pac_script_file=` + shellQuote(scriptPath) + `
 pac_server_bin=` + shellQuote(serverBinary) + `
 pac_backup_file=` + shellQuote(backupPath) + `
@@ -221,7 +273,11 @@ pac_start_server() {
       return 1
       ;;
   esac
-  "$pac_server_bin" ` + PACServeCommand + ` --file "$pac_script_file" --port-file "$pac_port_file" --watch-pid "$VPNPID" < /dev/null >> "$log_file" 2>&1 &
+  if [ -n "$pac_upstream_url" ]; then
+    "$pac_server_bin" ` + PACServeCommand + ` --upstream-url "$pac_upstream_url" --rewrites-file "$pac_rewrites_file" --port-file "$pac_port_file" --watch-pid "$VPNPID" < /dev/null >> "$log_file" 2>&1 &
+  else
+    "$pac_server_bin" ` + PACServeCommand + ` --file "$pac_script_file" --port-file "$pac_port_file" --watch-pid "$VPNPID" < /dev/null >> "$log_file" 2>&1 &
+  fi
   printf '%s\n' "$!" > "$pac_pid_file"
   pac_i=0
   while [ "$pac_i" -lt 50 ]; do
@@ -328,10 +384,13 @@ restore_pac_proxy() {
 
 // PACServeOptions configures the loopback PAC server.
 type PACServeOptions struct {
-	File     string
-	PortFile string
-	WatchPID int
-	Listen   string
+	cacheNow     func() time.Time
+	File         string
+	UpstreamURL  string
+	RewritesFile string
+	PortFile     string
+	WatchPID     int
+	Listen       string
 }
 
 // ParsePACServeArgs parses the arguments of the hidden PAC serve subcommand.
@@ -345,6 +404,10 @@ func ParsePACServeArgs(args []string) (PACServeOptions, error) {
 		switch args[i] {
 		case "--file":
 			options.File = value
+		case "--upstream-url":
+			options.UpstreamURL = value
+		case "--rewrites-file":
+			options.RewritesFile = value
 		case "--port-file":
 			options.PortFile = value
 		case "--watch-pid":
@@ -358,8 +421,11 @@ func ParsePACServeArgs(args []string) (PACServeOptions, error) {
 		}
 		i++
 	}
-	if options.File == "" || options.PortFile == "" || options.WatchPID == 0 {
-		return options, errors.New("--file, --port-file and --watch-pid are required")
+	if (options.File == "" && options.UpstreamURL == "" && options.RewritesFile == "") || options.PortFile == "" || options.WatchPID == 0 {
+		return options, errors.New("a PAC source, --port-file and --watch-pid are required")
+	}
+	if err := (openconnectcfg.PACConfig{URL: options.UpstreamURL, File: options.File}).Validate(); err != nil {
+		return options, err
 	}
 	return options, nil
 }
@@ -378,7 +444,7 @@ var (
 // serves the file until ctx ends or the watched process exits. When started as
 // root it drops to the nobody account after binding.
 func ServePAC(ctx context.Context, options PACServeOptions, logw io.Writer) error {
-	body, err := readPACScript(options.File)
+	handler, err := newPACServeHandler(options)
 	if err != nil {
 		return err
 	}
@@ -443,7 +509,7 @@ func ServePAC(ctx context.Context, options PACServeOptions, logw io.Writer) erro
 	}
 
 	server := &http.Server{
-		Handler:           pacHandler(body),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -504,6 +570,137 @@ func pacHandler(body []byte) http.Handler {
 	})
 }
 
+// RewritePACScript captures the upstream function in a private scope. This
+// renames its binding without rewriting strings, comments or recursive calls
+// inside arbitrary JavaScript. Rewrites are validated before serialization.
+func RewritePACScript(upstreamScript string, rewrites []openconnectcfg.PACRewriteRule) (string, error) {
+	if err := (openconnectcfg.PACConfig{Rewrites: rewrites}).Validate(); err != nil {
+		return "", err
+	}
+	if len(upstreamScript) > pacMaxScriptBytes {
+		return "", errors.New("pac: upstream script exceeds 1 MiB")
+	}
+	var out strings.Builder
+	out.WriteString("var __tun_wave_upstream_FindProxyForURL = (function() {\n")
+	out.WriteString(upstreamScript)
+	out.WriteString("\nreturn typeof FindProxyForURL === \"function\" ? FindProxyForURL : function(url, host) { return \"DIRECT\"; };\n})();\nfunction FindProxyForURL(url, host) {\n")
+	for _, rule := range rewrites {
+		value, _ := json.Marshal(rule.Return)
+		if rule.Host != "" {
+			host, _ := json.Marshal(strings.ToLower(rule.Host))
+			fmt.Fprintf(&out, "  if (host.toLowerCase() === %s) return %s;\n", host, value)
+		} else {
+			suffix := strings.ToLower(strings.TrimPrefix(rule.DomainSuffix, "."))
+			name, _ := json.Marshal(suffix)
+			dotted, _ := json.Marshal("." + suffix)
+			fmt.Fprintf(&out, "  if (dnsDomainIs(host.toLowerCase(), %s) || host.toLowerCase() === %s) return %s;\n", dotted, name, value)
+		}
+	}
+	out.WriteString("  return __tun_wave_upstream_FindProxyForURL(url, host);\n}\n")
+	return out.String(), nil
+}
+
+func newPACServeHandler(options PACServeOptions) (http.Handler, error) {
+	if err := (openconnectcfg.PACConfig{URL: options.UpstreamURL, File: options.File}).Validate(); err != nil {
+		return nil, err
+	}
+	var rewrites []openconnectcfg.PACRewriteRule
+	if options.RewritesFile != "" {
+		body, err := readPACScript(options.RewritesFile)
+		if err != nil {
+			return nil, err
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(body)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&rewrites); err != nil {
+			return nil, errors.New("pac: invalid rewrites file")
+		}
+		var extra any
+		if decoder.Decode(&extra) != io.EOF {
+			return nil, errors.New("pac: trailing rewrites data")
+		}
+	}
+	if err := (openconnectcfg.PACConfig{Rewrites: rewrites}).Validate(); err != nil {
+		return nil, err
+	}
+	var local []byte
+	if options.File != "" {
+		var err error
+		local, err = readPACScript(options.File)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if options.UpstreamURL == "" {
+		if len(rewrites) > 0 || len(local) == 0 {
+			script, err := RewritePACScript(string(local), rewrites)
+			if err != nil {
+				return nil, err
+			}
+			local = []byte(script)
+		}
+		return pacHandler(local), nil
+	}
+	// A dedicated standard transport retains certificate verification even if
+	// another package customizes http.DefaultTransport. Redirects cannot escape
+	// HTTP(S), and the client timeout also bounds body reads.
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
+			return errors.New("pac: invalid upstream redirect")
+		}
+		return nil
+	}}
+	fallback, err := RewritePACScript("", rewrites)
+	if err != nil {
+		return nil, err
+	}
+	var mu sync.Mutex
+	cached := []byte(fallback)
+	var nextFetch time.Time
+	now := options.cacheNow
+	if now == nil {
+		now = time.Now
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/proxy.pac" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			pacHandler(nil).ServeHTTP(w, r)
+			return
+		}
+		mu.Lock()
+		if now().After(nextFetch) {
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			req, reqErr := http.NewRequestWithContext(fetchCtx, http.MethodGet, options.UpstreamURL, nil)
+			fetchedOK := false
+			if reqErr == nil {
+				resp, fetchErr := client.Do(req)
+				if fetchErr == nil {
+					body, readErr := io.ReadAll(io.LimitReader(resp.Body, pacMaxScriptBytes+1))
+					_ = resp.Body.Close()
+					if readErr == nil && resp.StatusCode == http.StatusOK && len(body) <= pacMaxScriptBytes && strings.TrimSpace(string(body)) != "" {
+						if script, rewriteErr := RewritePACScript(string(body), rewrites); rewriteErr == nil {
+							cached = []byte(script)
+							fetchedOK = true
+						}
+					}
+				}
+			}
+			cancel()
+			if fetchedOK {
+				nextFetch = now().Add(60 * time.Second)
+			} else {
+				nextFetch = now().Add(5 * time.Second)
+			}
+		}
+		body := cached
+		mu.Unlock()
+		pacHandler(body).ServeHTTP(w, r)
+	}), nil
+}
+
 func dropPrivilegesToNobody() error {
 	account, err := user.Lookup("nobody")
 	if err != nil {
@@ -538,6 +735,8 @@ func pacDescription(spec *pacProxySpec) string {
 		return ""
 	case spec.URL != "":
 		return spec.URL
+	case spec.UpstreamURL != "":
+		return spec.UpstreamURL + " (rewritten on loopback)"
 	default:
 		return "local script served on loopback"
 	}

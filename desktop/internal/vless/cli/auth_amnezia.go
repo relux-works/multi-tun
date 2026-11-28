@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -130,7 +131,11 @@ func amneziaKeychainSpec(cfg config.ProjectConfig) amnezia.KeychainSpec {
 func resolveConfiguredSourceSecret(ctx context.Context, cfg config.ProjectConfig) (string, string, error) {
 	auth := cfg.SourceAuth()
 	if auth == nil {
-		return "", "", errors.New("source.url or source.auth is required")
+		if cfg.SourceMode() != config.SourceModeAmnezia {
+			return "", "", errors.New("source.url or source.auth is required")
+		}
+		legacy := cfg.SourceKeychain()
+		auth = &config.SourceAuthConfig{Mode: "keychain", Service: legacy.Service, FallbackService: legacy.FallbackService, Record: legacy.Account}
 	}
 	switch auth.Mode {
 	case "keychain":
@@ -153,9 +158,18 @@ func resolveConfiguredSourceSecret(ctx context.Context, cfg config.ProjectConfig
 		if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 			return "", "", errors.New("source.auth.path must be a regular 0600 file")
 		}
-		raw, err := os.ReadFile(path)
+		file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
-			return "", "", fmt.Errorf("read source.auth.path: %w", err)
+			return "", "", errors.New("cannot open source.auth.path")
+		}
+		defer file.Close()
+		opened, err := file.Stat()
+		if err != nil || !opened.Mode().IsRegular() || opened.Mode().Perm()&0o077 != 0 || !os.SameFile(info, opened) {
+			return "", "", errors.New("source.auth.path changed while opening")
+		}
+		raw, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+		if err != nil || len(raw) > 1<<20 {
+			return "", "", errors.New("cannot read source.auth.path or secret exceeds 1 MiB")
 		}
 		secret := strings.TrimSpace(string(raw))
 		if secret == "" {
@@ -199,6 +213,9 @@ func (a *App) runAuthMigrate(args []string) int {
 	store := amneziaStoreFunc()
 	migrated := 0
 	for name, srv := range cfg.Servers {
+		if isOpenConnectServerCLI(srv) {
+			continue
+		}
 		record := name + "/key"
 		if srv.Source.Keychain != nil && strings.TrimSpace(srv.Source.Keychain.Account) != "" {
 			record = strings.TrimSpace(srv.Source.Keychain.Account)
@@ -224,6 +241,7 @@ func (a *App) runAuthMigrate(args []string) int {
 			migrated++
 			fmt.Fprintf(a.stdout, "migrated: %s -> keychain (%s)\n", name, record)
 		} else if srv.Source.Keychain != nil {
+			legacy := *srv.Source.Keychain
 			srv.Source.Keychain = nil
 			srv.Source.Auth = &config.SourceAuthConfig{
 				Mode:   "keychain",
@@ -231,15 +249,24 @@ func (a *App) runAuthMigrate(args []string) int {
 			}
 			cfg.Servers[name] = srv
 			migrated++
+			srv.Source.Auth.Service = legacy.Service
+			srv.Source.Auth.FallbackService = legacy.FallbackService
+			cfg.Servers[name] = srv
 			fmt.Fprintf(a.stdout, "normalized: %s -> auth.mode=keychain (%s)\n", name, record)
+		}
+		if srv.Source.Auth == nil || srv.Source.Auth.Mode != "keychain" {
+			continue
 		}
 		if eff, _, eerr := cfg.Effective(config.SelectionOptions{Server: name, AllowMissingProfile: true}); eerr == nil && eff.CacheDir != "" {
 			if snap, lerr := subscription.LoadCache(eff.CacheDir); lerr == nil {
-				ref := "keychain://tun-wave/" + record
+				ref := "keychain://" + firstNonEmptyLocal(srv.Source.Auth.Service, "tun-wave") + "/" + record
 				if snap.SourceURL != ref || snap.Raw != "" {
 					snap.SourceURL = ref
 					snap.Raw = ""
-					_ = subscription.SaveCache(eff.CacheDir, snap)
+					if err := subscription.SaveCache(eff.CacheDir, snap); err != nil {
+						fmt.Fprintln(a.stderr, "auth migrate failed: cannot redact cached snapshot")
+						return 1
+					}
 				}
 			}
 		}
@@ -255,11 +282,11 @@ func (a *App) runAuthMigrate(args []string) int {
 func refreshAmneziaSource(cfg config.ProjectConfig) (subscription.CacheSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	result, err := amneziaStoreFunc().LookupKey(ctx, amneziaKeychainSpec(cfg))
+	secret, secretRef, err := resolveConfiguredSourceSecret(ctx, cfg)
 	if err != nil {
 		return subscription.CacheSnapshot{}, err
 	}
-	decoded, err := amnezia.DecodeKey(result.Secret)
+	decoded, err := amnezia.DecodeKey(secret)
 	if err != nil {
 		return subscription.CacheSnapshot{}, err
 	}
@@ -314,7 +341,7 @@ func refreshAmneziaSource(cfg config.ProjectConfig) (subscription.CacheSnapshot,
 		return subscription.CacheSnapshot{}, amnezia.NewRefusal(amnezia.CodeKeyInvalid, "Amnezia key contains no runnable profiles")
 	}
 	snapshot := subscription.CacheSnapshot{
-		SourceURL:  fmt.Sprintf("keychain://%s/%s", result.Service, result.Account),
+		SourceURL:  secretRef,
 		SourceMode: config.SourceModeAmnezia, FetchedAt: time.Now().UTC(),
 		PayloadFormat: decoded.Format, Raw: "", Profiles: profiles,
 	}
@@ -326,11 +353,11 @@ func refreshAmneziaSource(cfg config.ProjectConfig) (subscription.CacheSnapshot,
 
 // Resolve key material only at runtime; catalog snapshots never contain it.
 func resolveAmneziaRuntime(ctx context.Context, cfg config.ProjectConfig, profile model.Profile) (model.Profile, *amnezia.AWGConfig, error) {
-	result, err := amneziaStoreFunc().LookupKey(ctx, amneziaKeychainSpec(cfg))
+	secret, _, err := resolveConfiguredSourceSecret(ctx, cfg)
 	if err != nil {
 		return model.Profile{}, nil, err
 	}
-	decoded, err := amnezia.DecodeKey(result.Secret)
+	decoded, err := amnezia.DecodeKey(secret)
 	if err != nil {
 		return model.Profile{}, nil, err
 	}
@@ -389,4 +416,38 @@ func amneziaShouldSkipTCPProbe(profiles []model.Profile, match *config.ProfileMa
 		}
 	}
 	return matched
+}
+
+// refreshConfiguredSource never materializes the credential URL or raw payload
+// in the cache, including the intermediate state before snapshot publication.
+func refreshConfiguredSource(ctx context.Context, cfg config.ProjectConfig, secret, ref string) (subscription.CacheSnapshot, error) {
+	payload := []byte(secret)
+	format := "direct"
+	if cfg.SourceMode() == config.SourceModeProxy {
+		var err error
+		payload, err = subscription.FetchWithOptions(ctx, secret, subscription.FetchOptions{UserAgent: cfg.SourceUserAgent(), Headers: cfg.SourceHeaders()})
+		if err != nil {
+			safe := errors.New("configured source fetch failed")
+			if subscription.IsTransientFetchError(err) {
+				return subscription.CacheSnapshot{}, &subscription.TransientFetchError{Err: safe}
+			}
+			return subscription.CacheSnapshot{}, safe
+		}
+	}
+	normalized, detected, err := subscription.NormalizePayload(payload)
+	if err != nil {
+		return subscription.CacheSnapshot{}, errors.New("configured source payload is invalid")
+	}
+	if cfg.SourceMode() == config.SourceModeProxy {
+		format = detected
+	}
+	profiles, err := subscription.ParseProfiles(normalized)
+	if err != nil {
+		return subscription.CacheSnapshot{}, errors.New("configured source profiles are invalid")
+	}
+	snap := subscription.CacheSnapshot{SourceURL: ref, SourceMode: cfg.SourceMode(), FetchedAt: time.Now().UTC(), PayloadFormat: format, Profiles: profiles}
+	if err := subscription.SaveCache(cfg.CacheDir, snap); err != nil {
+		return subscription.CacheSnapshot{}, err
+	}
+	return snap, nil
 }

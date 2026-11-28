@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"multi-tun/desktop/internal/anyconnect/openconnectcfg"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -837,5 +840,196 @@ func TestParsePACServeArgs(t *testing.T) {
 		if _, err := ParsePACServeArgs(args); err == nil {
 			t.Fatalf("ParsePACServeArgs(%v) = nil error", args)
 		}
+	}
+}
+
+func TestRewritePACScriptPreservesUpstreamAndPrecedence(t *testing.T) {
+	upstream := `// FindProxyForURL in a comment must not be rewritten.
+function FindProxyForURL(url,host){return "PROXY upstream.example:8080";}`
+	rules := []openconnectcfg.PACRewriteRule{{Host: "mybonus.mts.ru", Return: "DIRECT"}, {DomainSuffix: "MTS.RU", Return: "PROXY 10.73.1.2:8080; DIRECT"}}
+	script, err := RewritePACScript(upstream, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{upstream, `host.toLowerCase() === "mybonus.mts.ru"`, `dnsDomainIs(host.toLowerCase(), ".mts.ru")`, `host.toLowerCase() === "mts.ru"`, `return "PROXY 10.73.1.2:8080; DIRECT"`, `return __tun_wave_upstream_FindProxyForURL(url, host);`} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("missing %q in %s", want, script)
+		}
+	}
+	if strings.Index(script, `=== "mybonus.mts.ru"`) > strings.Index(script, `dnsDomainIs`) {
+		t.Fatal("rule order changed")
+	}
+	if again, _ := RewritePACScript(upstream, rules); script != again {
+		t.Fatal("rewrites are nondeterministic")
+	}
+	standalone, err := RewritePACScript("", rules)
+	if err != nil || !strings.Contains(standalone, `return "DIRECT";`) {
+		t.Fatalf("standalone: %s %v", standalone, err)
+	}
+	if _, err := RewritePACScript(upstream, []openconnectcfg.PACRewriteRule{{Host: "x", Return: `DIRECT; evil()`}}); err == nil {
+		t.Fatal("rewriter bypassed config validation")
+	}
+}
+func TestMaterializePACRewritesAndRemoteHelper(t *testing.T) {
+	for _, options := range []ConnectOptions{{PACRewrites: []openconnectcfg.PACRewriteRule{{Host: "mybonus.mts.ru", Return: "DIRECT"}}}, {PACURL: "https://wpad.example/proxy.pac", PACRewrites: []openconnectcfg.PACRewriteRule{{Host: "mybonus.mts.ru", Return: "DIRECT"}}}} {
+		spec, err := pacSpecForConnect(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := preparePACScript(spec, t.TempDir(), options.PACScript); err != nil {
+			t.Fatal(err)
+		}
+		if options.PACURL != "" {
+			data, err := os.ReadFile(spec.RewritesPath)
+			if err != nil || !strings.Contains(string(data), "mybonus.mts.ru") {
+				t.Fatalf("rewrites materialization %s %v", data, err)
+			}
+			block := pacProxyShellBlock(spec, "/tmp/backup", defaultNetworksetup)
+			if !strings.Contains(block, "--upstream-url") || !strings.Contains(block, "--rewrites-file") {
+				t.Fatal("remote helper flags absent")
+			}
+		} else {
+			data, err := os.ReadFile(spec.ScriptPath)
+			if err != nil || !strings.Contains(string(data), "mybonus.mts.ru") {
+				t.Fatalf("standalone materialization %s %v", data, err)
+			}
+		}
+	}
+}
+func TestUpstreamPACHandlerCacheFallbackAndBounds(t *testing.T) {
+	for _, mode := range []string{"ok", "unreachable", "oversized", "tls"} {
+		t.Run(mode, func(t *testing.T) {
+			var calls atomic.Int32
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if mode == "unreachable" {
+					http.Error(w, "offline", 503)
+					return
+				}
+				if mode == "oversized" {
+					_, _ = io.WriteString(w, strings.Repeat("x", pacMaxScriptBytes+1))
+					return
+				}
+				_, _ = io.WriteString(w, `function FindProxyForURL(u,h){return "PROXY upstream.example:8080";}`)
+			})
+			server := httptest.NewServer(handler)
+			if mode == "tls" {
+				server.Close()
+				server = httptest.NewTLSServer(handler)
+			}
+			defer server.Close()
+			rewrites := filepath.Join(t.TempDir(), "rewrites.json")
+			if err := os.WriteFile(rewrites, []byte(`[{"host":"mybonus.mts.ru","return":"DIRECT"}]`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h, err := newPACServeHandler(PACServeOptions{UpstreamURL: server.URL, RewritesFile: rewrites})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, httptest.NewRequest("GET", "http://127.0.0.1/proxy.pac", nil))
+				body := w.Body.String()
+				if w.Code != 200 || !strings.Contains(body, "mybonus.mts.ru") {
+					t.Fatalf("rewrite fallback %d %s", w.Code, body)
+				}
+				hasUpstream := strings.Contains(body, "PROXY upstream.example:8080")
+				if hasUpstream != (mode == "ok") {
+					t.Fatalf("upstream admission mode=%s body=%s", mode, body)
+				}
+			}
+			if mode != "tls" && calls.Load() != 1 {
+				t.Fatalf("cache fetch count %d", calls.Load())
+			}
+		})
+	}
+}
+func TestServePACUpstreamURLAndRewritesOnLoopback(t *testing.T) {
+	// Use the same privilege/process fakes as existing
+	// local-PAC tests; no tunnel or host network configuration is involved.
+	oldUID, oldDrop := pacEffectiveUID, pacDropPrivileges
+	pacEffectiveUID = func() int { return 501 }
+	pacDropPrivileges = func() error { t.Fatal("unexpected privilege drop"); return nil }
+	defer func() { pacEffectiveUID, pacDropPrivileges = oldUID, oldDrop }()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `function FindProxyForURL(u,h){return "PROXY upstream.example:80";}`)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	rewrites := filepath.Join(dir, "rules.json")
+	if err := os.WriteFile(rewrites, []byte(`[{"host":"mybonus.mts.ru","return":"DIRECT"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options, err := ParsePACServeArgs([]string{"--upstream-url", upstream.URL, "--rewrites-file", rewrites, "--port-file", filepath.Join(dir, "port"), "--watch-pid", strconv.Itoa(os.Getpid())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ServePAC(ctx, options, io.Discard) }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("server did not exit")
+		}
+	}()
+	var port string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(options.PortFile); err == nil {
+			port = strings.TrimSpace(string(raw))
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if port == "" {
+		t.Fatal("PAC port was not published")
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get("http://127.0.0.1:" + port + "/proxy.pac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || !strings.Contains(string(body), "mybonus.mts.ru") || !strings.Contains(string(body), "upstream.example") {
+		t.Fatalf("served PAC %s %v", body, err)
+	}
+}
+
+func TestUpstreamPACRetainsLastGoodScriptAfterCacheExpiry(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) > 1 {
+			http.Error(w, "temporarily unavailable", 503)
+			return
+		}
+		_, _ = io.WriteString(w, `function FindProxyForURL(u,h){return "PROXY last-good.example:80";}`)
+	}))
+	defer server.Close()
+	now := time.Now()
+	handler, err := newPACServeHandler(PACServeOptions{UpstreamURL: server.URL, cacheNow: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetch := func() string {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "http://127.0.0.1/proxy.pac", nil))
+		return w.Body.String()
+	}
+	first := fetch()
+	now = now.Add(61 * time.Second)
+	stale := fetch()
+	if first != stale || !strings.Contains(stale, "last-good.example") || calls.Load() != 2 {
+		t.Fatal("stale-on-error lost the last good upstream")
+	}
+	_ = fetch()
+	if calls.Load() != 2 {
+		t.Fatal("failed fetch was not cached")
 	}
 }

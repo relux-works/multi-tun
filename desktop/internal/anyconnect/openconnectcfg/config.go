@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -69,9 +72,49 @@ type VPNConfig struct {
 // File and Script are served to the system from a loopback HTTP listener.
 // An empty object (or no "pac" key) leaves the system proxy settings untouched.
 type PACConfig struct {
-	URL    string `json:"url,omitempty"`
-	File   string `json:"file,omitempty"`
-	Script string `json:"script,omitempty"`
+	URL      string           `json:"url,omitempty"`
+	File     string           `json:"file,omitempty"`
+	Script   string           `json:"script,omitempty"`
+	Rewrites []PACRewriteRule `json:"rewrites,omitempty"`
+}
+
+type PACRewriteRule struct {
+	Host         string `json:"host,omitempty"`
+	DomainSuffix string `json:"domain_suffix,omitempty"`
+	Return       string `json:"return"`
+}
+
+var pacDNSName = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+
+// Validate uses the PAC directive grammar rather than JavaScript escaping as
+// the admission boundary. Semicolons are permitted only between directives.
+func (r PACRewriteRule) Validate() error {
+	if (r.Host == "") == (r.DomainSuffix == "") {
+		return errors.New("pac rewrite: set exactly one of host or domain_suffix")
+	}
+	name := r.Host
+	if name == "" {
+		name = r.DomainSuffix
+	}
+	if !pacDNSName.MatchString(name) || strings.Trim(name, ".-") == "" {
+		return errors.New("pac rewrite: invalid DNS host")
+	}
+	for _, directive := range strings.Split(r.Return, ";") {
+		directive = strings.Trim(directive, " ")
+		if directive == "DIRECT" {
+			continue
+		}
+		kind, address, ok := strings.Cut(directive, " ")
+		if !ok || (kind != "PROXY" && kind != "HTTPS" && kind != "SOCKS" && kind != "SOCKS5") {
+			return errors.New("pac rewrite: invalid return directive")
+		}
+		host, port, err := net.SplitHostPort(address)
+		n, portErr := strconv.Atoi(port)
+		if err != nil || portErr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port || (!pacDNSName.MatchString(host) && net.ParseIP(host) == nil) {
+			return errors.New("pac rewrite: invalid proxy address")
+		}
+	}
+	return nil
 }
 
 type ServerConfig struct {
@@ -397,11 +440,16 @@ func (c Config) EffectivePAC(server string, profile string) PACConfig {
 
 // Enabled reports whether any PAC source is set.
 func (p PACConfig) Enabled() bool {
-	return strings.TrimSpace(p.URL) != "" || strings.TrimSpace(p.File) != "" || strings.TrimSpace(p.Script) != ""
+	return strings.TrimSpace(p.URL) != "" || strings.TrimSpace(p.File) != "" || strings.TrimSpace(p.Script) != "" || len(p.Rewrites) > 0
 }
 
 // Validate rejects ambiguous or unusable PAC selections.
 func (p PACConfig) Validate() error {
+	for i, rule := range p.Rewrites {
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("pac.rewrites[%d]: %w", i, err)
+		}
+	}
 	set := 0
 	for _, value := range []string{p.URL, p.File, p.Script} {
 		if strings.TrimSpace(value) != "" {

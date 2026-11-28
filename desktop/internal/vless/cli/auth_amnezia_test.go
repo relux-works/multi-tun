@@ -1159,3 +1159,156 @@ func TestAmneziaGatewayRefusalsPreserveSessionAndFiles(t *testing.T) {
 type cliRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f cliRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestUnifiedSourceSecretModes(t *testing.T) {
+	for _, sourceMode := range []string{config.SourceModeDirect, config.SourceModeProxy, config.SourceModeAmnezia} {
+		for _, storage := range []string{"keychain", "file0600", "file0644", "symlink", "empty"} {
+			t.Run(sourceMode+"/"+storage, func(t *testing.T) {
+				fake := installAmneziaFake(t)
+				cfg := config.Default()
+				cfg.CacheDir = filepath.Join(t.TempDir(), "cache")
+				cfg.Source = config.SourceConfig{Mode: sourceMode}
+				cfg.SubscriptionURL = ""
+				secret := amneziaTestURI
+				if sourceMode == config.SourceModeProxy {
+					secret = "https://subscription.example/token-sensitive"
+				}
+				auth := &config.SourceAuthConfig{Mode: "keychain", Record: "sample/key"}
+				fake.items["tun-wave/sample/key"] = secret
+				if storage != "keychain" {
+					path := filepath.Join(t.TempDir(), "key")
+					value := secret
+					if storage == "empty" {
+						value = " \n"
+					}
+					if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if storage == "file0644" {
+						if err := os.Chmod(path, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if storage == "symlink" {
+						link := path + ".link"
+						if err := os.Symlink(path, link); err != nil {
+							t.Fatal(err)
+						}
+						path = link
+					}
+					auth = &config.SourceAuthConfig{Mode: "file", Path: path}
+				}
+				cfg.Source.Auth = auth
+				got, ref, err := resolveConfiguredSourceSecret(context.Background(), cfg)
+				good := storage == "keychain" || storage == "file0600"
+				if good {
+					if err != nil || got != secret || strings.Contains(ref, secret) {
+						t.Fatalf("configured lookup ref=%s err=%v", ref, err)
+					}
+					if storage == "file0600" && ref != "file://"+auth.Path {
+						t.Fatal("incorrect file reference")
+					}
+				} else {
+					if err == nil || got != "" || strings.Contains(err.Error(), secret) {
+						t.Fatal("unsafe file was accepted or contents leaked")
+					}
+				}
+				if sourceMode == config.SourceModeAmnezia {
+					snapshot, err := refreshAmneziaSource(cfg)
+					if good {
+						if err != nil || snapshot.SourceURL != ref || snapshot.Raw != "" {
+							t.Fatalf("Amnezia file/keychain refresh %v", err)
+						}
+						if _, _, err := resolveAmneziaRuntime(context.Background(), cfg, snapshot.Profiles[0]); err != nil {
+							t.Fatal(err)
+						}
+					} else if err == nil {
+						t.Fatal("Amnezia refresh bypassed AuthStore refusal")
+					}
+				}
+			})
+		}
+	}
+}
+func TestUnifiedSecretRefreshCachesAreRedacted(t *testing.T) {
+	for _, sourceMode := range []string{config.SourceModeDirect, config.SourceModeProxy} {
+		for _, storage := range []string{"file", "keychain"} {
+			t.Run(sourceMode+"/"+storage, func(t *testing.T) {
+				fake := installAmneziaFake(t)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, amneziaTestURI) }))
+				defer server.Close()
+				secret := amneziaTestURI
+				if sourceMode == config.SourceModeProxy {
+					secret = server.URL + "/sensitive-token"
+				}
+				cfg := config.Default()
+				cfg.CacheDir = filepath.Join(t.TempDir(), "cache")
+				cfg.Source = config.SourceConfig{Mode: sourceMode, Auth: &config.SourceAuthConfig{Mode: storage, Record: "sample/key"}}
+				cfg.SubscriptionURL = ""
+				if storage == "file" {
+					path := filepath.Join(t.TempDir(), "key")
+					if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					cfg.Source.Auth.Path = path
+				} else {
+					fake.items["tun-wave/sample/key"] = secret
+				}
+				snap, err := refreshSource(cfg)
+				if err != nil || snap.Raw != "" || snap.SourceURL == secret || !strings.HasPrefix(snap.SourceURL, storage+"://") {
+					t.Fatalf("redacted refresh ref=%s err=%v", snap.SourceURL, err)
+				}
+				for _, name := range []string{"snapshot.json", "subscription.txt"} {
+					raw, err := os.ReadFile(filepath.Join(cfg.CacheDir, name))
+					if err != nil || bytes.Contains(raw, []byte(secret)) {
+						t.Fatal("source secret reached cache")
+					}
+				}
+			})
+		}
+	}
+}
+func TestAuthMigrateClearsPlaintextAndCachedRaw(t *testing.T) {
+	fake := installAmneziaFake(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := config.Default()
+	cfg.CacheDir = filepath.Join(dir, "cache")
+	cfg.Current = &config.CurrentConfig{Server: "phantombot", Profile: "us"}
+	cfg.Servers = map[string]config.ServerConfig{"phantombot": {Engine: &config.EngineConfig{Type: config.EngineVLESS}, Source: config.SourceConfig{Mode: config.SourceModeDirect, URL: amneziaTestURI}, CacheDir: cfg.CacheDir, Profiles: map[string]config.ProfileConfig{"us": {Selector: "USA"}}}}
+	if _, err := config.SaveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := subscription.SaveCache(cfg.CacheDir, subscription.CacheSnapshot{SourceURL: amneziaTestURI, Raw: amneziaTestURI}); err != nil {
+		t.Fatal(err)
+	}
+	runAmneziaCLI(t, 0, []string{amneziaTestURI}, "auth", "migrate", "--config", path)
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := loaded.Servers["phantombot"].Source
+	if source.URL != "" || source.Auth == nil || source.Auth.Mode != "keychain" || source.Auth.Record != "phantombot/key" || fake.items["tun-wave/phantombot/key"] != amneziaTestURI {
+		t.Fatal("migration did not store and rewrite source")
+	}
+	snap, err := subscription.LoadCache(cfg.CacheDir)
+	if err != nil || snap.Raw != "" || snap.SourceURL != "keychain://tun-wave/phantombot/key" {
+		t.Fatalf("migration failed to redact cache: %+v %v", snap, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(raw, []byte(amneziaTestURI)) {
+		t.Fatal("plaintext credential remains in config")
+	}
+	runAmneziaCLI(t, 0, []string{amneziaTestURI}, "auth", "migrate", "--config", path)
+}
+func TestAuthNonAmneziaServerLifecycle(t *testing.T) {
+	fake := installAmneziaFake(t)
+	amneziaStdin = strings.NewReader(amneziaTestURI)
+	runAmneziaCLI(t, 0, []string{amneziaTestURI}, "auth", "phantombot", "--stdin")
+	if fake.items["tun-wave/phantombot/key"] != amneziaTestURI {
+		t.Fatal("wrong server record")
+	}
+	runAmneziaCLI(t, 0, []string{amneziaTestURI}, "auth", "phantombot", "--check")
+	runAmneziaCLI(t, 0, []string{amneziaTestURI}, "auth", "phantombot", "--delete")
+	runAmneziaCLI(t, 1, []string{amneziaTestURI}, "auth", "phantombot", "--check")
+}

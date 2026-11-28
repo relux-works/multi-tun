@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"multi-tun/desktop/internal/anyconnect/openconnectcfg"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1377,5 +1378,115 @@ func TestAWGEngineValidation(t *testing.T) {
 	cfg.Servers["synthetic"].Engine.AWG = &AWGEngineConfig{SocksListen: "0.0.0.0"}
 	if err := cfg.validateExplicitServerEngines(); err == nil {
 		t.Fatal("server non-loopback settings admitted")
+	}
+}
+
+func unifiedConfigFixture() ProjectConfig {
+	cfg := Default()
+	cfg.Current = &CurrentConfig{Server: "amnezia", Profile: "us"}
+	cfg.Servers = map[string]ServerConfig{
+		"amnezia": {Engine: &EngineConfig{Type: EngineVLESSReality}, Source: SourceConfig{Mode: SourceModeDirect, URL: "vless://id@203.0.113.2:443"}, Profiles: map[string]ProfileConfig{"us": {Selector: "US"}, "de": {Selector: "DE"}}},
+		"mts":     {Engine: &EngineConfig{Type: EngineOpenConnect}, Source: SourceConfig{Mode: SourceModeOpenConnect}, OpenConnect: &OpenConnectServerConfig{ServerURL: "https://vpn.example", PAC: &openconnectcfg.PACConfig{Rewrites: []openconnectcfg.PACRewriteRule{{Host: "mybonus.mts.ru", Return: "DIRECT"}}}}, Profiles: map[string]ProfileConfig{"outside": {OpenConnect: &OpenConnectProfileConfig{Name: "Native Outside", Mode: "split-include"}}}},
+	}
+	return cfg
+}
+func TestUnifiedStackConfigValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stack []string
+		bad   bool
+	}{{"single", []string{"amnezia/us"}, false}, {"dual", []string{"mts/outside", "amnezia/us"}, false}, {"server", []string{"mts"}, false}, {"duplicate", []string{"amnezia/us", "amnezia/de"}, true}, {"unknown", []string{"unknown/us"}, true}, {"unknown profile", []string{"amnezia/missing"}, true}, {"empty", []string{""}, true}, {"space", []string{" "}, true}, {"control", []string{"mts/outside\n"}, true}, {"bad separator", []string{"mts//outside"}, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := unifiedConfigFixture()
+			cfg.Stack = tc.stack
+			cfg.OpenConnectConfigPath = "/tmp/legacy.json"
+			err := cfg.Validate()
+			if (err != nil) != tc.bad {
+				t.Fatalf("Validate %v: %v", tc.stack, err)
+			}
+		})
+	}
+}
+func TestUnifiedMixedServerEffectiveAndEngineLabels(t *testing.T) {
+	cfg := unifiedConfigFixture()
+	for _, current := range []CurrentConfig{{Server: "amnezia", Profile: "us"}, {Server: "mts", Profile: "outside"}} {
+		cfg.Current = &current
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		effective, selection, err := cfg.Effective(SelectionOptions{})
+		if err != nil || selection.Server != current.Server {
+			t.Fatalf("Effective: %+v %v", selection, err)
+		}
+		if current.Server == "mts" {
+			if effective.EngineType() != EngineOpenConnect || effective.SourceMode() != SourceModeOpenConnect || effective.OpenConnect == nil || effective.OpenConnect.ServerURL == "" {
+				t.Fatalf("bad OC effective: %+v", effective)
+			}
+		} else if effective.EngineType() != EngineSingbox {
+			t.Fatalf("alias was not normalized: %s", effective.EngineType())
+		}
+	}
+	for _, engine := range []string{EngineVLESS, EngineVLESSReality} {
+		cfg := unifiedConfigFixture()
+		srv := cfg.Servers["amnezia"]
+		srv.Engine.Type = engine
+		cfg.Servers["amnezia"] = srv
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.EngineType() != EngineSingbox || cfg.Servers["amnezia"].Engine.Type != engine {
+			t.Fatal("normalization lost the provider label")
+		}
+	}
+	// Every server is validated even when a different server is current.
+	cfg = unifiedConfigFixture()
+	srv := cfg.Servers["mts"]
+	srv.OpenConnect.PAC.Rewrites[0].Return = "DIRECT; evil()"
+	cfg.Servers["mts"] = srv
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("inactive server's unsafe PAC was ignored")
+	}
+}
+func TestUnifiedOpenConnectRelativePaths(t *testing.T) {
+	dir := t.TempDir()
+	cfg := unifiedConfigFixture()
+	cfg.OpenConnectConfigPath = "legacy.json"
+	srv := cfg.Servers["mts"]
+	srv.OpenConnect.CacheDir = "cache/overlay"
+	srv.OpenConnect.PAC = &openconnectcfg.PACConfig{File: "server.pac"}
+	srv.Profiles["outside"] = ProfileConfig{OpenConnect: &OpenConnectProfileConfig{PAC: &openconnectcfg.PACConfig{File: "profile.pac"}}}
+	cfg.Servers["mts"] = srv
+	cfg.resolveRelativePaths(dir)
+	got := cfg.Servers["mts"]
+	if cfg.OpenConnectConfigPath != filepath.Join(dir, "legacy.json") || got.OpenConnect.CacheDir != filepath.Join(dir, "cache/overlay") || got.OpenConnect.PAC.File != filepath.Join(dir, "server.pac") || got.Profiles["outside"].OpenConnect.PAC.File != filepath.Join(dir, "profile.pac") {
+		t.Fatal("relative OpenConnect paths unresolved")
+	}
+}
+func TestUnifiedSourceAuthValidation(t *testing.T) {
+	for _, mode := range []string{SourceModeDirect, SourceModeProxy, SourceModeAmnezia} {
+		for _, tc := range []struct {
+			auth SourceAuthConfig
+			bad  bool
+		}{{SourceAuthConfig{Mode: "keychain", Record: "sample/key"}, false}, {SourceAuthConfig{Mode: "file", Path: "/tmp/secret"}, false}, {SourceAuthConfig{Mode: "keychain"}, true}, {SourceAuthConfig{Mode: "file"}, true}, {SourceAuthConfig{Mode: "unknown", Record: "sample/key"}, true}, {SourceAuthConfig{Mode: "keychain", Record: "bad\nrecord"}, true}} {
+			cfg := Default()
+			cfg.Source = SourceConfig{Mode: mode, Auth: &tc.auth}
+			cfg.SubscriptionURL = ""
+			if err := cfg.Validate(); (err != nil) != tc.bad {
+				t.Fatalf("mode=%s auth=%+v err=%v", mode, tc.auth, err)
+			}
+		}
+	}
+}
+
+func TestConfiguredStackDoesNotRequireCurrentSelection(t *testing.T) {
+	cfg := unifiedConfigFixture()
+	cfg.Current = nil
+	cfg.Stack = []string{"mts/outside", "amnezia/us"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("stack without legacy current selection: %v", err)
+	}
+	effective, sel, err := cfg.Effective(SelectionOptions{})
+	if err != nil || sel.Server != "mts" || sel.Profile != "outside" || effective.EngineType() != EngineOpenConnect {
+		t.Fatalf("effective stack default %+v %v", sel, err)
 	}
 }

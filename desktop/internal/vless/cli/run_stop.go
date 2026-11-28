@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
+	"multi-tun/desktop/internal/stack"
 	"multi-tun/desktop/internal/vless/amnezia"
 	"multi-tun/desktop/internal/vless/awg"
 	"multi-tun/desktop/internal/vless/config"
@@ -26,6 +27,8 @@ import (
 )
 
 type startOptions struct {
+	routingFragment *stack.RoutingFragment
+	renderOptions   *singbox.RenderOptions
 	configPath      string
 	serverName      string
 	configProfile   string
@@ -245,6 +248,9 @@ func (a *App) runRun(args []string) int {
 }
 
 func (a *App) runStartCommand(commandName string, args []string) int {
+	if handled, code := a.maybeStackStart(args); handled {
+		return code
+	}
 	options, exitCode, err := a.parseStartOptions(commandName, args, true)
 	if err != nil {
 		return exitCode
@@ -287,26 +293,7 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 		return 1
 	}
 
-	a.applyFailClosedBeforeStart(cfg)
-	started, err := startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
-		Mode:              cfg.NetworkMode(),
-		Engine:            prepared.engine,
-		BypassSuffixes:    cfg.BypassSuffixes(),
-		InterfaceName:     cfg.TunInterfaceName(),
-		TunAddresses:      cfg.TunAddresses(),
-		OverlayDNSActive:  prepared.renderOptions.OverlayDNS != nil,
-		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
-		SystemDNSServers:  systemDNSServers(cfg),
-		PrivilegedLaunch:  cfg.LaunchOrDefault(),
-		Sidecars:          prepared.sidecars,
-		LogMaxLines:       cfg.LogMaxLines(),
-		ResolvedServer:    prepared.resolvedServer(),
-		ResolvedAlias:     prepared.resolvedAlias(),
-		ResolvedName:      prepared.resolvedName(),
-		ResolvedID:        prepared.resolvedID(),
-		ResolutionReason:  prepared.resolution.Reason,
-		SnapshotFetchedAt: prepared.snapshotFetchedAt,
-	})
+	started, err := a.startPrepared(cfg, prepared)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "%s failed: %v\n", commandName, err)
 		return 1
@@ -523,8 +510,11 @@ func (a *App) runStop(args []string) int {
 	force := fs.Bool("force", false, "Escalate from SIGTERM to SIGKILL if sing-box does not stop in time")
 	timeout := fs.Duration("timeout", 5*time.Second, "How long to wait after SIGTERM before failing or forcing")
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderStackFlags(args)); err != nil {
 		return 2
+	}
+	if handled, code := a.maybeStackStop(*configPath, *serverName, fs.Args(), *force, *timeout); handled {
+		return code
 	}
 	selectionOptions, err := commandServerSelection(*serverName, fs.Args())
 	if err != nil {
@@ -566,6 +556,8 @@ func (a *App) runStop(args []string) int {
 }
 
 type preparedStart struct {
+	tunAddresses      []string
+	systemServers     []string
 	profile           model.Profile
 	engine            string
 	target            string
@@ -641,7 +633,12 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	}
 	profile := resolution.Profile
 
-	renderOptions := resolveRenderOptionsCLI(cfg.NetworkMode())
+	var renderOptions singbox.RenderOptions
+	if options.renderOptions != nil {
+		renderOptions = *options.renderOptions
+	} else {
+		renderOptions = resolveRenderOptionsCLI(cfg.NetworkMode())
+	}
 	target := cfg.SingboxConfigPath()
 	if options.outputPath != "" {
 		target = options.outputPath
@@ -717,11 +714,19 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	if err != nil {
 		return preparedStart{}, err
 	}
+	var tunAddresses []string
+	if options.routingFragment != nil {
+		data, tunAddresses, err = applyCoordinatedRouting(data, *options.routingFragment)
+		if err != nil {
+			return preparedStart{}, err
+		}
+	}
 	if err := singbox.Write(target, data); err != nil {
 		return preparedStart{}, err
 	}
 
 	prepared := preparedStart{
+		tunAddresses:     tunAddresses,
 		profile:          profile,
 		engine:           engine,
 		target:           target,
@@ -1061,6 +1066,9 @@ func sessionTargetsForConfig(configPath, serverName string) ([]sessionTarget, er
 	targets := make([]sessionTarget, 0, len(cfg.Servers))
 	seen := map[string]struct{}{}
 	for name, server := range cfg.Servers {
+		if isOpenConnectServerCLI(server) {
+			continue
+		}
 		cacheDir := firstNonEmptyLocal(server.CacheDir, cfg.CacheDir)
 		if cacheDir == "" {
 			continue
@@ -1075,7 +1083,7 @@ func sessionTargetsForConfig(configPath, serverName string) ([]sessionTarget, er
 			launch:   launch,
 		})
 	}
-	if len(targets) == 0 {
+	if len(targets) == 0 && len(cfg.Servers) == 0 {
 		return nil, errors.New("no vless session cache directories are configured")
 	}
 	return targets, nil
@@ -1144,4 +1152,37 @@ func overlayDNSDomains(options singbox.RenderOptions) []string {
 		return nil
 	}
 	return append([]string(nil), options.OverlayDNS.Domains...)
+}
+
+// startPrepared is shared by legacy start and the unified provider adapter.
+func (a *App) startPrepared(cfg config.ProjectConfig, prepared preparedStart) (session.CurrentSession, error) {
+	addresses := cfg.TunAddresses()
+	if len(prepared.tunAddresses) > 0 {
+		addresses = prepared.tunAddresses
+	}
+	servers := systemDNSServers(cfg)
+	if len(prepared.systemServers) > 0 {
+		servers = prepared.systemServers
+	}
+
+	a.applyFailClosedBeforeStart(cfg)
+	return startSessionFunc(cfg.CacheDir, prepared.target, prepared.profile, session.StartOptions{
+		Mode:              cfg.NetworkMode(),
+		Engine:            prepared.engine,
+		BypassSuffixes:    cfg.BypassSuffixes(),
+		InterfaceName:     cfg.TunInterfaceName(),
+		TunAddresses:      addresses,
+		OverlayDNSActive:  prepared.renderOptions.OverlayDNS != nil,
+		OverlayDNSDomains: overlayDNSDomains(prepared.renderOptions),
+		SystemDNSServers:  servers,
+		PrivilegedLaunch:  cfg.LaunchOrDefault(),
+		Sidecars:          prepared.sidecars,
+		LogMaxLines:       cfg.LogMaxLines(),
+		ResolvedServer:    prepared.resolvedServer(),
+		ResolvedAlias:     prepared.resolvedAlias(),
+		ResolvedName:      prepared.resolvedName(),
+		ResolvedID:        prepared.resolvedID(),
+		ResolutionReason:  prepared.resolution.Reason,
+		SnapshotFetchedAt: prepared.snapshotFetchedAt,
+	})
 }

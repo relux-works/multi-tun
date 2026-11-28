@@ -31,6 +31,11 @@ func (a *App) runStatus(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if *profileSelector == "" && *transport == "" {
+		if handled, code := a.maybeStackStatus(*configPath, *serverName, *profileName, fs.Args()); handled {
+			return code
+		}
+	}
 	explicitSelection := statusSelectionExplicit(*serverName, *profileName, *profileSelector, *transport, fs.Args())
 	selectionOptions, err := commandServerProfileSelection(*serverName, *profileName, *profileSelector, fs.Args())
 	if err != nil {

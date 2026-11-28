@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"multi-tun/desktop/internal/anyconnect/openconnectcfg"
 )
 
 const (
@@ -110,6 +112,7 @@ type ClientMimicry struct {
 }
 
 type ConnectOptions struct {
+	GatewayIPs          []string
 	Server              string
 	Profile             string
 	Auth                string
@@ -121,6 +124,8 @@ type ConnectOptions struct {
 	VPNNameservers      []string
 	PACURL              string
 	PACScript           string
+	PACRewrites         []openconnectcfg.PACRewriteRule
+	SuppressReconcile   bool
 	Credentials         Credentials
 	ClientMimicry       ClientMimicry
 	AuthFallbackServers []string
@@ -350,6 +355,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	command := buildOpenConnectCommandPreview(ocPath, server, scriptExec, pidFilePath, privilegedMode, options.ClientMimicry)
 
 	current := CurrentSession{
+		GatewayIPs:     append([]string(nil), options.GatewayIPs...),
 		ID:             sessionID,
 		StartedAt:      now,
 		LogPath:        logPath,
@@ -395,7 +401,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		return ConnectResult{}, err
 	}
 
-	if resolveTunWaveForReconcile() != "" {
+	if !options.SuppressReconcile && resolveTunWaveForReconcile() != "" {
 		if parsed, perr := parseHTTPSURL(server); perr == nil && parsed.Hostname() != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			if addrs, lerr := net.DefaultResolver.LookupIPAddr(ctx, parsed.Hostname()); lerr == nil {
@@ -419,19 +425,23 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	auth, err := authenticateOpenConnect(server, options, ocPath, logFile, options.ProgressWriter)
 	if err != nil {
 		_ = ClearCurrent(cacheDir)
-		_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
+		if !options.SuppressReconcile {
+			_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
+		}
 		return ConnectResult{}, formatConnectError(err, logPath)
 	}
 	if err := rejectMatchingUntrackedOpenConnectSession(server); err != nil {
 		_ = ClearCurrent(cacheDir)
-		_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
+		if !options.SuppressReconcile {
+			_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
+		}
 		return ConnectResult{}, formatConnectError(err, logPath)
 	}
 	if _, resolved, ok := strings.Cut(auth.Resolve, ":"); ok {
 		if ip := net.ParseIP(strings.Trim(resolved, "[]")); ip != nil {
 			prevLen := len(current.GatewayIPs)
 			current.GatewayIPs = uniqueStrings(append(current.GatewayIPs, ip.String()))
-			if len(current.GatewayIPs) != prevLen && resolveTunWaveForReconcile() != "" {
+			if !options.SuppressReconcile && len(current.GatewayIPs) != prevLen && resolveTunWaveForReconcile() != "" {
 				current.Connecting = true
 				current.PID = os.Getpid()
 				if err := SaveCurrent(cacheDir, current); err == nil {
@@ -466,7 +476,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	if err != nil {
 		current.PID = pid
 		current.Interface = iface
-		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current, options.SuppressReconcile)
 		return ConnectResult{}, formatConnectError(withFailedStartCleanupError(err, cleanupErr), logPath)
 	}
 
@@ -479,7 +489,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 
 	pid, err = waitForStableStart(current, 1500*time.Millisecond)
 	if err != nil {
-		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current, options.SuppressReconcile)
 		return ConnectResult{}, formatConnectError(withFailedStartCleanupError(err, cleanupErr), logPath)
 	}
 	if pid > 0 {
@@ -494,7 +504,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	if connectConvergenceExpectationsForSession(current).required() {
 		writeProgressf(options.ProgressWriter, "phase: applying split-include routes and dns")
 		if err := waitForPostConnectConvergence(current, postConnectTimeout); err != nil {
-			cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+			cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current, options.SuppressReconcile)
 			return ConnectResult{}, formatConnectError(withFailedStartCleanupError(err, cleanupErr), logPath)
 		}
 	}
@@ -506,15 +516,17 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 	}
 
 	if err := SaveMetadata(current); err != nil {
-		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current, options.SuppressReconcile)
 		return ConnectResult{}, withFailedStartCleanupError(err, cleanupErr)
 	}
 	if err := SaveCurrent(cacheDir, current); err != nil {
-		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current)
+		cleanupErr := cleanupFailedOpenConnectAttempt(cacheDir, current, options.SuppressReconcile)
 		return ConnectResult{}, withFailedStartCleanupError(err, cleanupErr)
 	}
 	writeProgressf(options.ProgressWriter, "phase: connected pid=%d interface=%s", current.PID, firstNonEmpty(current.Interface, "unknown"))
-	_ = reconcileTunWaveOpenConnect(context.Background(), "openconnect-start")
+	if !options.SuppressReconcile {
+		_ = reconcileTunWaveOpenConnect(context.Background(), "openconnect-start")
+	}
 
 	return ConnectResult{
 		SessionID:      current.ID,
@@ -4181,7 +4193,7 @@ func elevatedCommand(mode string, args ...string) (string, []string) {
 	return "sudo", append([]string{"-n"}, args...)
 }
 
-func cleanupFailedOpenConnectAttempt(cacheDir string, current CurrentSession) error {
+func cleanupFailedOpenConnectAttempt(cacheDir string, current CurrentSession, suppressReconcile ...bool) error {
 	cleanupErr := cleanupFailedOpenConnectStart(current)
 	if cleanupErr != nil {
 		return errors.Join(cleanupErr, preserveFailedOpenConnectAttempt(cacheDir, current))
@@ -4195,7 +4207,9 @@ func cleanupFailedOpenConnectAttempt(cacheDir string, current CurrentSession) er
 		}
 	}
 	clearErr := clearCurrentOpenConnectAttempt(cacheDir, current.ID)
-	_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
+	if len(suppressReconcile) == 0 || !suppressReconcile[0] {
+		_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
+	}
 	return errors.Join(
 		wrapOptionalError("remove failed-start pid file", removeErr),
 		wrapOptionalError("clear failed current session", clearErr),
