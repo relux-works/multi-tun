@@ -120,6 +120,9 @@ func (s *KeychainStore) command(ctx context.Context, clipboard bool, args []stri
 }
 
 func itemNotFound(r CommandResult) bool {
+	if interactionNotAllowed(r) {
+		return false
+	}
 	stderr := strings.ToLower(string(r.Stderr))
 	return r.ExitCode == 44 || strings.Contains(stderr, "could not be found in the keychain") ||
 		strings.Contains(stderr, "seckeychainsearchcopynext")
