@@ -1280,3 +1280,102 @@ func TestMergeSourceConfigIsolatesAmneziaAndProxyFields(t *testing.T) {
 		t.Fatalf("effectiveProxy.Source.Keychain = %+v, want nil for proxy server", effectiveProxy.Source.Keychain)
 	}
 }
+
+func TestAWGEngineDefaultsAndArtifacts(t *testing.T) {
+	cfg := Default()
+	cfg.Engine = &EngineConfig{Type: EngineAWG}
+	cfg.Source = SourceConfig{Mode: SourceModeAmnezia}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EngineType() != EngineAWG || cfg.AWGSocksListen() != "127.0.0.1" || cfg.AWGSocksPort() != 20809 || cfg.AWGMTU() != 1280 {
+		t.Fatal("incorrect AWG defaults")
+	}
+	if got := strings.Join(cfg.AWGProcessNames(), ","); got != "tun-wave,vless-tun" {
+		t.Fatalf("process names = %s", got)
+	}
+	for _, tc := range []struct{ input, want string }{{"/tmp/sing-box.json", "/tmp/awg.json"}, {"/tmp/singbox-us.json", "/tmp/awg-us.json"}, {"/tmp/frontend.json", "/tmp/frontend-awg.json"}} {
+		cfg.Artifacts.SingboxConfigPath = tc.input
+		if got := cfg.AWGConfigPath(); got != tc.want {
+			t.Fatalf("AWGConfigPath = %s, want %s", got, tc.want)
+		}
+	}
+	cfg.Artifacts.AWGConfigPath = "custom/awg.json"
+	cfg.resolveRelativePaths("/tmp/config")
+	if cfg.AWGConfigPath() != "/tmp/config/custom/awg.json" {
+		t.Fatal("relative AWG path not resolved")
+	}
+}
+
+func TestAWGEngineMergingAndCloneIsolation(t *testing.T) {
+	base := &EngineConfig{Type: EngineAWG, AWG: &AWGEngineConfig{SocksListen: "127.0.0.1", SocksPort: 21809, MTU: 1400, ProcessNames: []string{"base"}}}
+	override := &EngineConfig{AWG: &AWGEngineConfig{SocksListen: "::1", SocksPort: 22809, MTU: 1280, ProcessNames: []string{"custom"}}}
+	merged := mergeEngineConfig(base, override)
+	cfg := Default()
+	cfg.Engine = merged
+	if cfg.AWGSocksListen() != "::1" || cfg.AWGSocksPort() != 22809 || cfg.AWGMTU() != 1280 || strings.Join(cfg.AWGProcessNames(), ",") != "custom" {
+		t.Fatal("AWG overrides not merged")
+	}
+	merged.AWG.ProcessNames[0] = "mutated"
+	if base.AWG.ProcessNames[0] != "base" || override.AWG.ProcessNames[0] != "custom" {
+		t.Fatal("merge aliases input process names")
+	}
+	inherited := mergeEngineConfig(base, &EngineConfig{AWG: &AWGEngineConfig{}})
+	if inherited.AWG.SocksPort != 21809 || inherited.AWG.MTU != 1400 {
+		t.Fatal("zero overrides erased inherited values")
+	}
+	cloned := cloneEngineConfig(base)
+	cloned.AWG.ProcessNames[0] = "changed"
+	if base.AWG.ProcessNames[0] != "base" {
+		t.Fatal("clone aliases process names")
+	}
+	artifacts := mergeArtifactsConfig(ArtifactsConfig{AWGConfigPath: "base.json"}, &ArtifactsConfig{AWGConfigPath: "override.json"})
+	if artifacts.AWGConfigPath != "override.json" {
+		t.Fatal("artifact override lost")
+	}
+	if got := mergeArtifactsConfig(artifacts, &ArtifactsConfig{}); got.AWGConfigPath != "override.json" {
+		t.Fatal("empty artifact override erased path")
+	}
+	// Invalid nonzero overrides must survive merging so validation can refuse them.
+	invalid := mergeEngineConfig(base, &EngineConfig{AWG: &AWGEngineConfig{SocksPort: -1, MTU: -1}})
+	if invalid.AWG.SocksPort != -1 || invalid.AWG.MTU != -1 {
+		t.Fatal("merge silently repaired invalid settings")
+	}
+}
+
+func TestAWGEngineValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value AWGEngineConfig
+		valid bool
+	}{
+		{"defaults", AWGEngineConfig{}, true}, {"IPv6", AWGEngineConfig{SocksListen: "::1", SocksPort: 65535, MTU: 576}, true},
+		{"wildcard", AWGEngineConfig{SocksListen: "0.0.0.0"}, false}, {"LAN", AWGEngineConfig{SocksListen: "192.168.1.1"}, false},
+		{"IPv6 wildcard", AWGEngineConfig{SocksListen: "::"}, false}, {"hostname", AWGEngineConfig{SocksListen: "localhost"}, false},
+		{"negative port", AWGEngineConfig{SocksPort: -1}, false}, {"large port", AWGEngineConfig{SocksPort: 65536}, false},
+		{"small MTU", AWGEngineConfig{MTU: 575}, false}, {"large MTU", AWGEngineConfig{MTU: 65536}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Source = SourceConfig{Mode: SourceModeAmnezia}
+			cfg.Engine = &EngineConfig{Type: EngineAWG, AWG: &tc.value}
+			err := cfg.Validate()
+			if (err == nil) != tc.valid {
+				t.Fatalf("Validate = %v, valid=%v", err, tc.valid)
+			}
+		})
+	}
+	cfg := Default()
+	cfg.Servers = map[string]ServerConfig{"synthetic": {Engine: &EngineConfig{Type: EngineAWG}, Artifacts: &ArtifactsConfig{AWGConfigPath: "awg.json"}}}
+	if err := cfg.validateExplicitServerEngines(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.resolveRelativePaths("/tmp/config")
+	if cfg.Servers["synthetic"].Artifacts.AWGConfigPath != "/tmp/config/awg.json" {
+		t.Fatal("server AWG artifact path not resolved")
+	}
+	cfg.Servers["synthetic"].Engine.AWG = &AWGEngineConfig{SocksListen: "0.0.0.0"}
+	if err := cfg.validateExplicitServerEngines(); err == nil {
+		t.Fatal("server non-loopback settings admitted")
+	}
+}

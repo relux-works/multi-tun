@@ -2,8 +2,10 @@ package singbox
 
 import (
 	"encoding/json"
+	"multi-tun/desktop/internal/core/vpncore"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"multi-tun/desktop/internal/vless/config"
@@ -783,5 +785,91 @@ func TestBuildInboundsRendersTunStackOnlyWhenSet(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("stack %q rendered %#v", tc.stack, got)
 		}
+	}
+}
+
+// These tests validate the closed frontend schema and all three loop protections.
+// They do not start sing-box, an OS TUN, or an AWG peer.
+func TestRenderAWGFrontendLoopProtection(t *testing.T) {
+	for _, tc := range []struct{ name, host, cidr string }{{"IPv4", "192.0.2.42", "192.0.2.42/32"}, {"IPv6", "2001:db8::42", "2001:db8::42/128"}, {"domain", "peer.example", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Engine = &config.EngineConfig{Type: config.EngineAWG}
+			profile := model.Profile{Host: tc.host, Port: 51820}
+			options := RenderOptions{}
+			if tc.cidr == "" {
+				options.OverlayDNS = &OverlayDNS{Domains: []string{"local.test"}, Nameservers: []string{"192.0.2.53"}}
+			}
+			data, err := RenderAWGFrontendWithOptions(cfg, profile, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+				t.Fatalf("closed schema refused AWG frontend: %v", err)
+			}
+			var root map[string]any
+			if err := json.Unmarshal(data, &root); err != nil {
+				t.Fatal(err)
+			}
+			proxy := root["outbounds"].([]any)[0].(map[string]any)
+			if proxy["type"] != "socks" || proxy["tag"] != "proxy" || proxy["server"] != "127.0.0.1" || proxy["server_port"] != float64(20809) || proxy["version"] != "5" {
+				t.Fatalf("unexpected SOCKS outbound: %v", proxy)
+			}
+			route := root["route"].(map[string]any)
+			rules := route["rules"].([]any)
+			first := rules[0].(map[string]any)
+			names := first["process_name"].([]any)
+			if first["outbound"] != "direct" || !slices.Contains(names, any("tun-wave")) || !slices.Contains(names, any("vless-tun")) {
+				t.Fatal("sidecar process bypass missing")
+			}
+			tun := root["inbounds"].([]any)[0].(map[string]any)
+			if tc.cidr != "" {
+				excludes, ok := tun["route_exclude_address"].([]any)
+				if !ok || !slices.Contains(excludes, any(tc.cidr)) {
+					t.Fatal("upstream route exclusion missing")
+				}
+				sets := route["rule_set"].([]any)
+				found := false
+				for _, item := range sets {
+					set := item.(map[string]any)
+					if set["tag"] == "upstream-direct" {
+						found = true
+						if set["type"] != "inline" {
+							t.Fatal("upstream set is not inline")
+						}
+						cidrs := set["rules"].([]any)[0].(map[string]any)["ip_cidr"].([]any)
+						if !slices.Contains(cidrs, any(tc.cidr)) {
+							t.Fatal("upstream rule set excludes wrong endpoint")
+						}
+					}
+				}
+				if !found {
+					t.Fatal("upstream-direct rule set missing")
+				}
+				direct := false
+				for _, item := range rules {
+					r := item.(map[string]any)
+					sets, ok := r["rule_set"].([]any)
+					if ok && slices.Contains(sets, any("upstream-direct")) && r["outbound"] == "direct" {
+						direct = true
+					}
+				}
+				if !direct {
+					t.Fatal("upstream direct routing missing")
+				}
+			} else {
+				dns := root["dns"].(map[string]any)
+				direct := false
+				for _, item := range dns["servers"].([]any) {
+					server := item.(map[string]any)
+					if server["tag"] == "dns-direct" && server["type"] == "local" && server["detour"] == "direct" {
+						direct = true
+					}
+				}
+				if !direct {
+					t.Fatal("endpoint hostname must resolve directly")
+				}
+			}
+		})
 	}
 }

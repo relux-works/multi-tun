@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,6 +31,7 @@ const (
 
 	EngineSingbox = "sing-box"
 	EngineXray    = "xray"
+	EngineAWG     = "amnezia-awg"
 
 	LaunchModeAuto    = "auto"
 	LaunchModeSudo    = "sudo"
@@ -198,6 +200,14 @@ type RoutingConfig struct {
 type EngineConfig struct {
 	Type string            `json:"type,omitempty"`
 	Xray *XrayEngineConfig `json:"xray,omitempty"`
+	AWG  *AWGEngineConfig  `json:"awg,omitempty"`
+}
+
+type AWGEngineConfig struct {
+	SocksListen  string   `json:"socks_listen,omitempty"`
+	SocksPort    int      `json:"socks_port,omitempty"`
+	ProcessNames []string `json:"process_names,omitempty"`
+	MTU          int      `json:"mtu,omitempty"`
 }
 
 type XrayEngineConfig struct {
@@ -237,6 +247,7 @@ type LoggingConfig struct {
 type ArtifactsConfig struct {
 	SingboxConfigPath string `json:"singbox_config_path,omitempty"`
 	XrayConfigPath    string `json:"xray_config_path,omitempty"`
+	AWGConfigPath     string `json:"awg_config_path,omitempty"`
 }
 
 type LaunchConfig struct {
@@ -639,18 +650,36 @@ func nonEmptyStrings(values []string) []string {
 }
 
 func (c ProjectConfig) validateExplicitServerEngines() error {
+	if c.Engine != nil {
+		if err := validateAWGEngineConfig(c.Engine.AWG); err != nil {
+			return err
+		}
+	}
+
 	if len(c.Servers) == 0 {
 		return nil
 	}
 
 	for name, server := range c.Servers {
+		for _, profile := range server.Profiles {
+			if profile.Engine != nil {
+				if err := validateAWGEngineConfig(profile.Engine.AWG); err != nil {
+					return err
+				}
+			}
+		}
+		if server.Engine != nil {
+			if err := validateAWGEngineConfig(server.Engine.AWG); err != nil {
+				return err
+			}
+		}
 		if server.Engine == nil || strings.TrimSpace(server.Engine.Type) == "" {
-			return fmt.Errorf("servers.%s.engine.type is required; set it to one of: %s, %s. Example: \"servers\": { %q: { \"engine\": { \"type\": %q } } }. Use %q for the Xray sidecar engine", name, EngineSingbox, EngineXray, name, EngineSingbox, EngineXray)
+			return fmt.Errorf("servers.%s.engine.type is required; set it to one of: %s, %s, %s. Example: \"servers\": { %q: { \"engine\": { \"type\": %q } } }. Use %q for the Xray sidecar engine", name, EngineSingbox, EngineXray, EngineAWG, name, EngineSingbox, EngineXray)
 		}
 		switch normalizeEngineType(server.Engine.Type) {
-		case EngineSingbox, EngineXray:
+		case EngineSingbox, EngineXray, EngineAWG:
 		default:
-			return fmt.Errorf("servers.%s.engine.type must be one of: %s, %s", name, EngineSingbox, EngineXray)
+			return fmt.Errorf("servers.%s.engine.type must be one of: %s, %s, %s", name, EngineSingbox, EngineXray, EngineAWG)
 		}
 	}
 	return nil
@@ -714,9 +743,12 @@ func (c ProjectConfig) validateFlat() error {
 		return errors.New("artifacts.singbox_config_path is required")
 	}
 	switch c.EngineType() {
-	case EngineSingbox, EngineXray:
+	case EngineSingbox, EngineXray, EngineAWG:
 	default:
-		return errors.New("engine.type must be one of: sing-box, xray")
+		return errors.New("engine.type must be one of: sing-box, xray, amnezia-awg")
+	}
+	if err := validateAWGEngineConfig(c.EngineConfig().AWG); err != nil {
+		return err
 	}
 	if c.EngineType() == EngineXray && c.XraySocksPort() <= 0 {
 		return errors.New("engine.xray.socks_port must be positive")
@@ -1060,6 +1092,9 @@ func mergeArtifactsConfig(base ArtifactsConfig, override *ArtifactsConfig) Artif
 		return base
 	}
 	result := base
+	if path := strings.TrimSpace(override.AWGConfigPath); path != "" {
+		result.AWGConfigPath = path
+	}
 	if path := strings.TrimSpace(override.SingboxConfigPath); path != "" {
 		result.SingboxConfigPath = path
 	}
@@ -1117,6 +1152,7 @@ func mergeEngineConfig(base *EngineConfig, override *EngineConfig) *EngineConfig
 		result.Type = engineType
 	}
 	result.Xray = mergeXrayEngineConfig(result.Xray, override.Xray)
+	result.AWG = mergeAWGEngineConfig(result.AWG, override.AWG)
 	return result
 }
 
@@ -1268,6 +1304,9 @@ func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
 	if path := strings.TrimSpace(c.Artifacts.XrayConfigPath); path != "" && !filepath.IsAbs(path) {
 		c.Artifacts.XrayConfigPath = filepath.Join(baseDir, path)
 	}
+	if path := strings.TrimSpace(c.Artifacts.AWGConfigPath); path != "" && !filepath.IsAbs(path) {
+		c.Artifacts.AWGConfigPath = filepath.Join(baseDir, path)
+	}
 	if c.Render != nil {
 		if path := strings.TrimSpace(c.Render.OutputPath); path != "" && !filepath.IsAbs(path) {
 			c.Render.OutputPath = filepath.Join(baseDir, path)
@@ -1278,6 +1317,9 @@ func (c *ProjectConfig) resolveRelativePaths(baseDir string) {
 			server.CacheDir = filepath.Join(baseDir, server.CacheDir)
 		}
 		if server.Artifacts != nil {
+			if path := strings.TrimSpace(server.Artifacts.AWGConfigPath); path != "" && !filepath.IsAbs(path) {
+				server.Artifacts.AWGConfigPath = filepath.Join(baseDir, path)
+			}
 			if path := strings.TrimSpace(server.Artifacts.SingboxConfigPath); path != "" && !filepath.IsAbs(path) {
 				server.Artifacts.SingboxConfigPath = filepath.Join(baseDir, path)
 			}
@@ -1844,6 +1886,7 @@ func cloneEngineConfig(value *EngineConfig) *EngineConfig {
 	return &EngineConfig{
 		Type: strings.TrimSpace(value.Type),
 		Xray: cloneXrayEngineConfig(value.Xray),
+		AWG:  cloneAWGEngineConfig(value.AWG),
 	}
 }
 
@@ -1919,4 +1962,107 @@ func inferSourceMode(sourceURL string) string {
 
 func defaultRenderMode() string {
 	return RenderModeTun
+}
+
+func validateAWGEngineConfig(value *AWGEngineConfig) error {
+	if value == nil {
+		return nil
+	}
+	if value.SocksListen != "" {
+		addr, err := netip.ParseAddr(value.SocksListen)
+		if err != nil || !addr.IsLoopback() {
+			return errors.New("engine.awg.socks_listen must be a loopback IP")
+		}
+	}
+	if value.SocksPort != 0 && (value.SocksPort < 1 || value.SocksPort > 65535) {
+		return errors.New("engine.awg.socks_port must be between 1 and 65535")
+	}
+	if value.MTU != 0 && (value.MTU < 576 || value.MTU > 65535) {
+		return errors.New("engine.awg.mtu must be between 576 and 65535")
+	}
+	return nil
+}
+
+func cloneAWGEngineConfig(value *AWGEngineConfig) *AWGEngineConfig {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	result.ProcessNames = cloneStrings(value.ProcessNames)
+	return &result
+}
+
+func mergeAWGEngineConfig(base, override *AWGEngineConfig) *AWGEngineConfig {
+	result := cloneAWGEngineConfig(base)
+	if override == nil {
+		return result
+	}
+	if result == nil {
+		result = &AWGEngineConfig{}
+	}
+	if override.SocksListen != "" {
+		result.SocksListen = override.SocksListen
+	}
+	if override.SocksPort != 0 {
+		result.SocksPort = override.SocksPort
+	}
+	if override.MTU != 0 {
+		result.MTU = override.MTU
+	}
+	if override.ProcessNames != nil {
+		result.ProcessNames = cloneStrings(override.ProcessNames)
+	}
+	return result
+}
+
+func (c ProjectConfig) AWGConfigPath() string {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.AWGConfigPath()
+	}
+	if path := strings.TrimSpace(c.Artifacts.AWGConfigPath); path != "" {
+		return path
+	}
+	path := c.SingboxConfigPath()
+	if path == "" {
+		return ""
+	}
+	base := filepath.Base(path)
+	switch {
+	case strings.HasPrefix(base, "sing-box"):
+		base = "awg" + strings.TrimPrefix(base, "sing-box")
+	case strings.HasPrefix(base, "singbox"):
+		base = "awg" + strings.TrimPrefix(base, "singbox")
+	default:
+		ext := filepath.Ext(base)
+		base = strings.TrimSuffix(base, ext) + "-awg" + ext
+	}
+	return filepath.Join(filepath.Dir(path), base)
+}
+func (c ProjectConfig) AWGSocksListen() string {
+	value := c.EngineConfig().AWG
+	if value != nil && value.SocksListen != "" {
+		return value.SocksListen
+	}
+	return "127.0.0.1"
+}
+func (c ProjectConfig) AWGSocksPort() int {
+	value := c.EngineConfig().AWG
+	if value != nil && value.SocksPort != 0 {
+		return value.SocksPort
+	}
+	return 20809
+}
+func (c ProjectConfig) AWGProcessNames() []string {
+	value := c.EngineConfig().AWG
+	if value != nil && value.ProcessNames != nil {
+		return normalizeStrings(value.ProcessNames)
+	}
+	return []string{"tun-wave", "vless-tun"}
+}
+func (c ProjectConfig) AWGMTU() int {
+	value := c.EngineConfig().AWG
+	if value != nil && value.MTU != 0 {
+		return value.MTU
+	}
+	return 1280
 }

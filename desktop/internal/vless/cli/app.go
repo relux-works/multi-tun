@@ -50,6 +50,8 @@ func (a *App) Run(args []string) int {
 		return a.runSetup(args[1:])
 	case "auth":
 		return a.runAuth(args[1:])
+	case "_awg-proxy":
+		return a.runAWGProxy(args[1:])
 	case "init":
 		return a.runInit(args[1:])
 	case "refresh":
@@ -355,6 +357,9 @@ func (a *App) runRender(args []string) int {
 	fmt.Fprintf(a.stdout, "engine: %s\n", prepared.engine)
 	if prepared.xrayTarget != "" {
 		fmt.Fprintf(a.stdout, "rendered_xray: %s\n", prepared.xrayTarget)
+	}
+	if prepared.awgTarget != "" {
+		fmt.Fprintf(a.stdout, "rendered_awg: %s\n", prepared.awgTarget)
 	}
 	fmt.Fprintf(a.stdout, "rendered %s using profile %s (%s)\n", prepared.target, prepared.profile.DisplayName(), prepared.profile.ID)
 	return 0

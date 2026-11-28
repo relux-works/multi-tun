@@ -16,6 +16,7 @@ import (
 
 	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/amnezia"
+	"multi-tun/desktop/internal/vless/awg"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/session"
@@ -133,6 +134,11 @@ func snapshotFiles(paths ...string) ([]fileSnapshot, error) {
 func restoreFiles(snaps []fileSnapshot) error {
 	var errs []error
 	for _, s := range snaps {
+		if !s.existed {
+			if _, err := readFileCLI(s.path); errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+		}
 		if err := restoreRenderedTarget(s.path, s.data, s.existed); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", s.path, err))
 		}
@@ -316,6 +322,9 @@ func (a *App) runStartCommand(commandName string, args []string) int {
 	if prepared.xrayTarget != "" {
 		fmt.Fprintf(a.stdout, "xray_config=%s\n", prepared.xrayTarget)
 	}
+	if prepared.awgTarget != "" {
+		fmt.Fprintf(a.stdout, "awg_config=%s\n", prepared.awgTarget)
+	}
 	printSidecarStarts(a.stdout, started.Sidecars)
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
@@ -373,8 +382,8 @@ func (a *App) runReconnect(args []string) int {
 		previousTarget = *outputPath
 	}
 	// Snapshot every config file rendering may overwrite (the sing-box config and
-	// the Xray config), so any refusal before the stop can put them back.
-	snaps, snapErr := snapshotFiles(previousTarget, cfg.XrayConfigPath())
+	// the Xray and AWG configs), so any refusal before the stop can put them back.
+	snaps, snapErr := snapshotFiles(previousTarget, cfg.XrayConfigPath(), cfg.AWGConfigPath())
 	if snapErr != nil {
 		fmt.Fprintf(a.stderr, "reconnect failed: %v\n", snapErr)
 		fmt.Fprintln(a.stderr, "running sessions were left untouched")
@@ -492,6 +501,9 @@ func (a *App) runReconnect(args []string) int {
 	if prepared.xrayTarget != "" {
 		fmt.Fprintf(a.stdout, "xray_config=%s\n", prepared.xrayTarget)
 	}
+	if prepared.awgTarget != "" {
+		fmt.Fprintf(a.stdout, "awg_config=%s\n", prepared.awgTarget)
+	}
 	printSidecarStarts(a.stdout, started.Sidecars)
 	fmt.Fprintf(a.stdout, "log=%s\n", started.LogPath)
 	fmt.Fprintln(a.stdout, "use `vless-tun status` to inspect state and `vless-tun stop` to stop it")
@@ -558,6 +570,7 @@ type preparedStart struct {
 	engine            string
 	target            string
 	xrayTarget        string
+	awgTarget         string
 	sidecars          []session.SidecarOptions
 	renderOptions     singbox.RenderOptions
 	resolution        subscription.ProfileResolution
@@ -615,6 +628,10 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	if err != nil {
 		return preparedStart{}, err
 	}
+	if options.match != nil && strings.EqualFold(strings.TrimSpace(options.pick), "probe") && !policy.skipProbe && amneziaShouldSkipTCPProbe(snapshot.Profiles, options.match) {
+		policy.skipProbe = true
+		policy.skipReason = "AWG/gateway UDP endpoint negotiated on connect"
+	}
 	resolution, err := resolveProfileWithPolicy(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options.match, options.pick, policy)
 	if err != nil {
 		if cfg.SourceMode() == config.SourceModeAmnezia && options.match != nil && errors.Is(err, subscription.ErrNoMatchingProfiles) {
@@ -633,8 +650,45 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	var data []byte
 	var xrayData []byte
 	var xrayTarget string
+	var awgTarget string
 	var sidecars []session.SidecarOptions
+	var awgCfg *amnezia.AWGConfig
+	if cfg.SourceMode() == config.SourceModeAmnezia && (profile.Protocol == "amnezia-awg" || amnezia.IsGatewayCatalogProfile(profile)) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		profile, awgCfg, err = resolveAmneziaRuntime(ctx, cfg, profile)
+		if err != nil {
+			return preparedStart{}, err
+		}
+		resolution.Profile = profile
+	}
+	if awgCfg != nil {
+		if engine == config.EngineXray {
+			return preparedStart{}, amnezia.NewRefusal(amnezia.CodeEngineUnavailable, "incompatible engine for amnezia-awg")
+		}
+		engine = config.EngineAWG
+	} else if engine == config.EngineAWG {
+		return preparedStart{}, amnezia.NewRefusal(amnezia.CodeEngineUnavailable, "amnezia-awg engine requires an AmneziaWG profile")
+	}
 	switch engine {
+	case config.EngineAWG:
+		awgTarget = cfg.AWGConfigPath()
+		runtimeCfg, buildErr := buildAWGRuntimeConfig(cfg, awgCfg)
+		if buildErr != nil {
+			return preparedStart{}, buildErr
+		}
+		data, err = singbox.RenderAWGFrontendWithOptions(cfg, profile, renderOptions)
+		if err != nil {
+			return preparedStart{}, err
+		}
+		selfExe, exeErr := awgSidecarExecutableFunc()
+		if exeErr != nil {
+			return preparedStart{}, amnezia.NewRefusal(amnezia.CodeEngineUnavailable, "AmneziaWG sidecar executable unavailable")
+		}
+		if err := awg.WriteRuntimeConfig(awgTarget, runtimeCfg); err != nil {
+			return preparedStart{}, err
+		}
+		sidecars = []session.SidecarOptions{{Name: "amnezia-awg", Executable: selfExe, Args: []string{"_awg-proxy", "-c", awgTarget}}}
 	case config.EngineSingbox:
 		data, err = singbox.RenderWithOptions(cfg, profile, renderOptions)
 	case config.EngineXray:
@@ -672,6 +726,7 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 		engine:           engine,
 		target:           target,
 		xrayTarget:       xrayTarget,
+		awgTarget:        awgTarget,
 		sidecars:         sidecars,
 		renderOptions:    renderOptions,
 		resolution:       resolution,

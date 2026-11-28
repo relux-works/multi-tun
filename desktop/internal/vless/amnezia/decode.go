@@ -36,22 +36,42 @@ type PayloadSummary struct {
 }
 
 type AWGConfig struct {
-	Name                string
-	CountryCode         string
-	EndpointHost        string
-	EndpointPort        int
-	Address             []string
-	DNS                 []string
-	AllowedIPs          []string
-	MTU                 int
-	PersistentKeepalive int
-	Jc, Jmin, Jmax      int
-	S1, S2, S3, S4      int
-	H1, H2, H3, H4      string
-	I1, I2, I3, I4, I5  string
-	PublicKey           string
-	PrivateKey          string `json:"-"`
-	PresharedKey        string `json:"-"`
+	Name                   string
+	CountryCode            string
+	EndpointHost           string
+	EndpointPort           int
+	Address                []string
+	DNS                    []string
+	AllowedIPs             []string
+	MTU                    int
+	PersistentKeepalive    int
+	Jc, Jmin, Jmax         int
+	S1, S2, S3, S4         int
+	H1, H2, H3, H4         string
+	I1, I2, I3, I4, I5     string
+	PublicKey              string
+	PrivateKey             string `json:"-"`
+	PresharedKey           string `json:"-"`
+	PersistentKeepaliveRaw string
+	HeaderProtectionKey    string `json:"-"`
+	ContentPaddingAddition string
+	RekeyAfterTime         string
+	RekeyTimeout           string
+	RejectAfterTime        string
+	KeepaliveTimeout       string
+	MaxHandshakeAttempts   string
+	RandomTrailers         string
+	DisableCookies         string
+}
+
+type GatewayCredentials struct {
+	Name            string `json:"name,omitempty"`
+	Description     string `json:"description,omitempty"`
+	ConfigVersion   int    `json:"config_version"`
+	ServiceType     string `json:"service_type"`
+	ServiceProtocol string `json:"service_protocol"`
+	UserCountryCode string `json:"user_country_code"`
+	APIKey          string `json:"-"`
 }
 
 type DecodedPayload struct {
@@ -59,19 +79,28 @@ type DecodedPayload struct {
 	Protocol        string
 	Profiles        []model.Profile
 	AWG             *AWGConfig
+	Gateway         *GatewayCredentials
 	SubscriptionURL string
 	Summary         PayloadSummary
 }
 
 func (d DecodedPayload) ValidateRunnable(engineType string) error {
+	engine := strings.ToLower(strings.TrimSpace(engineType))
+	awgEngine := engine == "" || engine == "sing-box" || engine == "singbox" || engine == "amnezia-awg"
 	switch d.Protocol {
 	case "amnezia-awg":
-		return NewRefusal(CodeEngineUnavailable, "amnezia-awg data plane requires an admitted AWG engine/helper contract (SPEC-005 TW-AMNZ-007)")
+		if !awgEngine {
+			return NewRefusal(CodeEngineUnavailable, "incompatible engine for amnezia-awg")
+		}
 	case "amnezia-gateway":
-		return NewRefusal(CodeGatewayUnimplemented, "Amnezia Gateway API dynamic subscription fetch is not yet implemented (SPEC-005 TW-AMNZ-007)")
-	default:
-		return nil
+		if d.Gateway == nil {
+			return NewRefusal(CodeGatewayUnimplemented, "unsupported Amnezia gateway credentials")
+		}
+		if d.Gateway.ServiceProtocol == "awg" && !awgEngine {
+			return NewRefusal(CodeEngineUnavailable, "incompatible engine for amnezia-awg")
+		}
 	}
+	return nil
 }
 
 func invalidPayload() error {
@@ -227,6 +256,7 @@ func decodeExport(body []byte) (DecodedPayload, error) {
 		APIKey        json.RawMessage `json:"api_key"`
 		APIConfig     json.RawMessage `json:"api_config"`
 		AuthData      json.RawMessage `json:"auth_data"`
+		Name          string          `json:"name"`
 	}
 	if err := json.Unmarshal(body, &root); err != nil || bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
 		return d, invalidPayload()
@@ -282,8 +312,32 @@ func decodeExport(body []byte) (DecodedPayload, error) {
 			}
 		}
 	}
-	if len(d.Profiles) == 0 && d.AWG == nil && (len(root.APIEndpoint) > 0 || len(root.APIKey) > 0 || len(root.APIConfig) > 0 || len(root.AuthData) > 0) {
-		return d, NewRefusal(CodeGatewayUnimplemented, "Amnezia Gateway API dynamic subscription fetch is not yet implemented (SPEC-005 TW-AMNZ-007)")
+	if len(d.Profiles) == 0 && d.AWG == nil {
+		var api struct {
+			ServiceType     string `json:"service_type"`
+			ServiceProtocol string `json:"service_protocol"`
+			UserCountryCode string `json:"user_country_code"`
+		}
+		var auth struct {
+			APIKey string `json:"api_key"`
+		}
+		if root.ConfigVersion == 2 && json.Unmarshal(root.APIConfig, &api) == nil && json.Unmarshal(root.AuthData, &auth) == nil && api.ServiceType == "amnezia-premium" {
+			if strings.TrimSpace(auth.APIKey) == "" {
+				return d, invalidPayload()
+			}
+			if api.ServiceProtocol == "" {
+				api.ServiceProtocol = "awg"
+			}
+			if api.ServiceProtocol != "awg" && api.ServiceProtocol != "vless" {
+				return d, NewRefusal(CodeProtocolUnsupported, "unsupported Amnezia gateway protocol")
+			}
+			d.Format, d.Protocol = "amnezia-premium-v2", "amnezia-gateway"
+			d.Gateway = &GatewayCredentials{Name: root.Name, Description: root.Description, ConfigVersion: 2, ServiceType: api.ServiceType, ServiceProtocol: api.ServiceProtocol, UserCountryCode: api.UserCountryCode, APIKey: auth.APIKey}
+			return d, nil
+		}
+		if len(root.APIEndpoint) > 0 || len(root.APIKey) > 0 || len(root.APIConfig) > 0 || len(root.AuthData) > 0 {
+			return d, NewRefusal(CodeGatewayUnimplemented, "unsupported Amnezia gateway credentials")
+		}
 	}
 	if staticErr != nil {
 		return d, staticErr
@@ -442,7 +496,11 @@ func parseAWGExport(raw []byte) (*AWGConfig, error) {
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return nil, invalidPayload()
 	}
-	if err := json.Unmarshal(fields["Config"], &config.Config); err != nil {
+	ini, ok := fields["Config"]
+	if !ok {
+		ini = fields["config"]
+	}
+	if err := json.Unmarshal(ini, &config.Config); err != nil {
 		return nil, invalidPayload()
 	}
 	for key, dst := range map[string]*int{"MTU": &config.MTU, "port": &config.Port} {
@@ -526,6 +584,24 @@ func ParseAWGINI(raw string) (*AWGConfig, error) {
 		switch section + key {
 		case "[Interface]PrivateKey":
 			text = &cfg.PrivateKey
+		case "[Interface]HeaderProtectionKey":
+			text = &cfg.HeaderProtectionKey
+		case "[Interface]ContentPaddingAddition":
+			text = &cfg.ContentPaddingAddition
+		case "[Interface]RekeyAfterTime":
+			text = &cfg.RekeyAfterTime
+		case "[Interface]RekeyTimeout":
+			text = &cfg.RekeyTimeout
+		case "[Interface]RejectAfterTime":
+			text = &cfg.RejectAfterTime
+		case "[Interface]KeepaliveTimeout":
+			text = &cfg.KeepaliveTimeout
+		case "[Interface]MaxHandshakeAttempts":
+			text = &cfg.MaxHandshakeAttempts
+		case "[Interface]RandomTrailers":
+			text = &cfg.RandomTrailers
+		case "[Interface]DisableCookies":
+			text = &cfg.DisableCookies
 		case "[Interface]Address":
 			list = &cfg.Address
 		case "[Interface]DNS":
@@ -571,7 +647,21 @@ func ParseAWGINI(raw string) (*AWGConfig, error) {
 		case "[Peer]AllowedIPs":
 			list = &cfg.AllowedIPs
 		case "[Peer]PersistentKeepalive":
-			number = &cfg.PersistentKeepalive
+			bounds := strings.Split(value, "-")
+			if len(bounds) > 2 {
+				return nil, invalidPayload()
+			}
+			min, err := strconv.ParseUint(bounds[0], 10, 16)
+			if err != nil {
+				return nil, invalidPayload()
+			}
+			if len(bounds) == 2 {
+				max, err := strconv.ParseUint(bounds[1], 10, 16)
+				if err != nil || min > max {
+					return nil, invalidPayload()
+				}
+			}
+			cfg.PersistentKeepalive, cfg.PersistentKeepaliveRaw = int(min), value
 		case "[Peer]Endpoint":
 			host, port, err := net.SplitHostPort(value)
 			if err != nil || host == "" {

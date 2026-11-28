@@ -317,8 +317,8 @@ func TestParseAWGINIAllFields(t *testing.T) {
 	if c.Jc != 4 || c.Jmin != 40 || c.Jmax != 70 || c.S1 != 15 || c.S2 != 20 || c.S3 != 25 || c.S4 != 30 || c.H1 != "100-200" || c.H2 != "300" || c.H3 != "400" || c.H4 != "500" || c.I1 != "<b 0x01>" || c.I2 != "<b 0x02>" || c.I3 != "<b 0x03>" || c.I4 != "<b 0x04>" || c.I5 != "<b 0x05>" {
 		t.Fatal("AWG obfuscation parameters lost")
 	}
-	if !IsRefusalCode(d.ValidateRunnable("sing-box"), CodeEngineUnavailable) {
-		t.Fatal("INI is incorrectly runnable")
+	if d.ValidateRunnable("sing-box") != nil || d.ValidateRunnable("amnezia-awg") != nil || !IsRefusalCode(d.ValidateRunnable("xray"), CodeEngineUnavailable) {
+		t.Fatal("incorrect AWG engine admission")
 	}
 	for _, raw := range []string{
 		strings.Replace(testAWGINI, "Jc = 4", "Jc = invalid-secret", 1),
@@ -434,7 +434,7 @@ func TestDecodeDecompressionBoundaries(t *testing.T) {
 	}
 	// Real Amnezia Premium API v2 exports carry a 0x000000ff (255) qUncompress
 	// hint header with >255-byte JSON (api_config + auth_data.api_key). Verify
-	// it decodes cleanly and surfaces AMNEZIA_GATEWAY_UNIMPLEMENTED (not invalid).
+	// it decodes cleanly into credentials with no secret in the summary or JSON.
 	premiumV2Body := testJSON(t, map[string]any{
 		"name":           "Amnezia Premium",
 		"description":    "Amnezia Premium",
@@ -449,8 +449,10 @@ func TestDecodeDecompressionBoundaries(t *testing.T) {
 		},
 	})
 	premiumV2Key := "vpn://" + base64.RawURLEncoding.EncodeToString(frame(premiumV2Body, 255))
-	if _, err := DecodeKey(premiumV2Key); !IsRefusalCode(err, CodeGatewayUnimplemented) || strings.Contains(err.Error(), testPrivateKey) {
-		t.Fatalf("Amnezia Premium v2 refusal = %v, want %s without secret", err, CodeGatewayUnimplemented)
+	if d, err := DecodeKey(premiumV2Key); err != nil || d.Format != "amnezia-premium-v2" || d.Protocol != "amnezia-gateway" || d.Gateway == nil || d.Gateway.APIKey != testPrivateKey {
+		t.Fatalf("Amnezia Premium v2 decode failed: %v", err)
+	} else if strings.Contains(string(testJSON(t, d)), testPrivateKey) || strings.Contains(string(testJSON(t, d.Summary)), "Amnezia Premium") || d.ValidateRunnable("sing-box") != nil || !IsRefusalCode(d.ValidateRunnable("xray"), CodeEngineUnavailable) {
+		t.Fatal("gateway redaction or engine admission failed")
 	}
 	bad := [][]byte{
 		frame(body, 0), frame(body, MaxDecompressedBytes+1),
@@ -474,5 +476,109 @@ func TestProfileCountryCodeJSONIsOptional(t *testing.T) {
 	with := string(testJSON(t, model.Profile{CountryCode: "US"}))
 	if strings.Contains(without, "country_code") || !strings.Contains(with, `"country_code":"US"`) {
 		t.Fatal("incorrect optional country JSON field")
+	}
+}
+
+// Synthetic v3 material: no production key or endpoint is used.
+func testAWGV3INI() string {
+	raw := strings.Replace(testAWGINI, "PersistentKeepalive = 25", "PersistentKeepalive = 25-35", 1)
+	return strings.Replace(raw, "[Peer]", `HeaderProtectionKey = synthetic-header-protection
+ContentPaddingAddition = 0-64
+RekeyAfterTime = 120-140
+RekeyTimeout = 5-10
+RejectAfterTime = 180-200
+KeepaliveTimeout = 10-15
+MaxHandshakeAttempts = 18-20
+RandomTrailers = true
+DisableCookies = false
+[Peer]`, 1)
+}
+
+func TestDecodeAWGV3LowercaseConfig(t *testing.T) {
+	for _, mtu := range []any{1420, "1420"} {
+		for _, port := range []any{51821, "51821"} {
+			key := testVPN(t, map[string]any{"containers": []any{map[string]any{
+				"container": "amnezia-awg", "awg": map[string]any{"last_config": map[string]any{
+					"config": testAWGV3INI(), "MTU": mtu, "port": port, "hostName": "relay.example.com",
+				}},
+			}}})
+			d, err := DecodeKey(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := d.AWG
+			if c == nil || c.PersistentKeepalive != 25 || c.PersistentKeepaliveRaw != "25-35" || c.HeaderProtectionKey != "synthetic-header-protection" || c.ContentPaddingAddition != "0-64" || c.RekeyAfterTime != "120-140" || c.RekeyTimeout != "5-10" || c.RejectAfterTime != "180-200" || c.KeepaliveTimeout != "10-15" || c.MaxHandshakeAttempts != "18-20" || c.RandomTrailers != "true" || c.DisableCookies != "false" || c.MTU != 1420 || c.EndpointPort != 51821 || c.EndpointHost != "relay.example.com" || c.Jc != 4 || c.Jmin != 40 || c.Jmax != 70 || c.S1 != 15 || c.S2 != 20 || c.S3 != 25 || c.S4 != 30 || c.H1 != "100-200" || c.H2 != "300" || c.H3 != "400" || c.H4 != "500" || c.I1 != "<b 0x01>" {
+				t.Fatal("v3 configuration lost fields")
+			}
+			serialized := string(testJSON(t, c))
+			for _, secret := range []string{testPrivateKey, testPresharedKey, "synthetic-header-protection", "HeaderProtectionKey"} {
+				if strings.Contains(serialized, secret) {
+					t.Fatal("secret serialized")
+				}
+			}
+		}
+	}
+	c, err := ParseAWGINI(testAWGINI)
+	if err != nil || c.PersistentKeepaliveRaw != "25" {
+		t.Fatal("scalar keepalive compatibility failed")
+	}
+	for _, value := range []string{"0", "65535", "0-65535", "25-25"} {
+		if _, err := ParseAWGINI(strings.Replace(testAWGINI, "PersistentKeepalive = 25", "PersistentKeepalive = "+value, 1)); err != nil {
+			t.Fatalf("valid keepalive %q refused", value)
+		}
+	}
+	for _, value := range []string{"35-25", "-1", "+25", "65536", "0-65536", "1-2-3", "25-", "-25", "25-secret", "1.5"} {
+		if _, err := ParseAWGINI(strings.Replace(testAWGINI, "PersistentKeepalive = 25", "PersistentKeepalive = "+value, 1)); !IsRefusalCode(err, CodeKeyInvalid) {
+			t.Fatalf("invalid keepalive accepted: %q", value)
+		}
+	}
+	for _, directive := range []string{"PostUp = synthetic-secret", "PreDown = synthetic-secret", "HeaderProtectionKey = synthetic-secret", "Unknown = synthetic-secret"} {
+		raw := strings.Replace(testAWGV3INI(), "[Peer]", directive+"\n[Peer]", 1)
+		if _, err := ParseAWGINI(raw); !IsRefusalCode(err, CodeKeyInvalid) || strings.Contains(err.Error(), "synthetic-secret") {
+			t.Fatal("unknown, hook or duplicate directive admitted or leaked")
+		}
+	}
+}
+
+func TestPremiumV2AdmissionAndLegacyRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		version                         int
+		service, protocol, apiKey, code string
+	}{
+		{2, "amnezia-premium", "awg", "synthetic-api-secret", ""},
+		{2, "amnezia-premium", "", "synthetic-api-secret", ""},
+		{2, "amnezia-premium", "vless", "synthetic-api-secret", ""},
+		{2, "amnezia-premium", "awg", "  ", CodeKeyInvalid},
+		{2, "amnezia-premium", "openvpn", "synthetic-api-secret", CodeProtocolUnsupported},
+		{1, "amnezia-premium", "awg", "synthetic-api-secret", CodeGatewayUnimplemented},
+		{0, "amnezia-premium", "awg", "synthetic-api-secret", CodeGatewayUnimplemented},
+		{2, "unknown", "awg", "synthetic-api-secret", CodeGatewayUnimplemented},
+	} {
+		root := map[string]any{"name": "Premium", "description": "synthetic-description-secret", "config_version": tc.version, "api_config": map[string]string{"service_type": tc.service, "service_protocol": tc.protocol, "user_country_code": "US"}, "auth_data": map[string]string{"api_key": tc.apiKey}}
+		d, err := DecodeKey(testVPN(t, root))
+		if tc.code != "" {
+			if !IsRefusalCode(err, tc.code) || strings.Contains(err.Error(), "synthetic") {
+				t.Fatalf("incorrect redacted refusal: %v", err)
+			}
+			continue
+		}
+		if err != nil || d.Gateway == nil || d.Gateway.ConfigVersion != 2 || d.Gateway.Name != "Premium" || d.Gateway.UserCountryCode != "US" || d.Format != "amnezia-premium-v2" || d.Protocol != "amnezia-gateway" {
+			t.Fatalf("invalid premium decode: %v", err)
+		}
+		if strings.Contains(string(testJSON(t, d.Gateway)), tc.apiKey) || strings.Contains(string(testJSON(t, d.Summary)), "synthetic-description-secret") {
+			t.Fatal("gateway secret in serialization or summary")
+		}
+		for _, engine := range []string{"", "sing-box", " SINGBOX ", "amnezia-awg"} {
+			if d.ValidateRunnable(engine) != nil {
+				t.Fatalf("valid engine refused: %q", engine)
+			}
+		}
+		if tc.protocol == "vless" {
+			if d.ValidateRunnable("xray") != nil {
+				t.Fatal("vless engine refused")
+			}
+		} else if !IsRefusalCode(d.ValidateRunnable("xray"), CodeEngineUnavailable) {
+			t.Fatal("incompatible AWG engine admitted")
+		}
 	}
 }

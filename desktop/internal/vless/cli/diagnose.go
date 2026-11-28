@@ -139,6 +139,10 @@ func (a *App) runDiagnoseConfig(args []string) int {
 			fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
 			return 1
 		}
+		if selection.Match != nil && strings.EqualFold(strings.TrimSpace(selection.Pick), "probe") && !policy.skipProbe && amneziaShouldSkipTCPProbe(snapshot.Profiles, selection.Match) {
+			policy.skipProbe = true
+			policy.skipReason = "AWG/gateway UDP endpoint negotiated on connect"
+		}
 		resolution, err := resolveProfileWithPolicy(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick, policy)
 		if err != nil {
 			if selectorIsHash {
@@ -187,6 +191,9 @@ func (a *App) runDiagnoseConfig(args []string) int {
 		fmt.Fprintf(a.stdout, "xray_config: %s (%s)\n", cfg.XrayConfigPath(), stateLabel(fileExists(cfg.XrayConfigPath())))
 		fmt.Fprintf(a.stdout, "xray_executable: %s\n", cfg.XrayExecutable())
 		fmt.Fprintf(a.stdout, "xray_socks: %s:%d\n", cfg.XraySocksListen(), cfg.XraySocksPort())
+	}
+	if cfg.EngineType() == config.EngineAWG || fileExists(cfg.AWGConfigPath()) {
+		fmt.Fprintf(a.stdout, "awg_config: %s (%s)\n", cfg.AWGConfigPath(), stateLabel(fileExists(cfg.AWGConfigPath())))
 	}
 	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.BypassSuffixes()))
 	printConfiguredLaunch(a.stdout, cfg.LaunchOrDefault())

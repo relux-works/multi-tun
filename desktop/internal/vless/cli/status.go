@@ -156,6 +156,9 @@ func (a *App) runStatus(args []string) int {
 	if cfg.EngineType() == config.EngineXray || xrayRenderedPresent {
 		fmt.Fprintf(a.stdout, "xray_config: %s (%s)\n", cfg.XrayConfigPath(), stateLabel(xrayRenderedPresent))
 	}
+	if cfg.EngineType() == config.EngineAWG || fileExists(cfg.AWGConfigPath()) {
+		fmt.Fprintf(a.stdout, "awg_config: %s (%s)\n", cfg.AWGConfigPath(), stateLabel(fileExists(cfg.AWGConfigPath())))
+	}
 	fmt.Fprintf(a.stdout, "bypasses: %s\n", formatBypasses(cfg.BypassSuffixes()))
 	if currentState == "stale" && current != nil {
 		if last := session.LastRelevantLogLine(current.LogPath); last != "" {
@@ -176,6 +179,10 @@ func (a *App) runStatus(args []string) int {
 	if !*refresh && selection.Match != nil && strings.EqualFold(strings.TrimSpace(selection.Pick), "probe") && !policy.skipProbe {
 		policy.skipProbe = true
 		policy.skipReason = "probe skipped without --refresh"
+	}
+	if selection.Match != nil && strings.EqualFold(strings.TrimSpace(selection.Pick), "probe") && !policy.skipProbe && amneziaShouldSkipTCPProbe(snapshot.Profiles, selection.Match) {
+		policy.skipProbe = true
+		policy.skipReason = "AWG/gateway UDP endpoint negotiated on connect"
 	}
 	resolution, err := resolveProfileWithPolicy(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), selection.Match, selection.Pick, policy)
 	if err != nil {

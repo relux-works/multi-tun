@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"crypto/sha1"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,17 +17,19 @@ import (
 
 	"multi-tun/desktop/internal/vless/amnezia"
 	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/subscription"
 )
 
 // Tests replace these hooks before running a command; no host credential or
 // terminal operation is needed to exercise the CLI.
 var (
-	amneziaStoreFunc              = amnezia.DefaultKeychainStore
-	amneziaStdin        io.Reader = os.Stdin
-	amneziaIsTTY                  = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
-	amneziaReadPassword           = func() ([]byte, error) { return term.ReadPassword(int(os.Stdin.Fd())) }
-	amneziaFetchFunc              = subscription.FetchWithOptions
+	amneziaStoreFunc                   = amnezia.DefaultKeychainStore
+	amneziaStdin             io.Reader = os.Stdin
+	amneziaIsTTY                       = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+	amneziaReadPassword                = func() ([]byte, error) { return term.ReadPassword(int(os.Stdin.Fd())) }
+	amneziaFetchFunc                   = subscription.FetchWithOptions
+	amneziaGatewayClientFunc           = amnezia.NewGatewayClient
 )
 
 func (a *App) runAuth(args []string) int {
@@ -125,7 +130,29 @@ func refreshAmneziaSource(cfg config.ProjectConfig) (subscription.CacheSnapshot,
 		return subscription.CacheSnapshot{}, err
 	}
 	profiles := decoded.Profiles
-	if decoded.Format == "subscription_url" {
+	switch {
+	case decoded.Protocol == "amnezia-gateway" && decoded.Gateway != nil:
+		installUUID, err := amnezia.LoadOrCreateInstallationUUID(cfg.CacheDir)
+		if err != nil {
+			return subscription.CacheSnapshot{}, err
+		}
+		info, err := amneziaGatewayClientFunc().FetchAccountInfo(ctx, *decoded.Gateway, installUUID)
+		if err != nil {
+			// Gateway refusals stay hard failures, including transport failures.
+			return subscription.CacheSnapshot{}, err
+		}
+		profiles = info.CatalogProfiles(decoded.Gateway.ServiceProtocol)
+	case decoded.Protocol == "amnezia-awg" && decoded.AWG != nil:
+		c := decoded.AWG
+		endpoint := net.JoinHostPort(c.EndpointHost, strconv.Itoa(c.EndpointPort))
+		name := c.Name
+		if name == "" {
+			name = endpoint
+		}
+		id := sha1.Sum([]byte("amnezia-awg|" + endpoint + "|" + name))
+		profiles = []model.Profile{{ID: fmt.Sprintf("%x", id)[:12], Name: name, CountryCode: c.CountryCode,
+			Protocol: "amnezia-awg", Network: "udp", Host: c.EndpointHost, Port: c.EndpointPort}}
+	case decoded.Format == "subscription_url":
 		body, err := amneziaFetchFunc(ctx, decoded.SubscriptionURL, subscription.FetchOptions{UserAgent: cfg.SourceUserAgent(), Headers: cfg.SourceHeaders()})
 		if err != nil {
 			// Neither transport errors nor parser errors may quote the secret URL.
@@ -158,4 +185,71 @@ func refreshAmneziaSource(cfg config.ProjectConfig) (subscription.CacheSnapshot,
 		return subscription.CacheSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+// Resolve key material only at runtime; catalog snapshots never contain it.
+func resolveAmneziaRuntime(ctx context.Context, cfg config.ProjectConfig, profile model.Profile) (model.Profile, *amnezia.AWGConfig, error) {
+	result, err := amneziaStoreFunc().LookupKey(ctx, amneziaKeychainSpec(cfg))
+	if err != nil {
+		return model.Profile{}, nil, err
+	}
+	decoded, err := amnezia.DecodeKey(result.Secret)
+	if err != nil {
+		return model.Profile{}, nil, err
+	}
+	if err := decoded.ValidateRunnable(cfg.EngineType()); err != nil {
+		return model.Profile{}, nil, err
+	}
+	if amnezia.IsGatewayCatalogProfile(profile) {
+		if decoded.Gateway == nil {
+			return model.Profile{}, nil, amnezia.NewRefusal(amnezia.CodeKeyInvalid, "gateway catalog requires gateway credentials")
+		}
+		installUUID, err := amnezia.LoadOrCreateInstallationUUID(cfg.CacheDir)
+		if err != nil {
+			return model.Profile{}, nil, err
+		}
+		negotiated, err := amneziaGatewayClientFunc().NegotiateConfig(ctx, *decoded.Gateway, installUUID, amnezia.GatewayServerCountryCode(profile), amnezia.GatewayServiceProtocol(profile))
+		if err != nil {
+			return model.Profile{}, nil, err
+		}
+		if negotiated.ServiceProtocol == "awg" && negotiated.AWG != nil {
+			c := negotiated.AWG
+			if profile.Name == "" {
+				profile.Name = c.Name
+			}
+			profile.CountryCode, profile.Host, profile.Port = c.CountryCode, c.EndpointHost, c.EndpointPort
+			profile.Protocol, profile.Network = "amnezia-awg", "udp"
+			return profile, c, nil
+		}
+		if negotiated.ServiceProtocol == "vless" && len(negotiated.Profiles) > 0 {
+			return negotiated.Profiles[0], nil, nil
+		}
+		return model.Profile{}, nil, amnezia.NewRefusal(amnezia.CodeKeyInvalid, "gateway returned no runnable configuration")
+	}
+	if decoded.Protocol == "amnezia-awg" && decoded.AWG != nil {
+		return profile, decoded.AWG, nil
+	}
+	return profile, nil, nil
+}
+
+func amneziaShouldSkipTCPProbe(profiles []model.Profile, match *config.ProfileMatch) bool {
+	if match == nil {
+		return false
+	}
+	// Reuse the selector's filters so excluded AWG profiles do not suppress
+	// probes for matching VLESS profiles. Pick=first never probes endpoints.
+	matched := false
+	for _, p := range profiles {
+		_, err := subscription.ResolveProfileWithOptions([]model.Profile{p}, subscription.SelectOptions{
+			Match: subscriptionMatch(match), Pick: "first",
+		})
+		if err != nil {
+			continue
+		}
+		matched = true
+		if p.Protocol != "amnezia-awg" && !amnezia.IsGatewayCatalogProfile(p) {
+			return false
+		}
+	}
+	return matched
 }

@@ -21,6 +21,7 @@ const (
 	CodeRegionUnmatched      = "AMNEZIA_REGION_UNMATCHED"
 	CodeEngineUnavailable    = "AMNEZIA_ENGINE_UNAVAILABLE"
 	CodeGatewayUnimplemented = "AMNEZIA_GATEWAY_UNIMPLEMENTED"
+	CodeGatewayError         = "AMNEZIA_GATEWAY_ERROR"
 )
 
 // RefusalError carries a deterministic SPEC-005 refusal code and a redacted

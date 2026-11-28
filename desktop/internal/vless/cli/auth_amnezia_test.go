@@ -3,22 +3,35 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/amnezia"
+	"multi-tun/desktop/internal/vless/awg"
 	"multi-tun/desktop/internal/vless/config"
+	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/session"
 	"multi-tun/desktop/internal/vless/subscription"
 )
@@ -478,6 +491,18 @@ func TestAmneziaAllRefusalsLeaveRunningSessionUntouched(t *testing.T) {
 			installProbeSelectionSeams(t, &session.CurrentSession{ID: "running", ResolvedServer: "amnezia", ResolvedAlias: "us"}, true)
 			h := installReconnectHarness(t)
 			path, cfg := setupAmneziaConfig(t)
+			if tc.code == amnezia.CodeEngineUnavailable {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// AWG is runnable with sing-box now; an explicit incompatible
+				// engine remains a hard refusal before cache/session changes.
+				data = bytes.ReplaceAll(data, []byte(`"sing-box"`), []byte(`"xray"`))
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if !tc.missing {
 				f.items["tun-wave/amnezia/key"] = tc.key
 			}
@@ -596,3 +621,541 @@ func TestNewWithNameUsage(t *testing.T) {
 		t.Fatal("New lost legacy invocation name")
 	}
 }
+
+const cliGatewayAPIKey = "synthetic-cli-gateway-api-key"
+
+func cliVPNJSON(t *testing.T, v any) string {
+	t.Helper()
+	body, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal("encode fixture JSON")
+	}
+	key, err := amnezia.EncodeVPNURI(body)
+	if err != nil {
+		t.Fatal("encode fixture VPN URI")
+	}
+	return key
+}
+
+func cliGatewayToken(t *testing.T, protocol string) string {
+	t.Helper()
+	return cliVPNJSON(t, map[string]any{"config_version": 2,
+		"api_config": map[string]any{"service_type": "amnezia-premium", "service_protocol": protocol, "user_country_code": "us"},
+		"auth_data":  map[string]any{"api_key": cliGatewayAPIKey},
+	})
+}
+
+func cliAWGExport(t *testing.T, private string) string {
+	t.Helper()
+	c := syntheticCLIAWG()
+	raw := fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = 192.0.2.2/32
+Jc = 4
+Jmin = 40
+Jmax = 70
+S1 = 10
+S2 = 20
+S3 = 30
+S4 = 40
+H1 = 100-200
+H2 = 300
+H3 = 400
+H4 = 500
+I1 = <b 0x01>
+I2 = <b 0x02>
+I3 = <b 0x03>
+I4 = <b 0x04>
+I5 = <b 0x05>
+HeaderProtectionKey = %s
+ContentPaddingAddition = 10-20
+RekeyAfterTime = 120-140
+RekeyTimeout = 5-7
+RejectAfterTime = 180-200
+KeepaliveTimeout = 10-15
+MaxHandshakeAttempts = 18-20
+RandomTrailers = true
+DisableCookies = false
+[Peer]
+PublicKey = %s
+PresharedKey = %s
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = 203.0.113.9:51820
+PersistentKeepalive = 25-35
+`, private, c.HeaderProtectionKey, c.PublicKey, c.PresharedKey)
+	return cliVPNJSON(t, map[string]any{
+		"description": "USA East", "country_code": "US",
+		"dns1": "1.1.1.1", "dns2": "9.9.9.9",
+		"api_config": map[string]any{"server_country_code": "us-east", "server_country_code_l10n": "us", "server_country_name": "USA East"},
+		"containers": []any{map[string]any{"container": "amnezia-awg", "awg": map[string]any{"last_config": map[string]any{"config": raw}}}},
+	})
+}
+
+// Uses the real encrypted gateway protocol against loopback. No production
+// endpoint, credential tool, TUN device or AWG device is reachable from this seam.
+func installCLIGateway(t *testing.T, respond func(string, map[string]any) any) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal("generate fixture RSA key")
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal("marshal fixture public key")
+	}
+	pub := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope map[string]string
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&envelope) != nil {
+			t.Error("invalid gateway fixture request")
+			w.WriteHeader(400)
+			return
+		}
+		wrapped, err := base64.StdEncoding.DecodeString(envelope["key_payload"])
+		if err != nil {
+			t.Error("invalid fixture key envelope")
+			w.WriteHeader(400)
+			return
+		}
+		plainKeys, err := rsa.DecryptPKCS1v15(rand.Reader, key, wrapped)
+		if err != nil {
+			t.Error("cannot decrypt fixture keys")
+			w.WriteHeader(400)
+			return
+		}
+		var keys map[string][]byte
+		if json.Unmarshal(plainKeys, &keys) != nil || len(keys["aes_iv"]) != 32 || len(keys["aes_key"]) != 32 {
+			t.Error("invalid fixture key material")
+			w.WriteHeader(400)
+			return
+		}
+		block, err := aes.NewCipher(keys["aes_key"])
+		if err != nil {
+			t.Error("invalid AES fixture key")
+			w.WriteHeader(400)
+			return
+		}
+		ct, err := base64.StdEncoding.DecodeString(envelope["api_payload"])
+		if err != nil || len(ct) == 0 || len(ct)%aes.BlockSize != 0 {
+			t.Error("invalid fixture ciphertext")
+			w.WriteHeader(400)
+			return
+		}
+		cipher.NewCBCDecrypter(block, keys["aes_iv"][:16]).CryptBlocks(ct, ct)
+		pad := int(ct[len(ct)-1])
+		if pad < 1 || pad > 16 || !bytes.Equal(ct[len(ct)-pad:], bytes.Repeat([]byte{byte(pad)}, pad)) {
+			t.Error("invalid fixture padding")
+			w.WriteHeader(400)
+			return
+		}
+		var request map[string]any
+		if json.Unmarshal(ct[:len(ct)-pad], &request) != nil {
+			t.Error("invalid gateway request JSON")
+			w.WriteHeader(400)
+			return
+		}
+		auth, ok := request["auth_data"].(map[string]any)
+		if !ok || auth["api_key"] != cliGatewayAPIKey {
+			t.Error("gateway request lost authentication")
+		}
+		response, err := json.Marshal(respond(r.URL.Path, request))
+		if err != nil {
+			t.Error("cannot encode fixture response")
+			w.WriteHeader(500)
+			return
+		}
+		pad = aes.BlockSize - len(response)%aes.BlockSize
+		response = append(response, bytes.Repeat([]byte{byte(pad)}, pad)...)
+		cipher.NewCBCEncrypter(block, keys["aes_iv"][:16]).CryptBlocks(response, response)
+		_, _ = w.Write(response)
+	}))
+	t.Cleanup(srv.Close)
+	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != strings.TrimPrefix(srv.URL, "http://") {
+			t.Error("non-loopback gateway request refused")
+			return nil, errors.New("offline guard")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &amnezia.GatewayClient{Endpoint: srv.URL, PublicKeyPEM: pub,
+		HTTPClient:         &http.Client{Transport: transport, Timeout: 2 * time.Second},
+		S3PrimaryEndpoints: []string{}, S3FallbackEndpoints: []string{}}
+	previous := amneziaGatewayClientFunc
+	amneziaGatewayClientFunc = func() *amnezia.GatewayClient { return client }
+	t.Cleanup(func() { amneziaGatewayClientFunc = previous })
+}
+
+func cliGatewayCatalog(protocol string) any {
+	return map[string]any{"http_status": 200, "available_countries": []any{
+		map[string]any{"server_country_code": "us-west", "server_country_code_l10n": "us", "server_country_name": "USA West", "available_protocols": []string{protocol}},
+		map[string]any{"server_country_code": "de", "server_country_name": "Germany", "available_protocols": []string{protocol}},
+		map[string]any{"server_country_code": "us-east", "server_country_code_l10n": "us", "server_country_name": "USA East", "available_protocols": []string{protocol}},
+	}}
+}
+
+func assertCLIHasNoSecrets(t *testing.T, data []byte, secrets []string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if secret != "" && bytes.Contains(data, []byte(secret)) {
+			t.Fatal("secret persisted or printed")
+		}
+	}
+}
+
+func TestAmneziaGatewayAWGOfflineCLIWorkflow(t *testing.T) {
+	f := installAmneziaFake(t)
+	dials := installProbeSelectionSeams(t, nil, false)
+	path, cfg := setupAmneziaConfig(t)
+	token := cliGatewayToken(t, "awg")
+	f.items["tun-wave/amnezia/key"] = token
+	export := cliAWGExport(t, "$WIREGUARD_CLIENT_PRIVATE_KEY")
+	var mu sync.Mutex
+	var installation string
+	var advertised []string
+	accountRequests, configRequests := 0, 0
+	installCLIGateway(t, func(path string, request map[string]any) any {
+		mu.Lock()
+		defer mu.Unlock()
+		uuid, _ := request["installation_uuid"].(string)
+		if uuid == "" || installation != "" && installation != uuid {
+			t.Error("installation UUID missing or changed")
+		}
+		installation = uuid
+		if path == "/v1/account_info" {
+			accountRequests++
+			return cliGatewayCatalog("awg")
+		}
+		if path != "/v1/config" || request["server_country_code"] != "us-east" || request["service_protocol"] != "awg" {
+			t.Error("incorrect negotiation request")
+		}
+		configRequests++
+		public, _ := request["public_key"].(string)
+		advertised = append(advertised, public)
+		return map[string]any{"http_status": 201, "config": export}
+	})
+	secrets := []string{token, cliGatewayAPIKey, syntheticAWGKey(1), syntheticAWGKey(3), syntheticAWGKey(4)}
+	var output strings.Builder
+	for _, command := range []string{"refresh", "list"} {
+		out := runAmneziaCLI(t, 0, secrets, command, "--config", path)
+		output.WriteString(out)
+		if command == "list" && (!strings.Contains(out, "USA East") || !strings.Contains(out, "USA West")) {
+			t.Fatal("gateway catalog missing")
+		}
+	}
+	mu.Lock()
+	issued := configRequests
+	mu.Unlock()
+	if issued != 0 {
+		t.Fatal("refresh/list consumed a device slot")
+	}
+	out := runAmneziaCLI(t, 0, secrets, "render", "--config", path, "amnezia/us")
+	output.WriteString(out)
+	if !strings.Contains(out, "rendered_awg: "+cfg.AWGConfigPath()) || !strings.Contains(out, "resolved: amnezia/us -> USA East") {
+		t.Fatal("AWG render metadata missing")
+	}
+	runtime, err := awg.ReadRuntimeConfig(cfg.AWGConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.PrivateKey == "" || runtime.PrivateKey == syntheticAWGKey(1) || runtime.Endpoint != "203.0.113.9:51820" || !reflect.DeepEqual(runtime.DNS, []string{"1.1.1.1", "9.9.9.9"}) || runtime.PersistentKeepalive != "25-35" || runtime.S4 != 40 || runtime.I5 != "<b 0x05>" || runtime.HeaderProtectionKey != syntheticAWGKey(4) || runtime.RekeyAfterTime != "120-140" {
+		t.Fatal("negotiated AWG runtime fields missing")
+	}
+	info, err := os.Stat(cfg.AWGConfigPath())
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal("AWG runtime file is not private")
+	}
+	privateBytes, _ := base64.StdEncoding.DecodeString(runtime.PrivateKey)
+	private, err := ecdh.X25519().NewPrivateKey(privateBytes)
+	if err != nil {
+		t.Fatal("invalid negotiated private key")
+	}
+	mu.Lock()
+	public := advertised[0]
+	mu.Unlock()
+	if base64.StdEncoding.EncodeToString(private.PublicKey().Bytes()) != public {
+		t.Fatal("client private key differs from negotiated keypair")
+	}
+	secrets = append(secrets, runtime.PrivateKey)
+	assertAWGFrontend(t, cfg)
+
+	h := installReconnectHarness(t)
+	output.WriteString(runAmneziaCLI(t, 0, secrets, "reconnect", "--config", path, "amnezia/us"))
+	if strings.Join(h.events, ",") != "stop,start" || len(h.startOptions) != 1 || h.startOptions[0].Engine != config.EngineAWG || h.startOptions[0].ResolvedID != "amnezia-us-east" {
+		t.Fatal("AWG session metadata missing")
+	}
+	opts := h.startOptions[0]
+	exe, err := defaultAWGSidecarExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(opts.Sidecars, []session.SidecarOptions{{Name: "amnezia-awg", Executable: exe, Args: []string{"_awg-proxy", "-c", cfg.AWGConfigPath()}}}) {
+		t.Fatal("AWG sidecar launch contract missing")
+	}
+	second, err := awg.ReadRuntimeConfig(cfg.AWGConfigPath())
+	if err != nil || second.PrivateKey == runtime.PrivateKey {
+		t.Fatal("reconnect did not generate fresh client key")
+	}
+	secrets = append(secrets, second.PrivateKey)
+	previousState, previousInterface := currentSessionStateStatus, interfaceStateStatus
+	currentSessionStateStatus = func(string, config.PrivilegedLaunchConfig) (*session.CurrentSession, string, bool, error) {
+		return &session.CurrentSession{ID: "fake-awg"}, "active", true, nil
+	}
+	interfaceStateStatus = func(string) (bool, []string, error) { return true, []string{"172.19.0.1/30"}, nil }
+	t.Cleanup(func() { currentSessionStateStatus, interfaceStateStatus = previousState, previousInterface })
+	for _, args := range [][]string{{"status", "--config", path, "--refresh", "amnezia/us"}, {"diagnose", "config", "--config", path, "amnezia/us"}} {
+		out := runAmneziaCLI(t, 0, secrets, args...)
+		output.WriteString(out)
+		if !strings.Contains(out, "USA East") || !strings.Contains(out, "awg_config: "+cfg.AWGConfigPath()+" (present)") {
+			t.Fatal("status/diagnose did not resolve AWG country alias")
+		}
+	}
+	for _, name := range []string{"snapshot.json", "subscription.txt"} {
+		data, err := os.ReadFile(filepath.Join(cfg.CacheDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCLIHasNoSecrets(t, data, append(secrets, "api_key", "PrivateKey", "PresharedKey", "HeaderProtectionKey", "private_key", "preshared_key", "header_protection_key"))
+	}
+	assertCLIHasNoSecrets(t, []byte(output.String()), secrets)
+	if dials.Load() != 0 {
+		t.Fatal("gateway catalog endpoint was TCP probed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if accountRequests < 2 || configRequests != 2 {
+		t.Fatal("status/diagnose unexpectedly negotiated or workflow did not negotiate")
+	}
+}
+
+func assertAWGFrontend(t *testing.T, cfg config.ProjectConfig) {
+	t.Helper()
+	data, err := os.ReadFile(cfg.SingboxConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("AWG frontend helper schema: %v", err)
+	}
+	var doc struct {
+		Outbounds []struct {
+			Type   string `json:"type"`
+			Server string `json:"server"`
+			Port   int    `json:"server_port"`
+		} `json:"outbounds"`
+		Inbounds []struct {
+			Excludes []string `json:"route_exclude_address"`
+		} `json:"inbounds"`
+		Route struct {
+			Rules []struct {
+				ProcessNames []string `json:"process_name"`
+			} `json:"rules"`
+		} `json:"route"`
+	}
+	if json.Unmarshal(data, &doc) != nil {
+		t.Fatal("invalid frontend JSON")
+	}
+	socks, excluded, processes := false, false, false
+	for _, outbound := range doc.Outbounds {
+		if outbound.Type == "socks" && outbound.Server == "127.0.0.1" && outbound.Port == 20809 {
+			socks = true
+		}
+	}
+	for _, inbound := range doc.Inbounds {
+		for _, address := range inbound.Excludes {
+			if address == "203.0.113.9/32" {
+				excluded = true
+			}
+		}
+	}
+	for _, rule := range doc.Route.Rules {
+		if reflect.DeepEqual(rule.ProcessNames, []string{"tun-wave", "vless-tun"}) {
+			processes = true
+		}
+	}
+	if !socks || !excluded || !processes {
+		t.Fatal("AWG frontend lost SOCKS or loop prevention")
+	}
+}
+
+func TestAmneziaAWGDirectCacheAndRuntime(t *testing.T) {
+	f := installAmneziaFake(t)
+	dials := installProbeSelectionSeams(t, nil, false)
+	path, cfg := setupAmneziaConfig(t)
+	key := cliAWGExport(t, syntheticAWGKey(1))
+	f.items["tun-wave/amnezia/key"] = key
+	secrets := []string{key, syntheticAWGKey(1), syntheticAWGKey(3), syntheticAWGKey(4)}
+	snapshot, err := refreshAmneziaSource(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Profiles) != 1 {
+		t.Fatal("direct AWG profile missing")
+	}
+	p := snapshot.Profiles[0]
+	if len(p.ID) != 12 || p.Host != "203.0.113.9" || p.Port != 51820 || p.Protocol != "amnezia-awg" || p.Network != "udp" || p.CountryCode != "US" {
+		t.Fatal("invalid direct AWG catalog metadata")
+	}
+	again, err := refreshAmneziaSource(cfg)
+	if err != nil || again.Profiles[0].ID != p.ID {
+		t.Fatal("AWG profile identity not stable")
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.CacheDir, "snapshot.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCLIHasNoSecrets(t, data, append(secrets, "PrivateKey", "PresharedKey", "HeaderProtectionKey"))
+	runAmneziaCLI(t, 0, secrets, "render", "--config", path)
+	runtime, err := awg.ReadRuntimeConfig(cfg.AWGConfigPath())
+	if err != nil || runtime.PrivateKey != syntheticAWGKey(1) {
+		t.Fatal("direct AWG runtime did not re-read key")
+	}
+	if dials.Load() != 0 {
+		t.Fatal("direct AWG endpoint was TCP probed")
+	}
+}
+
+func TestAmneziaSkipTCPProbeFilters(t *testing.T) {
+	awgProfile := model.Profile{ID: "awg", Name: "USA East", CountryCode: "US", Protocol: "amnezia-awg", Network: "udp"}
+	vlessProfile := model.Profile{ID: "vless", Name: "USA West", CountryCode: "US", Protocol: "vless", Network: "tcp"}
+	gatewayVLESS := vlessProfile
+	gatewayVLESS.Query = map[string]string{"amnezia_gateway": "v2", "amnezia_server_country_code": "us-west", "amnezia_service_protocol": "vless"}
+	for _, tc := range []struct {
+		name     string
+		profiles []model.Profile
+		match    *config.ProfileMatch
+		want     bool
+	}{
+		{"AWG", []model.Profile{awgProfile}, &config.ProfileMatch{Country: "US"}, true},
+		{"gateway", []model.Profile{gatewayVLESS}, &config.ProfileMatch{Country: "US"}, true},
+		{"VLESS", []model.Profile{vlessProfile}, &config.ProfileMatch{Country: "US"}, false},
+		{"mixed", []model.Profile{awgProfile, vlessProfile}, &config.ProfileMatch{Country: "US"}, false},
+		{"name", []model.Profile{awgProfile, vlessProfile}, &config.ProfileMatch{NamePattern: "East"}, true},
+		{"exclude", []model.Profile{awgProfile, vlessProfile}, &config.ProfileMatch{Country: "US", Exclude: []string{"East"}}, false},
+		{"transport", []model.Profile{awgProfile, vlessProfile}, &config.ProfileMatch{Transport: "udp"}, true},
+		{"unmatched", []model.Profile{awgProfile}, &config.ProfileMatch{Country: "DE"}, false},
+		{"invalid", []model.Profile{awgProfile}, &config.ProfileMatch{NamePattern: "["}, false},
+		{"empty", nil, &config.ProfileMatch{Country: "US"}, false},
+		{"nil", []model.Profile{awgProfile}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if amneziaShouldSkipTCPProbe(tc.profiles, tc.match) != tc.want {
+				t.Fatal("incorrect probe skip decision")
+			}
+		})
+	}
+}
+
+func TestResolveAmneziaGatewayVLESSAndCredentialMismatch(t *testing.T) {
+	f := installAmneziaFake(t)
+	_, cfg := setupAmneziaConfig(t)
+	f.items["tun-wave/amnezia/key"] = cliGatewayToken(t, "vless")
+	export := amneziaVPNFixture(t, "US")
+	installCLIGateway(t, func(path string, request map[string]any) any {
+		if path != "/v1/config" || request["service_protocol"] != "vless" {
+			t.Error("incorrect VLESS negotiation request")
+		}
+		return map[string]any{"http_status": 201, "config": export}
+	})
+	info := amnezia.AccountInfo{AvailableCountries: []amnezia.AvailableCountry{{ServerCountryCode: "us-east", ServerCountryName: "USA East", AvailableProtocols: []string{"vless"}}}}
+	p := info.CatalogProfiles("vless")[0]
+	resolved, awgCfg, err := resolveAmneziaRuntime(context.Background(), cfg, p)
+	if err != nil || awgCfg != nil || resolved.Protocol != "vless" || resolved.Host != "203.0.113.1" || resolved.Port != 443 {
+		t.Fatal("gateway VLESS runtime was not resolved")
+	}
+	f.items["tun-wave/amnezia/key"] = cliAWGExport(t, syntheticAWGKey(1))
+	if _, _, err := resolveAmneziaRuntime(context.Background(), cfg, p); !amnezia.IsRefusalCode(err, amnezia.CodeKeyInvalid) {
+		t.Fatal("stale gateway catalog accepted non-gateway credentials")
+	}
+	f.items["tun-wave/amnezia/key"] = amneziaTestURI
+	ordinary := model.Profile{ID: "ordinary", Protocol: "vless"}
+	actual, c, err := resolveAmneziaRuntime(context.Background(), cfg, ordinary)
+	if err != nil || c != nil || !reflect.DeepEqual(actual, ordinary) {
+		t.Fatal("ordinary VLESS passthrough changed")
+	}
+}
+
+func TestAmneziaGatewayRefusalsPreserveSessionAndFiles(t *testing.T) {
+	for _, stage := range []string{"account-api", "account-transport", "negotiate", "invalid-export", "executable", "helper-schema"} {
+		t.Run(stage, func(t *testing.T) {
+			f := installAmneziaFake(t)
+			installProbeSelectionSeams(t, &session.CurrentSession{ResolvedServer: "amnezia", ResolvedAlias: "us"}, true)
+			h := installReconnectHarness(t)
+			path, cfg := setupAmneziaConfig(t)
+			token := cliGatewayToken(t, "awg")
+			f.items["tun-wave/amnezia/key"] = token
+			export := cliAWGExport(t, "$WIREGUARD_CLIENT_PRIVATE_KEY")
+			installCLIGateway(t, func(path string, request map[string]any) any {
+				if path == "/v1/account_info" {
+					if stage == "account-api" {
+						return map[string]any{"http_status": 403, "error": cliGatewayAPIKey}
+					}
+					return cliGatewayCatalog("awg")
+				}
+				if stage == "negotiate" {
+					return map[string]any{"http_status": 403, "error": cliGatewayAPIKey}
+				}
+				if stage == "invalid-export" {
+					return map[string]any{"http_status": 201, "config": "vpn://malformed-secret"}
+				}
+				return map[string]any{"http_status": 201, "config": export}
+			})
+			if stage == "account-transport" {
+				// A transport error wrapped as transient must still be a hard
+				// gateway refusal rather than rescue the start with a stale cache.
+				client := amneziaGatewayClientFunc()
+				client.HTTPClient = &http.Client{Transport: cliRoundTripper(func(*http.Request) (*http.Response, error) {
+					return nil, &subscription.TransientFetchError{Err: errors.New(cliGatewayAPIKey)}
+				})}
+			}
+			if stage == "executable" {
+				previous := awgSidecarExecutableFunc
+				awgSidecarExecutableFunc = func() (string, error) { return "", errors.New(cliGatewayAPIKey) }
+				t.Cleanup(func() { awgSidecarExecutableFunc = previous })
+			}
+			if stage == "helper-schema" {
+				resolveLaunchModeCLI = func(string, config.PrivilegedLaunchConfig) (string, error) { return config.LaunchModeHelper, nil }
+				previous := validateHelperConfigCLI
+				validateHelperConfigCLI = func([]byte) error { return errors.New("synthetic helper refusal") }
+				t.Cleanup(func() { validateHelperConfigCLI = previous })
+			}
+			for _, p := range []string{cfg.SingboxConfigPath(), cfg.AWGConfigPath()} {
+				if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("previous runtime bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seedReconnectCache(t, cfg.CacheDir)
+			oldCache, err := os.ReadFile(filepath.Join(cfg.CacheDir, "snapshot.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := runAmneziaCLI(t, 1, []string{token, cliGatewayAPIKey, syntheticAWGKey(1), syntheticAWGKey(3), syntheticAWGKey(4)}, "reconnect", "--config", path)
+			code := amnezia.CodeGatewayError
+			if stage == "executable" {
+				code = amnezia.CodeEngineUnavailable
+			}
+			if stage != "helper-schema" && !strings.Contains(out, code) || !strings.Contains(out, "running sessions were left untouched") || len(h.events) != 0 || strings.Contains(out, "using cached snapshot") {
+				t.Fatal("gateway refusal modified session or fell back to cache")
+			}
+			for _, p := range []string{cfg.SingboxConfigPath(), cfg.AWGConfigPath()} {
+				data, err := os.ReadFile(p)
+				if err != nil || string(data) != "previous runtime bytes" {
+					t.Fatal("refusal did not restore all runtime configs")
+				}
+			}
+			if strings.HasPrefix(stage, "account-") {
+				data, err := os.ReadFile(filepath.Join(cfg.CacheDir, "snapshot.json"))
+				if err != nil || !bytes.Equal(data, oldCache) {
+					t.Fatal("account refusal modified cached snapshot")
+				}
+			}
+		})
+	}
+}
+
+type cliRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f cliRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

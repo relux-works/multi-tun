@@ -52,6 +52,16 @@ func RenderXrayFrontendWithOptions(cfg config.ProjectConfig, profile model.Profi
 	})
 }
 
+// RenderAWGFrontendWithOptions preserves endpoint and process loop protections.
+func RenderAWGFrontendWithOptions(cfg config.ProjectConfig, profile model.Profile, options RenderOptions) ([]byte, error) {
+	return renderWithProxyOutbound(cfg, profile, options, proxyRenderBackend{
+		Outbound:              map[string]any{"type": "socks", "tag": "proxy", "server": cfg.AWGSocksListen(), "server_port": cfg.AWGSocksPort(), "version": "5"},
+		UseUpstreamDirectDNS:  upstreamHostNeedsDirectDNS(profile),
+		UpstreamRouteExcludes: upstreamRouteExcludeCIDRs(profile),
+		DirectProcessNames:    cfg.AWGProcessNames(),
+	})
+}
+
 type proxyRenderBackend struct {
 	Outbound              map[string]any
 	UseUpstreamDirectDNS  bool
