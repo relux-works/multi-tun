@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -827,5 +829,164 @@ func TestConcurrentStoreUse(t *testing.T) {
 	wg.Wait()
 	if calls.Load() != workers*5 || store.SecurityBinary != "" || store.ClipboardBinary != "" {
 		t.Fatal("concurrent calls were lost or mutated shared default configuration")
+	}
+}
+
+func TestDefaultFallbackKeyFilePath(t *testing.T) {
+	t.Parallel()
+	store := DefaultKeychainStore()
+	if !strings.HasSuffix(store.FallbackKeyFile, filepath.Join(".config", "vless-tun", "keys", "amnezia.key")) {
+		t.Fatalf("unexpected default fallback key path: %q", store.FallbackKeyFile)
+	}
+}
+
+func TestKeychainExit36FallbackKeyFileLifecycle(t *testing.T) {
+	t.Parallel()
+	keyPath := filepath.Join(t.TempDir(), "keys", "amnezia.key")
+	secret := "synthetic-headless-amnezia-key"
+	lockedDelete := CommandResult{ExitCode: 36, Stderr: []byte("User interaction is not allowed.")}
+	lockedInteractive := CommandResult{ExitCode: 0, Stderr: []byte("security: SecKeychainItemCreateFromContent (<default>): User interaction is not allowed.")}
+	lockedLookup := CommandResult{ExitCode: 36, Stderr: []byte("security: SecKeychainSearchCopyNext: User interaction is not allowed.")}
+
+	// 1. Lookup on locked Keychain without existing fallback file still fails closed.
+	store, _ := fakeStore(t, lockedLookup)
+	store.FallbackKeyFile = keyPath
+	if _, err := store.LookupKey(context.Background(), KeychainSpec{}); !IsRefusalCode(err, CodeKeychainAccessDenied) {
+		t.Fatalf("expected access denied without fallback file, got %v", err)
+	}
+
+	// 2. StoreKey falling back on interactive security exit 0 + stderr writes strict 0700/0600 file.
+	store, _ = fakeStore(t, missingResult(), lockedInteractive)
+	store.FallbackKeyFile = keyPath
+	if err := store.StoreKey(context.Background(), StoreOptions{Secret: secret}); err != nil {
+		t.Fatalf("StoreKey fallback failed: %v", err)
+	}
+	dirInfo, err := os.Lstat(filepath.Dir(keyPath))
+	if err != nil || dirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("fallback key dir mode = %o, want 0700", dirInfo.Mode().Perm())
+	}
+	fileInfo, err := os.Lstat(keyPath)
+	if err != nil || fileInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("fallback key file mode = %o, want 0600", fileInfo.Mode().Perm())
+	}
+
+	// 3. LookupKey on locked Keychain reads from the 0600 fallback file.
+	store, _ = fakeStore(t, lockedLookup)
+	store.FallbackKeyFile = keyPath
+	got, err := store.LookupKey(context.Background(), KeychainSpec{})
+	if err != nil || got.Secret != secret || !got.UsedFallback {
+		t.Fatalf("LookupKey fallback failed: got=%+v err=%v", got, err)
+	}
+
+	// 4. LookupKey when Keychain later unlocks (not found in Keychain) still reads fallback file.
+	store, _ = fakeStore(t, missingResult(), missingResult())
+	store.FallbackKeyFile = keyPath
+	got, err = store.LookupKey(context.Background(), KeychainSpec{})
+	if err != nil || got.Secret != secret || !got.UsedFallback {
+		t.Fatalf("LookupKey not-found fallback failed: got=%+v err=%v", got, err)
+	}
+
+	// 5. StoreKey falling back on delete-generic-password exit 36 overwrites atomically with 0600.
+	updated := "synthetic-headless-amnezia-key-v2"
+	store, _ = fakeStore(t, lockedDelete)
+	store.FallbackKeyFile = keyPath
+	if err := store.StoreKey(context.Background(), StoreOptions{Secret: updated}); err != nil {
+		t.Fatalf("StoreKey delete-locked fallback failed: %v", err)
+	}
+	store, _ = fakeStore(t, lockedLookup)
+	store.FallbackKeyFile = keyPath
+	got, err = store.LookupKey(context.Background(), KeychainSpec{})
+	if err != nil || got.Secret != updated {
+		t.Fatalf("LookupKey after overwrite failed: got=%+v err=%v", got, err)
+	}
+
+	// 6. DeleteKey on locked Keychain removes the fallback file cleanly.
+	store, _ = fakeStore(t, lockedDelete)
+	store.FallbackKeyFile = keyPath
+	deleted, err := store.DeleteKey(context.Background(), "", "")
+	if err != nil || !deleted {
+		t.Fatalf("DeleteKey fallback failed: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Lstat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fallback key file still exists after delete: %v", err)
+	}
+
+	// 7. Unlocked Keychain StoreKey cleans up any stale fallback file.
+	if err := writeFallbackKeyFile(keyPath, secret); err != nil {
+		t.Fatal(err)
+	}
+	store, _ = fakeStore(t, missingResult(), CommandResult{})
+	store.FallbackKeyFile = keyPath
+	if err := store.StoreKey(context.Background(), StoreOptions{Secret: secret}); err != nil {
+		t.Fatalf("unlocked StoreKey failed: %v", err)
+	}
+	if _, err := os.Lstat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale fallback key file was not removed on unlocked Keychain write: %v", err)
+	}
+}
+
+func TestFallbackKeyFileRefusesInsecurePermissionsAndSymlinks(t *testing.T) {
+	t.Parallel()
+	secret := "synthetic-secret-must-not-leak"
+	locked := CommandResult{ExitCode: 36, Stderr: []byte("User interaction is not allowed.")}
+
+	// Non-0600 file permissions must be refused.
+	for _, perm := range []os.FileMode{0o644, 0o640, 0o604, 0o400, 0o666} {
+		dir := filepath.Join(t.TempDir(), "keys")
+		keyPath := filepath.Join(dir, "amnezia.key")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(keyPath, []byte(secret+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(keyPath, perm); err != nil {
+			t.Fatal(err)
+		}
+		store, _ := fakeStore(t, locked)
+		store.FallbackKeyFile = keyPath
+		got, err := store.LookupKey(context.Background(), KeychainSpec{})
+		if !IsRefusalCode(err, CodeKeychainAccessDenied) || got.Secret != "" || strings.Contains(err.Error(), secret) {
+			t.Fatalf("perm %o was not refused cleanly: got=%+v err=%v", perm, got, err)
+		}
+	}
+
+	// Group/world-accessible parent dir must be refused on read.
+	dir := filepath.Join(t.TempDir(), "keys")
+	keyPath := filepath.Join(dir, "amnezia.key")
+	if err := writeFallbackKeyFile(keyPath, secret); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := fakeStore(t, locked)
+	store.FallbackKeyFile = keyPath
+	if got, err := store.LookupKey(context.Background(), KeychainSpec{}); !IsRefusalCode(err, CodeKeychainAccessDenied) || got.Secret != "" {
+		t.Fatalf("0755 parent dir was not refused: got=%+v err=%v", got, err)
+	}
+
+	// Symlink at fallback key path must be refused on both read and write.
+	symDir := filepath.Join(t.TempDir(), "keys")
+	if err := os.MkdirAll(symDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(symDir, "real.key")
+	if err := os.WriteFile(target, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symPath := filepath.Join(symDir, "amnezia.key")
+	if err := os.Symlink(target, symPath); err != nil {
+		t.Fatal(err)
+	}
+	store, _ = fakeStore(t, locked)
+	store.FallbackKeyFile = symPath
+	if got, err := store.LookupKey(context.Background(), KeychainSpec{}); !IsRefusalCode(err, CodeKeychainAccessDenied) || got.Secret != "" {
+		t.Fatalf("symlink read was not refused: got=%+v err=%v", got, err)
+	}
+	store, _ = fakeStore(t, locked)
+	store.FallbackKeyFile = symPath
+	if err := store.StoreKey(context.Background(), StoreOptions{Secret: secret}); !IsRefusalCode(err, CodeKeychainAccessDenied) {
+		t.Fatalf("symlink write was not refused: %v", err)
 	}
 }

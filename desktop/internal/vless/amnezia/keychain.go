@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode"
 
 	"golang.org/x/term"
@@ -51,11 +53,27 @@ type KeychainStore struct {
 	Runner          CommandRunner
 	SecurityBinary  string
 	ClipboardBinary string
+	// FallbackKeyFile, when non-empty, is a strict 0600 file inside a 0700
+	// directory used when macOS Keychain refuses headless access (exit 36:
+	// "User interaction is not allowed").
+	FallbackKeyFile string
+}
+
+// DefaultFallbackKeyFile returns ~/.config/vless-tun/keys/amnezia.key.
+func DefaultFallbackKeyFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "vless-tun", "keys", "amnezia.key")
 }
 
 func DefaultKeychainStore() *KeychainStore {
 	return &KeychainStore{
-		Runner: runCommand, SecurityBinary: "/usr/bin/security", ClipboardBinary: "/usr/bin/pbpaste",
+		Runner:          runCommand,
+		SecurityBinary:  "/usr/bin/security",
+		ClipboardBinary: "/usr/bin/pbpaste",
+		FallbackKeyFile: DefaultFallbackKeyFile(),
 	}
 }
 
@@ -107,6 +125,14 @@ func itemNotFound(r CommandResult) bool {
 		strings.Contains(stderr, "seckeychainsearchcopynext")
 }
 
+func interactionNotAllowed(r CommandResult) bool {
+	stderr := strings.ToLower(string(r.Stderr))
+	return r.ExitCode == 36 ||
+		strings.Contains(stderr, "user interaction is not allowed") ||
+		strings.Contains(stderr, "errsecinteractionnotallowed") ||
+		strings.Contains(stderr, "-25308")
+}
+
 // Interactive security can report failures solely through stderr with exit 0.
 // Admit only a clean exit without diagnostics; never echo diagnostics to users.
 func commandFailed(r CommandResult) bool {
@@ -119,6 +145,128 @@ func accessDenied(r CommandResult) error {
 		cause = fmt.Errorf("security command failed (exit %d)", r.ExitCode)
 	}
 	return WrapRefusal(CodeKeychainAccessDenied, "Keychain access failed", cause)
+}
+
+func writeFallbackKeyFile(path, secret string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return WrapRefusal(CodeKeychainAccessDenied, "fallback key directory unavailable", err)
+	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+		return NewRefusal(CodeKeychainAccessDenied, "fallback key directory must be a private directory")
+	}
+	if dirInfo.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return WrapRefusal(CodeKeychainAccessDenied, "fallback key directory permissions must be 0700", err)
+		}
+		dirInfo, err = os.Lstat(dir)
+		if err != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 || dirInfo.Mode().Perm()&0o077 != 0 {
+			return NewRefusal(CodeKeychainAccessDenied, "fallback key directory permissions must be 0700")
+		}
+	}
+	if existing, err := os.Lstat(path); err == nil {
+		if !existing.Mode().IsRegular() {
+			return NewRefusal(CodeKeychainAccessDenied, "fallback key file must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WrapRefusal(CodeKeychainAccessDenied, "cannot inspect fallback key file", err)
+	}
+	f, err := os.CreateTemp(dir, ".amnezia-key-*")
+	if err != nil {
+		return WrapRefusal(CodeKeychainAccessDenied, "cannot create fallback key file", err)
+	}
+	tmpPath := f.Name()
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		cleanup()
+		return WrapRefusal(CodeKeychainAccessDenied, "cannot protect fallback key file", err)
+	}
+	if _, err := io.WriteString(f, secret+"\n"); err != nil {
+		cleanup()
+		return WrapRefusal(CodeKeychainAccessDenied, "cannot write fallback key file", err)
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return WrapRefusal(CodeKeychainAccessDenied, "cannot sync fallback key file", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return WrapRefusal(CodeKeychainAccessDenied, "cannot close fallback key file", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return WrapRefusal(CodeKeychainAccessDenied, "cannot install fallback key file", err)
+	}
+	finalInfo, err := os.Lstat(path)
+	if err != nil || !finalInfo.Mode().IsRegular() || finalInfo.Mode().Perm() != 0o600 {
+		return NewRefusal(CodeKeychainAccessDenied, "fallback key file permissions must be 0600")
+	}
+	return nil
+}
+
+func readFallbackKeyFile(path string) (string, bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, WrapRefusal(CodeKeychainAccessDenied, "cannot inspect fallback key file", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", true, NewRefusal(CodeKeychainAccessDenied, "fallback key file must be a regular file")
+	}
+	if info.Mode().Perm() != 0o600 {
+		return "", true, NewRefusal(CodeKeychainAccessDenied, "fallback key file permissions must be 0600")
+	}
+	dirInfo, err := os.Lstat(filepath.Dir(path))
+	if err != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 || dirInfo.Mode().Perm()&0o077 != 0 {
+		return "", true, NewRefusal(CodeKeychainAccessDenied, "fallback key directory permissions must be 0700")
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", true, WrapRefusal(CodeKeychainAccessDenied, "cannot open fallback key file", err)
+	}
+	defer f.Close()
+	fdInfo, err := f.Stat()
+	if err != nil || !fdInfo.Mode().IsRegular() || fdInfo.Mode().Perm() != 0o600 {
+		return "", true, NewRefusal(CodeKeychainAccessDenied, "fallback key file permissions must be 0600")
+	}
+	const limit = 4 << 20
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", true, WrapRefusal(CodeKeychainAccessDenied, "cannot read fallback key file", err)
+	}
+	if len(data) > limit {
+		return "", true, NewRefusal(CodeKeyInvalid, "fallback key file exceeds 4 MiB")
+	}
+	return strings.TrimSpace(string(data)), true, nil
+}
+
+func removeFallbackKeyFile(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, WrapRefusal(CodeKeychainAccessDenied, "cannot inspect fallback key file", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, NewRefusal(CodeKeychainAccessDenied, "fallback key file must be a regular file")
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, WrapRefusal(CodeKeychainAccessDenied, "cannot delete fallback key file", err)
+	}
+	return true, nil
 }
 
 type KeychainResult struct {
@@ -152,7 +300,29 @@ func (s *KeychainStore) lookupKey(ctx context.Context, spec KeychainSpec) (Keych
 				result.Service, result.UsedFallback = spec.FallbackService, true
 				continue
 			}
+			if s.FallbackKeyFile != "" {
+				secret, found, err := readFallbackKeyFile(s.FallbackKeyFile)
+				if err != nil {
+					return result, err
+				}
+				if found {
+					result.Secret = secret
+					result.UsedFallback = true
+					return result, validateSecret(result.Secret, false)
+				}
+			}
 			return result, NewRefusal(CodeKeyMissing, "Amnezia key is missing from Keychain")
+		}
+		if interactionNotAllowed(r) && s.FallbackKeyFile != "" {
+			secret, found, err := readFallbackKeyFile(s.FallbackKeyFile)
+			if err != nil {
+				return result, err
+			}
+			if found {
+				result.Secret = secret
+				result.UsedFallback = true
+				return result, validateSecret(result.Secret, false)
+			}
 		}
 		if commandFailed(r) {
 			return result, accessDenied(r)
@@ -210,12 +380,28 @@ func (s *KeychainStore) StoreKey(ctx context.Context, options StoreOptions) erro
 	if len(line) > 4095 {
 		return NewRefusal(CodeKeyInvalid, "Keychain input exceeds the security interactive command limit")
 	}
-	if _, err := s.DeleteKey(ctx, options.Service, options.Account); err != nil {
-		return err
+	delRes := s.command(ctx, false, []string{"delete-generic-password", "-s", options.Service, "-a", options.Account}, nil)
+	if ctx.Err() != nil {
+		return accessDenied(delRes)
+	}
+	if interactionNotAllowed(delRes) && s.FallbackKeyFile != "" {
+		return writeFallbackKeyFile(s.FallbackKeyFile, options.Secret)
+	}
+	if !itemNotFound(delRes) && commandFailed(delRes) {
+		return accessDenied(delRes)
 	}
 	r := s.command(ctx, false, []string{"-i"}, []byte(line))
+	if ctx.Err() != nil {
+		return accessDenied(r)
+	}
+	if interactionNotAllowed(r) && s.FallbackKeyFile != "" {
+		return writeFallbackKeyFile(s.FallbackKeyFile, options.Secret)
+	}
 	if commandFailed(r) {
 		return accessDenied(r)
+	}
+	if s.FallbackKeyFile != "" {
+		_, _ = removeFallbackKeyFile(s.FallbackKeyFile)
 	}
 	return nil
 }
@@ -232,11 +418,23 @@ func (s *KeychainStore) DeleteKey(ctx context.Context, service, account string) 
 		account = DefaultKeychainAccount
 	}
 	r := s.command(ctx, false, []string{"delete-generic-password", "-s", service, "-a", account}, nil)
-	if ctx.Err() == nil && itemNotFound(r) {
+	if ctx.Err() != nil {
+		return false, accessDenied(r)
+	}
+	if interactionNotAllowed(r) && s.FallbackKeyFile != "" {
+		return removeFallbackKeyFile(s.FallbackKeyFile)
+	}
+	if itemNotFound(r) {
+		if s.FallbackKeyFile != "" {
+			return removeFallbackKeyFile(s.FallbackKeyFile)
+		}
 		return false, nil
 	}
 	if commandFailed(r) {
 		return false, accessDenied(r)
+	}
+	if s.FallbackKeyFile != "" {
+		_, _ = removeFallbackKeyFile(s.FallbackKeyFile)
 	}
 	return true, nil
 }
