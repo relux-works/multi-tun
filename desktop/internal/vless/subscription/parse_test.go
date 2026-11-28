@@ -20,6 +20,70 @@ func stableAliasProfiles() []model.Profile {
 	}
 }
 
+func TestProfileCountryCodeExplicitAndFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, explicit, display, want string
+	}{
+		{"explicit", "US", "relay", "US"},
+		{"normalized", " us ", "Germany", "US"},
+		{"flag fallback", "", "🇺🇸 relay", "US"},
+		{"name fallback", "", "United States", "US"},
+		{"invalid fallback", "USA", "Germany", "DE"},
+		{"nonletters fallback", "1S", "Germany", "DE"},
+		{"nonascii fallback", "ſg", "Germany", "DE"},
+		{"unknown", "", "relay", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ProfileCountryCode(model.Profile{CountryCode: tc.explicit, Name: tc.display}); got != tc.want {
+				t.Fatalf("ProfileCountryCode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Country filtering precedes probe/sticky selection, and skipping probes performs
+// no dialing. A real probe is covered by an injected in-memory connection.
+func TestExplicitCountrySelectionProbeAndSticky(t *testing.T) {
+	profiles := []model.Profile{
+		{ID: "de", CountryCode: "DE", Name: "relay zero", Host: "203.0.113.1", Port: 443},
+		{ID: "us-a", CountryCode: "US", Name: "relay one", Host: "203.0.113.2", Port: 443},
+		{ID: "us-b", CountryCode: "US", Name: "relay two", Host: "203.0.113.3", Port: 443},
+	}
+	for _, tc := range []struct{ sticky, want string }{
+		{"us-b", "us-b"}, {"de", "us-a"}, {"missing", "us-a"}, {"", "us-a"},
+	} {
+		t.Run("skip-"+tc.sticky, func(t *testing.T) {
+			resolution, err := ResolveProfileWithOptions(profiles, SelectOptions{
+				Match: &ProfileMatch{Country: "US"}, Pick: "probe", SkipProbe: true, StickyID: tc.sticky,
+				DialContext: func(context.Context, string, string) (net.Conn, error) {
+					t.Error("SkipProbe dialed an endpoint")
+					return nil, errors.New("unexpected dial")
+				},
+			})
+			if err != nil || resolution.Profile.ID != tc.want || !resolution.Matched {
+				t.Fatalf("selected %q, error %v, want %q", resolution.Profile.ID, err, tc.want)
+			}
+		})
+	}
+	resolution, err := ResolveProfileWithOptions(profiles, SelectOptions{
+		Match: &ProfileMatch{Country: "US"}, Pick: "probe",
+		DialContext: func(_ context.Context, _, address string) (net.Conn, error) {
+			if address != "203.0.113.3:443" {
+				return nil, errors.New("offline refusal")
+			}
+			client, server := net.Pipe()
+			_ = server.Close()
+			return client, nil
+		},
+	})
+	if err != nil || resolution.Profile.ID != "us-b" {
+		t.Fatalf("probe selected %q, error %v", resolution.Profile.ID, err)
+	}
+	if _, err := SelectProfileWithOptions(profiles[1:2], SelectOptions{Match: &ProfileMatch{Country: "US"}}); err != nil {
+		t.Fatalf("explicit country did not match a plain display name: %v", err)
+	}
+}
+
 // The country alias survives a provider display-name rename because identity comes from the flag/country, not the name or hash id.
 func TestResolveProfileMatchCountrySurvivesRename(t *testing.T) {
 	before := stableAliasProfiles()

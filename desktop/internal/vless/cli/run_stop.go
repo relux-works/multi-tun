@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
+	"multi-tun/desktop/internal/vless/amnezia"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/session"
@@ -616,6 +617,9 @@ func (a *App) prepareStart(cfg config.ProjectConfig, options startOptions) (prep
 	}
 	resolution, err := resolveProfileWithPolicy(snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options.match, options.pick, policy)
 	if err != nil {
+		if cfg.SourceMode() == config.SourceModeAmnezia && options.match != nil && errors.Is(err, subscription.ErrNoMatchingProfiles) {
+			return preparedStart{}, amnezia.WrapRefusal(amnezia.CodeRegionUnmatched, "No Amnezia profiles match the configured region", err)
+		}
 		return preparedStart{}, formatProfileSelectionError(err, snapshot.Profiles, cfg.DefaultProfileSelector(), cfg.DefaultProfileTransport(), options, refreshed)
 	}
 	profile := resolution.Profile

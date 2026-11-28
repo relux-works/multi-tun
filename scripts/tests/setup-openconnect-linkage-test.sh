@@ -97,6 +97,8 @@ run_linkage_check() {
   env \
     PATH="$fixture_dir/bin:$SYSTEM_PATH" \
     HOME="$fixture_dir/home" \
+    XDG_CONFIG_HOME="$fixture_dir/home/.config" \
+    XDG_CACHE_HOME="$fixture_dir/home/.cache" \
     BREW_LOG="$fixture_dir/brew.log" \
     FAKE_BREW_PREFIX="$fixture_dir/prefix" \
     FAKE_REPAIRED_MARKER="$fixture_dir/reinstalled" \
@@ -247,6 +249,8 @@ EOF
   env \
     PATH="$fixture_dir/bin:$SYSTEM_PATH" \
     HOME="$fixture_dir/home" \
+    XDG_CONFIG_HOME="$fixture_dir/home/.config" \
+    XDG_CACHE_HOME="$fixture_dir/home/.cache" \
     BREW_LOG="$fixture_dir/brew.log" \
     FAKE_BREW_PREFIX="$fixture_dir/prefix" \
     FAKE_REPAIRED_MARKER="$fixture_dir/reinstalled" \
@@ -256,9 +260,41 @@ EOF
   assert_contains "$fixture_dir/brew.log" 'install zbar'
   assert_appears_before "$fixture_dir/brew.log" 'install totp-cli' 'reinstall openconnect'
   [[ -e "$fixture_dir/reinstalled" ]] || fail 'full setup did not repair stale Homebrew openconnect'
+  [[ -L "$fixture_dir/home/.local/bin/tun-wave" && -f "$fixture_dir/home/.local/bin/tun-wave" ]] || fail 'full setup did not link tun-wave'
+  [[ -L "$fixture_dir/home/.local/bin/vless-tun" && -f "$fixture_dir/home/.local/bin/vless-tun" ]] || fail 'full setup did not link vless-tun compatibility alias'
+  [[ "$(readlink "$fixture_dir/home/.local/bin/vless-tun")" == "$fixture_dir/home/.local/bin/tun-wave" ]] || fail 'vless-tun alias does not point to tun-wave'
+  [[ "$(readlink "$fixture_dir/project/vless-tun")" == tun-wave ]] || fail 'repo vless-tun alias does not point to tun-wave'
   [[ -f "$fixture_dir/home/.agents/skills/vpn-config/SKILL.md" ]] || fail 'full setup did not install vpn-config skill'
   [[ -L "$fixture_dir/home/.claude/skills/vpn-config" ]] || fail 'full setup did not link Claude vpn-config skill'
   [[ -L "$fixture_dir/home/.codex/skills/vpn-config" ]] || fail 'full setup did not link Codex vpn-config skill'
+  [[ -f "$fixture_dir/home/.config/tun-wave/config.json" ]] || fail 'full setup did not initialize canonical config'
+
+  # Re-running with an existing legacy config must preserve it and avoid
+  # introducing a canonical config that would shadow it.
+  mkdir -p "$fixture_dir/home/.config/vless-tun"
+  mv "$fixture_dir/home/.config/tun-wave/config.json" "$fixture_dir/home/.config/vless-tun/config.json"
+  printf '%s\n' legacy-config > "$fixture_dir/home/.config/vless-tun/config.json"
+  local config_state
+  for config_state in legacy both; do
+    if [[ "$config_state" == both ]]; then
+      printf '%s\n' canonical-config > "$fixture_dir/home/.config/tun-wave/config.json"
+    fi
+    env \
+      PATH="$fixture_dir/bin:$SYSTEM_PATH" \
+      HOME="$fixture_dir/home" \
+      XDG_CONFIG_HOME="$fixture_dir/home/.config" \
+      XDG_CACHE_HOME="$fixture_dir/home/.cache" \
+      BREW_LOG="$fixture_dir/brew.log" \
+      FAKE_BREW_PREFIX="$fixture_dir/prefix" \
+      FAKE_REPAIRED_MARKER="$fixture_dir/reinstalled" \
+      "$fixture_dir/project/scripts/setup.sh"
+    assert_contains "$fixture_dir/home/.config/vless-tun/config.json" legacy-config
+    if [[ "$config_state" == legacy ]]; then
+      [[ ! -f "$fixture_dir/home/.config/tun-wave/config.json" ]] || fail 'setup shadowed legacy config'
+    else
+      assert_contains "$fixture_dir/home/.config/tun-wave/config.json" canonical-config
+    fi
+  done
 }
 
 test_cross_build_skips_brew_repair() {
@@ -301,6 +337,9 @@ EOF
     "$fixture_dir/project/scripts/setup.sh" --mac-arch arm64
 
   [[ ! -s "$fixture_dir/brew.log" ]] || fail 'cross-build invoked Homebrew repair'
+  [[ -f "$fixture_dir/project/artifacts/releases/tun-wave-darwin-arm64" ]] || fail 'cross-build did not emit canonical binary'
+  [[ -f "$fixture_dir/project/artifacts/releases/vless-tun-darwin-arm64" ]] || fail 'cross-build did not emit compatibility binary'
+  cmp "$fixture_dir/project/artifacts/releases/tun-wave-darwin-arm64" "$fixture_dir/project/artifacts/releases/vless-tun-darwin-arm64" || fail 'cross-build compatibility binary differs'
 }
 
 test_cross_build_check_only_skips_brew_repair() {

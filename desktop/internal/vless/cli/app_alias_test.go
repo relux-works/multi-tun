@@ -61,7 +61,7 @@ func TestCommandConfigPathResolvesRelativeNameUnderConfigDir(t *testing.T) {
 		t.Fatalf("commandConfigPath() error = %v", err)
 	}
 
-	want := filepath.Join(configRoot, "vless-tun", "fortinet.json")
+	want := filepath.Join(configRoot, "tun-wave", "fortinet.json")
 	if got != want {
 		t.Fatalf("commandConfigPath() = %q, want %q", got, want)
 	}
@@ -76,6 +76,27 @@ func TestCommandConfigPathPreservesAbsolutePath(t *testing.T) {
 	}
 	if got != absolute {
 		t.Fatalf("commandConfigPath() = %q, want %q", got, absolute)
+	}
+}
+
+func TestCommandConfigPathLegacyFallbackAndCanonicalPrecedence(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	legacy := filepath.Join(root, "vless-tun", "example.json")
+	canonical := filepath.Join(root, "tun-wave", "example.json")
+	for _, path := range []string{legacy, canonical} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"example", "example.json"} {
+			got, err := commandConfigPath("", []string{name})
+			if err != nil || got != path {
+				t.Fatalf("resolved %q = %q, %v, want %q", name, got, err, path)
+			}
+		}
 	}
 }
 

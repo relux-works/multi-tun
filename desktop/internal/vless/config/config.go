@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 
 	"multi-tun/desktop/internal/core/failclosed"
 )
@@ -17,8 +18,13 @@ import (
 const legacyRepoConfigPath = "configs/local.json"
 
 const (
-	SourceModeProxy  = "proxy"
-	SourceModeDirect = "direct"
+	SourceModeProxy        = "proxy"
+	SourceModeDirect       = "direct"
+	SourceModeAmnezia      = "amnezia"
+	CanonicalConfigDirName = "tun-wave"
+	LegacyConfigDirName    = "vless-tun"
+	EnvConfigPath          = "TUN_WAVE_CONFIG"
+	LegacyEnvConfigPath    = "VLESS_TUN_CONFIG"
 
 	RenderModeTun = "tun"
 
@@ -132,10 +138,30 @@ type ProfileMatch struct {
 }
 
 type SourceConfig struct {
-	Mode      string            `json:"mode,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	UserAgent string            `json:"user_agent,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
+	Mode      string                `json:"mode,omitempty"`
+	URL       string                `json:"url,omitempty"`
+	UserAgent string                `json:"user_agent,omitempty"`
+	Headers   map[string]string     `json:"headers,omitempty"`
+	Keychain  *SourceKeychainConfig `json:"keychain,omitempty"`
+}
+
+// SourceKeychainConfig names an existing credential; it never contains the key.
+type SourceKeychainConfig struct {
+	Service         string `json:"service,omitempty"`
+	FallbackService string `json:"fallback_service,omitempty"`
+	Account         string `json:"account,omitempty"`
+}
+
+func (c *SourceKeychainConfig) UnmarshalJSON(data []byte) error {
+	type plain SourceKeychainConfig
+	var value plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&value); err != nil {
+		return err
+	}
+	*c = SourceKeychainConfig(value)
+	return nil
 }
 
 type DefaultConfig struct {
@@ -245,9 +271,20 @@ type PrivilegedLaunchConfig struct {
 
 func DefaultPath() string {
 	if dir := userConfigRoot(); dir != "" {
-		return filepath.Join(dir, "vless-tun", "config.json")
+		return filepath.Join(dir, CanonicalConfigDirName, "config.json")
 	}
 	return legacyRepoConfigPath
+}
+
+func LegacyGlobalConfigPath() string {
+	if dir := userConfigRoot(); dir != "" {
+		return filepath.Join(dir, LegacyConfigDirName, "config.json")
+	}
+	return legacyRepoConfigPath
+}
+
+func DefaultAmneziaUSProfile() ProfileConfig {
+	return ProfileConfig{Match: &ProfileMatch{Country: "US"}, Pick: "probe"}
 }
 
 func LegacyRepoConfigPath() string {
@@ -300,9 +337,13 @@ func DefaultForPath(path string) ProjectConfig {
 		},
 	}
 
-	if absPath, err := filepath.Abs(path); err == nil && absPath == defaultPathAbs() {
+	if absPath, err := filepath.Abs(path); err == nil && (absPath == defaultPathAbs() || absPath == legacyGlobalConfigPathAbs()) {
+		dirName := CanonicalConfigDirName
+		if absPath != defaultPathAbs() {
+			dirName = LegacyConfigDirName
+		}
 		if cacheDir := userCacheRoot(); cacheDir != "" {
-			cfg.CacheDir = filepath.Join(cacheDir, "vless-tun")
+			cfg.CacheDir = filepath.Join(cacheDir, dirName)
 		}
 		cfg.Artifacts.SingboxConfigPath = filepath.Join(filepath.Dir(absPath), "generated", "sing-box.json")
 	}
@@ -326,6 +367,30 @@ func Load(path string) (ProjectConfig, error) {
 	}
 
 	cfg := DefaultForPath(resolvedPath)
+	// Amnezia sources must not inherit the template subscription URL. Explicit
+	// URLs in the document are still decoded below and rejected by validation.
+	var modes struct {
+		Source struct {
+			Mode string `json:"mode"`
+		} `json:"source"`
+		Servers map[string]struct {
+			Source struct {
+				Mode string `json:"mode"`
+			} `json:"source"`
+		} `json:"servers"`
+	}
+	if err := json.Unmarshal(raw, &modes); err != nil {
+		return ProjectConfig{}, err
+	}
+	if strings.EqualFold(strings.TrimSpace(modes.Source.Mode), SourceModeAmnezia) {
+		cfg.Source.URL = ""
+	}
+	for _, server := range modes.Servers {
+		if strings.EqualFold(strings.TrimSpace(server.Source.Mode), SourceModeAmnezia) {
+			cfg.Source.URL = ""
+			break
+		}
+	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return ProjectConfig{}, err
 	}
@@ -351,6 +416,9 @@ func Setup(path string, options SetupOptions, force bool) (ProjectConfig, error)
 	}
 
 	cfg := DefaultForPath(path)
+	if strings.EqualFold(strings.TrimSpace(options.SourceMode), SourceModeAmnezia) {
+		cfg.Source.URL = ""
+	}
 	if options.SourceURL != "" {
 		cfg.Source.URL = strings.TrimSpace(options.SourceURL)
 		if strings.TrimSpace(options.SourceMode) != "" {
@@ -409,6 +477,10 @@ func SetCurrent(path string, options SelectionOptions) (ProjectConfig, Effective
 func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectConfig {
 	serverName := firstNonEmpty(options.ServerName, "default")
 	profileName := firstNonEmpty(options.ConfigProfile, "default")
+	if c.SourceMode() == SourceModeAmnezia {
+		serverName = firstNonEmpty(options.ServerName, "amnezia")
+		profileName = firstNonEmpty(options.ConfigProfile, "us")
+	}
 	selector := c.legacyDefaultProfileSelector()
 
 	artifacts := c.Artifacts
@@ -420,6 +492,9 @@ func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectCon
 	singbox := cloneSingboxConfig(c.Singbox)
 	profile := ProfileConfig{
 		Selector: selector,
+	}
+	if c.SourceMode() == SourceModeAmnezia && strings.TrimSpace(options.ProfileSelector) == "" {
+		profile = DefaultAmneziaUSProfile()
 	}
 
 	c.Current = &CurrentConfig{
@@ -457,13 +532,20 @@ func ResolveLoadPath(path string) (string, error) {
 		return filepath.Abs(path)
 	}
 
-	if envPath := os.Getenv("VLESS_TUN_CONFIG"); envPath != "" {
-		return filepath.Abs(envPath)
+	for _, name := range []string{EnvConfigPath, LegacyEnvConfigPath} {
+		if envPath := os.Getenv(name); envPath != "" {
+			return filepath.Abs(envPath)
+		}
 	}
 
 	globalPath := ResolveInitPath("")
 	if _, err := os.Stat(globalPath); err == nil {
 		return globalPath, nil
+	}
+	if legacyPath := legacyGlobalConfigPathAbs(); legacyPath != globalPath {
+		if _, err := os.Stat(legacyPath); err == nil {
+			return legacyPath, nil
+		}
 	}
 
 	if legacyPath, ok := findUpward(legacyRepoConfigPath); ok {
@@ -598,13 +680,29 @@ func validateTransportValue(path, value string) error {
 }
 
 func (c ProjectConfig) validateFlat() error {
-	if c.SourceURL() == "" {
-		return errors.New("source.url is required")
-	}
 	switch c.SourceMode() {
-	case SourceModeProxy, SourceModeDirect:
+	case SourceModeProxy, SourceModeDirect, SourceModeAmnezia:
 	default:
-		return errors.New("source.mode must be one of: proxy, direct")
+		return errors.New("source.mode must be one of: proxy, direct, amnezia")
+	}
+	if c.SourceMode() == SourceModeAmnezia {
+		if c.SourceURL() != "" {
+			return errors.New("Amnezia keys must be stored in macOS Keychain, not plaintext source.url")
+		}
+		if c.Source.Keychain != nil {
+			for _, value := range []string{c.Source.Keychain.Service, c.Source.Keychain.FallbackService, c.Source.Keychain.Account} {
+				if strings.ContainsFunc(value, unicode.IsControl) {
+					return errors.New("source.keychain fields must not contain control characters")
+				}
+			}
+		}
+	} else {
+		if c.Source.Keychain != nil {
+			return errors.New("source.keychain is only supported when source.mode is amnezia")
+		}
+		if c.SourceURL() == "" {
+			return errors.New("source.url is required")
+		}
 	}
 	if c.CacheDir == "" {
 		return errors.New("cache_dir is required")
@@ -911,8 +1009,32 @@ func currentProfileName(current *CurrentConfig) string {
 
 func mergeSourceConfig(base SourceConfig, override SourceConfig) SourceConfig {
 	result := base
+	if base.Keychain != nil {
+		value := *base.Keychain
+		result.Keychain = &value
+	}
+	if override.Keychain != nil {
+		if result.Keychain == nil {
+			result.Keychain = &SourceKeychainConfig{}
+		}
+		if override.Keychain.Service != "" {
+			result.Keychain.Service = override.Keychain.Service
+		}
+		if override.Keychain.FallbackService != "" {
+			result.Keychain.FallbackService = override.Keychain.FallbackService
+		}
+		if override.Keychain.Account != "" {
+			result.Keychain.Account = override.Keychain.Account
+		}
+	}
 	if mode := strings.TrimSpace(override.Mode); mode != "" {
 		result.Mode = mode
+		if strings.EqualFold(mode, SourceModeAmnezia) && strings.TrimSpace(override.URL) == "" {
+			result.URL = ""
+		}
+		if !strings.EqualFold(mode, SourceModeAmnezia) && override.Keychain == nil {
+			result.Keychain = nil
+		}
 	}
 	if url := strings.TrimSpace(override.URL); url != "" {
 		result.URL = url
@@ -1172,6 +1294,20 @@ func (c ProjectConfig) SourceURL() string {
 		return effective.SourceURL()
 	}
 	return firstNonEmpty(strings.TrimSpace(c.Source.URL), strings.TrimSpace(c.SubscriptionURL))
+}
+
+func (c ProjectConfig) SourceKeychain() SourceKeychainConfig {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.SourceKeychain()
+	}
+	value := SourceKeychainConfig{}
+	if c.Source.Keychain != nil {
+		value = *c.Source.Keychain
+	}
+	value.Service = firstNonEmpty(value.Service, "tun-wave")
+	value.FallbackService = firstNonEmpty(value.FallbackService, "multi-tun")
+	value.Account = firstNonEmpty(value.Account, "amnezia/key")
+	return value
 }
 
 // SourceUserAgent returns the optional User-Agent used for subscription fetches.
@@ -1556,6 +1692,14 @@ func writeJSON(path string, value any) error {
 
 func defaultPathAbs() string {
 	path := DefaultPath()
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+func legacyGlobalConfigPathAbs() string {
+	path := LegacyGlobalConfigPath()
 	if abs, err := filepath.Abs(path); err == nil {
 		return abs
 	}

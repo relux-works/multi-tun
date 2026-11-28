@@ -1,6 +1,7 @@
 # Binaries
 /vpn-config
 /vless-tun
+/tun-wave
 /ssh-proxy
 /openconnect-tun
 /android-release

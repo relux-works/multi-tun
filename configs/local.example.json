@@ -4,6 +4,24 @@
     "profile": "default"
   },
   "servers": {
+    "amnezia": {
+      "source": {
+        "mode": "amnezia",
+        "keychain": {
+          "service": "tun-wave",
+          "fallback_service": "multi-tun",
+          "account": "amnezia/key"
+        }
+      },
+      "cache_dir": ".cache/tun-wave/amnezia",
+      "artifacts": {
+        "singbox_config_path": "configs/generated/sing-box_amnezia.json"
+      },
+      "engine": {"type": "sing-box"},
+      "profiles": {
+        "us": {"match": {"country": "US"}, "pick": "probe"}
+      }
+    },
     "dance": {
       "source": {
         "mode": "proxy",

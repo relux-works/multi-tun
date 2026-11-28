@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
@@ -104,6 +106,18 @@ func (a *App) runDiagnoseConfig(args []string) int {
 	if err != nil {
 		fmt.Fprintf(a.stderr, "diagnose config failed: %v\n", err)
 		return 1
+	}
+	if cfg.SourceMode() == config.SourceModeAmnezia {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		status := amneziaStoreFunc().CheckKey(ctx, amneziaKeychainSpec(cfg))
+		cancel()
+		fmt.Fprintf(a.stdout, "keychain_service: %s\nkeychain_account: %s\nkeychain_state: %s\n", status.Service, status.Account, status.State)
+		if status.RefusalCode != "" {
+			fmt.Fprintf(a.stdout, "keychain_refusal_code: %s\n", status.RefusalCode)
+		}
+		if status.State != "present" {
+			return 1
+		}
 	}
 
 	var resolutionLine string

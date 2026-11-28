@@ -7,7 +7,8 @@ HOST_OS="$(uname -s)"
 HOST_ARCH_RAW="$(uname -m)"
 
 PROJECT_NAME="multi-tun"
-VLESS_CLI_NAME="vless-tun"
+VLESS_CLI_NAME="tun-wave"
+VLESS_COMPAT_NAME="vless-tun"
 SSH_PROXY_CLI_NAME="ssh-proxy"
 OPENCONNECT_CLI_NAME="openconnect-tun"
 DUMP_CLI_NAME="dump"
@@ -18,8 +19,13 @@ VPN_AUTH_CLI_NAME="vpn-auth"
 VPN_AUTH_PACKAGE_DIR="$PROJECT_ROOT/desktop/cmd/vpn-auth"
 
 BIN_DIR="$HOME/.local/bin"
-GLOBAL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vless-tun"
+GLOBAL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tun-wave"
 GLOBAL_CONFIG_PATH="$GLOBAL_CONFIG_DIR/config.json"
+LEGACY_GLOBAL_CONFIG_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/vless-tun/config.json"
+if [[ ! -f "$GLOBAL_CONFIG_PATH" && -f "$LEGACY_GLOBAL_CONFIG_PATH" ]]; then
+  GLOBAL_CONFIG_PATH="$LEGACY_GLOBAL_CONFIG_PATH"
+  GLOBAL_CONFIG_DIR="$(dirname "$GLOBAL_CONFIG_PATH")"
+fi
 SSH_PROXY_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ssh-proxy"
 SSH_PROXY_CONFIG_PATH="$SSH_PROXY_CONFIG_DIR/config.json"
 LEGACY_CONFIG_PATH="$PROJECT_ROOT/configs/local.json"
@@ -310,7 +316,7 @@ if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
   mkdir -p "$RELEASES_DIR"
 fi
 
-go_build_desktop_binary "$VLESS_OUTPUT_PATH" ./desktop/cmd/vless-tun/
+go_build_desktop_binary "$VLESS_OUTPUT_PATH" ./desktop/cmd/tun-wave/
 echo "Building $SSH_PROXY_CLI_NAME binary..."
 go_build_desktop_binary "$SSH_PROXY_OUTPUT_PATH" ./desktop/cmd/ssh-proxy/
 echo "Building $OPENCONNECT_CLI_NAME binary..."
@@ -323,9 +329,11 @@ echo "Building $ANDROID_RELEASE_CLI_NAME binary..."
 go_build_desktop_binary "$ANDROID_RELEASE_OUTPUT_PATH" ./android/ops/cmd/android-release/
 
 if [[ "$CROSS_BUILD_ONLY" == "1" ]]; then
+  cp "$VLESS_OUTPUT_PATH" "$(build_output_path "$VLESS_COMPAT_NAME")"
   cp "$DUMP_OUTPUT_PATH" "$(build_output_path "$CISCO_DUMP_COMPAT_NAME")"
   echo "Cross-build artifacts:"
   echo "  $VLESS_OUTPUT_PATH"
+  echo "  $(build_output_path "$VLESS_COMPAT_NAME")"
   echo "  $SSH_PROXY_OUTPUT_PATH"
   echo "  $OPENCONNECT_OUTPUT_PATH"
   echo "  $DUMP_OUTPUT_PATH"
@@ -353,6 +361,8 @@ chmod +x "$VPN_AUTH_OUTPUT_PATH"
 
 mkdir -p "$BIN_DIR"
 ln -sf "$VLESS_OUTPUT_PATH" "$BIN_DIR/$VLESS_CLI_NAME"
+ln -sf "$BIN_DIR/$VLESS_CLI_NAME" "$BIN_DIR/$VLESS_COMPAT_NAME"
+ln -sf "$VLESS_CLI_NAME" "$PROJECT_ROOT/$VLESS_COMPAT_NAME"
 ln -sf "$SSH_PROXY_OUTPUT_PATH" "$BIN_DIR/$SSH_PROXY_CLI_NAME"
 ln -sf "$OPENCONNECT_OUTPUT_PATH" "$BIN_DIR/$OPENCONNECT_CLI_NAME"
 ln -sf "$DUMP_OUTPUT_PATH" "$BIN_DIR/$DUMP_CLI_NAME"
@@ -361,6 +371,7 @@ ln -sf "$VPN_CORE_OUTPUT_PATH" "$BIN_DIR/$VPN_CORE_CLI_NAME"
 ln -sf "$ANDROID_RELEASE_OUTPUT_PATH" "$BIN_DIR/$ANDROID_RELEASE_CLI_NAME"
 ln -sf "$VPN_AUTH_OUTPUT_PATH" "$BIN_DIR/$VPN_AUTH_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$VLESS_CLI_NAME"
+echo "  Alias  -> $BIN_DIR/$VLESS_COMPAT_NAME"
 echo "  Binary -> $BIN_DIR/$SSH_PROXY_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$OPENCONNECT_CLI_NAME"
 echo "  Binary -> $BIN_DIR/$DUMP_CLI_NAME"

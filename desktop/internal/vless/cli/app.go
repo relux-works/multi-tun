@@ -16,14 +16,23 @@ import (
 )
 
 type App struct {
-	stdout io.Writer
-	stderr io.Writer
+	stdout      io.Writer
+	stderr      io.Writer
+	programName string
 }
 
 func New(stdout, stderr io.Writer) *App {
+	return NewWithName(stdout, stderr, "vless-tun")
+}
+
+func NewWithName(stdout, stderr io.Writer, programName string) *App {
+	if strings.TrimSpace(programName) == "" {
+		programName = "tun-wave"
+	}
 	return &App{
-		stdout: stdout,
-		stderr: stderr,
+		stdout:      stdout,
+		stderr:      stderr,
+		programName: programName,
 	}
 }
 
@@ -39,6 +48,8 @@ func (a *App) Run(args []string) int {
 		return 0
 	case "setup":
 		return a.runSetup(args[1:])
+	case "auth":
+		return a.runAuth(args[1:])
 	case "init":
 		return a.runInit(args[1:])
 	case "refresh":
@@ -113,7 +124,7 @@ func (a *App) runSetup(args []string) int {
 
 	configPath := fs.String("config", "", "Path to config file")
 	sourceURL := fs.String("source-url", os.Getenv("DANCEVPN_SUBSCRIPTION_URL"), "VLESS source URL or literal vless:// URI")
-	sourceMode := fs.String("source-mode", "", "Optional source mode override: proxy or direct")
+	sourceMode := fs.String("source-mode", "", "Optional source mode override: proxy, direct or amnezia")
 	profileSelector := fs.String("profile", "", "Optional default profile selector by id, name, endpoint, transport, or substring")
 	serverName := fs.String("server", "default", "Configured VLESS server name to create")
 	configProfile := fs.String("config-profile", "default", "Configured VLESS profile alias to create")
@@ -121,6 +132,19 @@ func (a *App) runSetup(args []string) int {
 
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if strings.EqualFold(strings.TrimSpace(*sourceMode), config.SourceModeAmnezia) {
+		explicit := make(map[string]bool)
+		fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		if !explicit["source-url"] {
+			*sourceURL = ""
+		}
+		if !explicit["server"] {
+			*serverName = "amnezia"
+		}
+		if !explicit["config-profile"] {
+			*configProfile = "us"
+		}
 	}
 	resolvedConfigPath, err := commandConfigPath(*configPath, fs.Args())
 	if err != nil {
@@ -158,7 +182,9 @@ func (a *App) runSetup(args []string) int {
 	if effective.DefaultProfileSelector() != "" {
 		fmt.Fprintf(a.stdout, "default_profile_selector: %s\n", effective.DefaultProfileSelector())
 	}
-	if strings.Contains(effective.SourceURL(), "REPLACE_ME") {
+	if effective.SourceMode() == config.SourceModeAmnezia {
+		fmt.Fprintln(a.stdout, "Store your key with tun-wave auth amnezia (interactive, --stdin or --clipboard).")
+	} else if strings.Contains(effective.SourceURL(), "REPLACE_ME") {
 		fmt.Fprintln(a.stdout, "source.url still has placeholder value; edit the file or rerun with --source-url")
 	}
 	return 0
@@ -500,8 +526,16 @@ func resolvePositionalConfigPath(path string) string {
 	}
 
 	candidate := filepath.Join(filepath.Dir(config.DefaultPath()), path)
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
+	for _, dir := range []string{filepath.Dir(config.DefaultPath()), filepath.Dir(config.LegacyGlobalConfigPath())} {
+		base := filepath.Join(dir, path)
+		for _, name := range []string{base, base + ".json"} {
+			if name != base && filepath.Ext(path) != "" {
+				continue
+			}
+			if info, err := os.Stat(name); err == nil && !info.IsDir() {
+				return name
+			}
+		}
 	}
 	if filepath.Ext(path) == "" {
 		return candidate + ".json"
@@ -510,37 +544,42 @@ func resolvePositionalConfigPath(path string) string {
 }
 
 func (a *App) printUsage() {
-	fmt.Fprintln(a.stdout, "vless-tun manages DenseVPN subscriptions and renders sing-box configs.")
+	fmt.Fprintln(a.stdout, "tun-wave is the multi-protocol combine CLI for VLESS, Xray, and Amnezia VPN.")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Usage:")
-	fmt.Fprintln(a.stdout, "  vless-tun setup [--config path | config] [--server name] [--config-profile name] [--source-url URL] [--source-mode proxy|direct] [--profile selector] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun init [--config path | config] [--subscription-url URL] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun refresh [--config path] [--server name | server]")
-	fmt.Fprintln(a.stdout, "  vless-tun list [--config path] [--server name | server] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun set-current [--config path] [--server name | server [profile]] [--profile name]")
-	fmt.Fprintln(a.stdout, "  vless-tun start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun diagnose [tunnel] [--config path]")
-	fmt.Fprintln(a.stdout, "  vless-tun diagnose config [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc]")
-	fmt.Fprintln(a.stdout, "  vless-tun stop [--config path] [server] [--timeout duration] [--force]")
-	fmt.Fprintln(a.stdout, "  vless-tun render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]")
-	fmt.Fprintln(a.stdout, "  vless-tun failclosed status|apply|off [--config path]")
+	fmt.Fprintf(a.stdout, "  %s setup [--config path | config] [--server name] [--config-profile name] [--source-url URL] [--source-mode proxy|direct|amnezia] [--profile selector] [--force]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s init [--config path | config] [--subscription-url URL] [--force]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s refresh [--config path] [--server name | server]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s list [--config path] [--server name | server] [--refresh]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s set-current [--config path] [--server name | server [profile]] [--profile name]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh] [--timeout duration] [--force]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--refresh]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s diagnose [tunnel] [--config path]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s diagnose config [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s stop [--config path] [server] [--timeout duration] [--force]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s failclosed status|apply|off [--config path]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s auth amnezia [--stdin | --clipboard | --check | --delete] [--service name] [--fallback-service name] [--account name] [--allow-placeholder]\n", a.programName)
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
+	fmt.Fprintln(a.stdout, "  vless-tun symlink compatibility uses the same CLI.")
 	fmt.Fprintln(a.stdout, "  run, connect -> start")
 	fmt.Fprintln(a.stdout, "  disconnect -> stop")
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Config:")
-	fmt.Fprintln(a.stdout, "  With no config argument, vless-tun uses ~/.config/vless-tun/config.json.")
+	fmt.Fprintln(a.stdout, "  Default: ~/.config/tun-wave/config.json (fallback ~/.config/vless-tun/config.json).")
 	fmt.Fprintln(a.stdout, "  Lifecycle command positionals override current.server/current.profile; reconnect, stop, and diagnose tunnel scan all configured session caches.")
-	fmt.Fprintln(a.stdout, "  Use --config to choose a non-default config file.")
+	fmt.Fprintln(a.stdout, "  TUN_WAVE_CONFIG (or VLESS_TUN_CONFIG) overrides the default; --config selects a file.")
 	fmt.Fprintln(a.stdout, "  setup/init still accept one positional config path for bootstrapping.")
 }
 
 var refreshSourceFunc = refreshSource
 
 func refreshSource(cfg config.ProjectConfig) (subscription.CacheSnapshot, error) {
+	if cfg.SourceMode() == config.SourceModeAmnezia {
+		return refreshAmneziaSource(cfg)
+	}
 	return subscription.RefreshWithOptions(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir, subscription.FetchOptions{
 		UserAgent: cfg.SourceUserAgent(),
 		Headers:   cfg.SourceHeaders(),

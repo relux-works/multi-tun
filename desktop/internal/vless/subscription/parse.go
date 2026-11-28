@@ -166,6 +166,10 @@ type ProfileResolution struct {
 	Matched bool
 }
 
+// ErrNoMatchingProfiles distinguishes an absent region from an ambiguous match,
+// an invalid expression, or a failed reachability probe.
+var ErrNoMatchingProfiles = errors.New("no matching profiles")
+
 func SelectProfile(profiles []model.Profile, selector string) (model.Profile, error) {
 	return SelectProfileWithOptions(profiles, SelectOptions{Selector: selector})
 }
@@ -222,7 +226,7 @@ func resolveMatchedProfile(profiles []model.Profile, options SelectOptions) (Pro
 	}
 	criteria := describeMatch(*match, options.Transport)
 	if len(candidates) == 0 {
-		return ProfileResolution{}, fmt.Errorf("match %s found no profiles; subscription candidates: %s", criteria, describeCandidates(profiles))
+		return ProfileResolution{}, fmt.Errorf("match %s found no profiles; subscription candidates: %s: %w", criteria, describeCandidates(profiles), ErrNoMatchingProfiles)
 	}
 
 	pick := strings.ToLower(strings.TrimSpace(options.Pick))
@@ -269,8 +273,21 @@ func compileOptionalPattern(value string) (*regexp.Regexp, error) {
 	return regexp.Compile(value)
 }
 
+// ProfileCountryCode prefers explicit country metadata over display-name hints.
+func ProfileCountryCode(profile model.Profile) string {
+	code := strings.TrimSpace(profile.CountryCode)
+	if len(code) == 2 && asciiLetter(code[0]) && asciiLetter(code[1]) {
+		return strings.ToUpper(code)
+	}
+	return CountryCode(profile.DisplayName())
+}
+
+func asciiLetter(b byte) bool {
+	return b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
 func profileMatches(profile model.Profile, match ProfileMatch, selectionTransport string, pattern *regexp.Regexp) bool {
-	if country := strings.ToUpper(strings.TrimSpace(match.Country)); country != "" && CountryCode(profile.DisplayName()) != country {
+	if country := strings.ToUpper(strings.TrimSpace(match.Country)); country != "" && ProfileCountryCode(profile) != country {
 		return false
 	}
 	if pattern != nil && !pattern.MatchString(profile.DisplayName()) {

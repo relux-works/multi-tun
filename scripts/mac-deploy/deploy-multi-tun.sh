@@ -34,7 +34,7 @@ Options:
   --repo-url URL          Git remote to clone from or fetch (default: origin repo)
   --branch NAME          Branch to checkout/update (default: main)
   --checkout-dir PATH    Destination checkout (default: ~/src/multi-tun)
-  --config-bundle PATH   Directory with vless-tun/openconnect-tun configs
+  --config-bundle PATH   Directory with tun-wave/vless-tun/openconnect-tun configs
   --skip-config          Do not copy local tunnel configs
   --skip-pull            Do not fetch/pull an existing checkout
   --allow-dirty          Allow update when checkout has local changes
@@ -52,7 +52,7 @@ Default config bundle discovery:
 
 Expected bundle layout:
   config/
-    vless-tun/config.json
+    tun-wave/config.json (or vless-tun/config.json)
     openconnect-tun/config.json
 
 Config files may use these placeholders; they are expanded during install:
@@ -363,6 +363,7 @@ install_configs() {
 
   log "Applying config bundle: $CONFIG_BUNDLE"
   local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  render_and_install_config "$CONFIG_BUNDLE/tun-wave/config.json" "$config_home/tun-wave/config.json"
   render_and_install_config "$CONFIG_BUNDLE/vless-tun/config.json" "$config_home/vless-tun/config.json"
   render_and_install_config "$CONFIG_BUNDLE/openconnect-tun/config.json" "$config_home/openconnect-tun/config.json"
 
@@ -416,6 +417,7 @@ verify_tool() {
 }
 
 verify_install() {
+  verify_tool tun-wave
   verify_tool vless-tun
   verify_tool openconnect-tun
   verify_tool vpn-core
@@ -439,6 +441,8 @@ print_summary() {
   fi
   log
   log "Useful checks:"
+  log "  tun-wave status"
+  log "  tun-wave list"
   log "  vless-tun status"
   log "  vless-tun list"
   log "  openconnect-tun status"

@@ -5,6 +5,7 @@ import "fmt"
 type Profile struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`
+	CountryCode string            `json:"country_code,omitempty"`
 	URI         string            `json:"uri"`
 	Protocol    string            `json:"protocol"`
 	UUID        string            `json:"uuid"`
