@@ -122,7 +122,16 @@ func (a *App) runInstall(args []string) int {
 	}
 	defer plan.Close()
 	a.warnDisruption(*allowDisruption)
-	if err := plan.Install(cfg, os.Getuid(), os.Getgid(), *expectedDigest, vpncore.MaintenanceOptions{AllowDisruption: *allowDisruption}); err != nil {
+	clientUID, clientGID := os.Getuid(), os.Getgid()
+	if clientUID == 0 {
+		if u, err := strconv.Atoi(strings.TrimSpace(os.Getenv("SUDO_UID"))); err == nil && u > 0 {
+			clientUID = u
+		}
+		if g, err := strconv.Atoi(strings.TrimSpace(os.Getenv("SUDO_GID"))); err == nil && g > 0 {
+			clientGID = g
+		}
+	}
+	if err := plan.Install(cfg, clientUID, clientGID, *expectedDigest, vpncore.MaintenanceOptions{AllowDisruption: *allowDisruption}); err != nil {
 		var maintenance *vpncore.InstallMaintenanceError
 		if errors.As(err, &maintenance) && maintenance.Installed {
 			fmt.Fprintln(a.stdout, "installed vpn core")
