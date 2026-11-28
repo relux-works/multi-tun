@@ -1484,7 +1484,7 @@ func waitForStartupDNSReadiness(current CurrentSession, options StartOptions, ti
 func shouldWaitStartupDNSReadiness(current CurrentSession, options StartOptions) bool {
 	return runtime.GOOS == "darwin" &&
 		current.Mode == config.RenderModeTun &&
-		options.OverlayDNSActive &&
+		(options.OverlayDNSActive || len(current.DNSHandoffServers) > 0) &&
 		len(startupReadinessHosts()) > 0
 }
 

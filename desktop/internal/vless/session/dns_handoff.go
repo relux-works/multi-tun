@@ -184,7 +184,11 @@ func shouldApplySystemDNSHandoff(mode string, options StartOptions) bool {
 	if os.Getenv("VLESS_TUN_ENABLE_DNS_HANDOFF") == "0" {
 		return false
 	}
-	return runtime.GOOS == "darwin" && mode == config.RenderModeTun && options.OverlayDNSActive && len(normalizeDNSServerList(options.SystemDNSServers)) > 0
+	// Apply scutil DNS handoff on macOS TUN starts whenever system DNS servers
+	// are configured (both standalone and with corporate overlay DNS) so
+	// mDNSResponder routes lookups into the TUN instead of leaking to a LAN
+	// DHCP resolver on en0 (which can also return geo-poisoned IPs).
+	return runtime.GOOS == "darwin" && mode == config.RenderModeTun && len(normalizeDNSServerList(options.SystemDNSServers)) > 0
 }
 
 func normalizeDNSServerList(values []string) []string {

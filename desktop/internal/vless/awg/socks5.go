@@ -218,6 +218,7 @@ func serveClient(ctx context.Context, c net.Conn, d TunnelDialer) {
 		}
 		cancel()
 		if err != nil || upstream == nil {
+			_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			_ = reply(c, 5, netip.AddrPort{})
 			return
 		}

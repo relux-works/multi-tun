@@ -290,7 +290,13 @@ func TestShouldApplySystemDNSHandoffDefaultsOnAndRespectsDisableEnv(t *testing.T
 	t.Setenv("VLESS_TUN_ENABLE_DNS_HANDOFF", "")
 	want := runtime.GOOS == "darwin"
 	if got := shouldApplySystemDNSHandoff(config.RenderModeTun, StartOptions{OverlayDNSActive: true, SystemDNSServers: []string{"1.1.1.1"}}); got != want {
-		t.Fatalf("shouldApplySystemDNSHandoff() = %v, want %v", got, want)
+		t.Fatalf("shouldApplySystemDNSHandoff(overlay) = %v, want %v", got, want)
+	}
+	if got := shouldApplySystemDNSHandoff(config.RenderModeTun, StartOptions{OverlayDNSActive: false, SystemDNSServers: []string{"1.1.1.1"}}); got != want {
+		t.Fatalf("shouldApplySystemDNSHandoff(standalone) = %v, want %v", got, want)
+	}
+	if shouldApplySystemDNSHandoff(config.RenderModeTun, StartOptions{OverlayDNSActive: false}) {
+		t.Fatal("shouldApplySystemDNSHandoff() = true without configured system DNS servers")
 	}
 
 	t.Setenv("VLESS_TUN_ENABLE_DNS_HANDOFF", "0")
