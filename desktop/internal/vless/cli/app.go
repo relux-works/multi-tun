@@ -77,6 +77,10 @@ func (a *App) Run(args []string) int {
 		return a.runReconcile(args[1:])
 	case "status":
 		return a.runStatus(args[1:])
+	case "doctor":
+		return a.runDoctor(args[1:])
+	case "trace":
+		return a.runTrace(args[1:])
 	case "diagnose":
 		return a.runDiagnose(args[1:])
 	case "stop":
@@ -579,6 +583,8 @@ func (a *App) printUsage() {
 	fmt.Fprintf(a.stdout, "  %s failclosed status|apply|on|off [--config path]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s guard on|off|status [--config path]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s auth <server|migrate> [--stdin | --clipboard | --check | --delete] [--service name] [--fallback-service name] [--account name] [--allow-placeholder]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s doctor [--config path] [--json]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s trace [--config path] [--json] [--timeout duration] [--http-scheme https|http] [--no-http] <host>\n", a.programName)
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")
 	fmt.Fprintf(a.stdout, "  %s auth amnezia [--stdin | --clipboard | --check | --delete]\n", a.programName)
