@@ -267,8 +267,12 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 		dnsStrategy = "ipv4_only"
 		if len(inbounds) > 0 {
 			if inb, ok := inbounds[0].(map[string]any); ok {
+				addrs, _ := inb["address"].([]string)
+				if len(addrs) == 0 {
+					addrs = cfg.TunAddresses()
+				}
 				var v4 []string
-				for _, a := range cfg.TunAddresses() {
+				for _, a := range addrs {
 					if p, err := netip.ParsePrefix(strings.TrimSpace(a)); err == nil && p.Addr().Is4() {
 						v4 = append(v4, a)
 					}
@@ -470,9 +474,38 @@ func buildInbounds(cfg config.ProjectConfig, overlayDNS *OverlayDNS, upstreamRou
 		routeExcludes = append(routeExcludes, overlayDNS.RouteExcludes...)
 	}
 	if len(routeExcludes) > 0 {
-		inbound["route_exclude_address"] = normalizeRouteExcludes(routeExcludes)
+		normExcludes := normalizeRouteExcludes(routeExcludes)
+		inbound["route_exclude_address"] = normExcludes
+		inbound["address"] = avoidExcludedTunAddresses(cfg.TunAddresses(), normExcludes)
 	}
 	return []any{inbound}, nil
+}
+
+func avoidExcludedTunAddresses(addresses, excludes []string) []string {
+	var exPrefixes []netip.Prefix
+	for _, raw := range excludes {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(raw)); err == nil {
+			exPrefixes = append(exPrefixes, p)
+		}
+	}
+	if len(exPrefixes) == 0 {
+		return addresses
+	}
+	out := make([]string, len(addresses))
+	for i, raw := range addresses {
+		out[i] = raw
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil || !p.Addr().Is4() {
+			continue
+		}
+		for _, ex := range exPrefixes {
+			if ex.Contains(p.Addr()) {
+				out[i] = "198.18.0.1/30"
+				break
+			}
+		}
+	}
+	return out
 }
 
 func normalizeRouteExcludes(values []string) []string {

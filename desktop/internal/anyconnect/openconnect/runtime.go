@@ -395,13 +395,52 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		return ConnectResult{}, err
 	}
 
+	if resolveTunWaveForReconcile() != "" {
+		if parsed, perr := parseHTTPSURL(server); perr == nil && parsed.Hostname() != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if addrs, lerr := net.DefaultResolver.LookupIPAddr(ctx, parsed.Hostname()); lerr == nil {
+				for _, a := range addrs {
+					if a.IP != nil {
+						current.GatewayIPs = uniqueStrings(append(current.GatewayIPs, a.IP.String()))
+					}
+				}
+			}
+			cancel()
+		}
+		current.Connecting = true
+		current.PID = os.Getpid()
+		if err := SaveCurrent(cacheDir, current); err == nil {
+			_ = defaultReconcileTunWave(context.Background(), "openconnect-preconnect")
+		}
+		current.Connecting = false
+		current.PID = 0
+	}
+
 	auth, err := authenticateOpenConnect(server, options, ocPath, logFile, options.ProgressWriter)
 	if err != nil {
 		_ = ClearCurrent(cacheDir)
+		_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
 		return ConnectResult{}, formatConnectError(err, logPath)
 	}
 	if err := rejectMatchingUntrackedOpenConnectSession(server); err != nil {
+		_ = ClearCurrent(cacheDir)
+		_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
 		return ConnectResult{}, formatConnectError(err, logPath)
+	}
+	if _, resolved, ok := strings.Cut(auth.Resolve, ":"); ok {
+		if ip := net.ParseIP(strings.Trim(resolved, "[]")); ip != nil {
+			prevLen := len(current.GatewayIPs)
+			current.GatewayIPs = uniqueStrings(append(current.GatewayIPs, ip.String()))
+			if len(current.GatewayIPs) != prevLen && resolveTunWaveForReconcile() != "" {
+				current.Connecting = true
+				current.PID = os.Getpid()
+				if err := SaveCurrent(cacheDir, current); err == nil {
+					_ = defaultReconcileTunWave(context.Background(), "openconnect-preconnect")
+				}
+				current.Connecting = false
+				current.PID = 0
+			}
+		}
 	}
 
 	writeProgressf(options.ProgressWriter, "phase: connecting to %s", server)
@@ -720,6 +759,21 @@ func supplementalResolverSpecForConnect(mode string, server string, options Conn
 		if domainCoveredBySuffixesOpenConnect(searchDomain, bypassDomains) {
 			searchDomain = firstNonEmpty(firstNonEmpty(domains...), "")
 		}
+		probeHosts := []string{
+			"gitlab.services.corp.example",
+		}
+		hasMTS, hasCorpExample := false, false
+		for _, d := range domains {
+			switch strings.ToLower(strings.TrimSpace(d)) {
+			case "mts.ru":
+				hasMTS = true
+			case "corp.example":
+				hasCorpExample = true
+			}
+		}
+		if hasMTS && !hasCorpExample {
+			probeHosts = []string{"gitlab.services.mts.ru"}
+		}
 		return &supplementalResolverSpec{
 			Label:                "split-include",
 			Nameservers:          append([]string(nil), options.VPNNameservers...),
@@ -727,9 +781,7 @@ func supplementalResolverSpecForConnect(mode string, server string, options Conn
 			BypassDomains:        bypassDomains,
 			SearchDomain:         searchDomain,
 			SearchCleanupDomains: cleanupDomains,
-			ProbeHosts: []string{
-				"gitlab.services.corp.example",
-			},
+			ProbeHosts:           probeHosts,
 			RouteOverrides:       uniqueStrings(routeOverrides),
 			ManageSearchResolver: true,
 		}
@@ -4143,6 +4195,7 @@ func cleanupFailedOpenConnectAttempt(cacheDir string, current CurrentSession) er
 		}
 	}
 	clearErr := clearCurrentOpenConnectAttempt(cacheDir, current.ID)
+	_ = defaultReconcileTunWave(context.Background(), "openconnect-failed")
 	return errors.Join(
 		wrapOptionalError("remove failed-start pid file", removeErr),
 		wrapOptionalError("clear failed current session", clearErr),

@@ -70,6 +70,7 @@ type CurrentSession struct {
 	VPNNameservers   []string  `json:"vpn_nameservers,omitempty"`
 	PAC              string    `json:"pac,omitempty"`
 	HelperSocketPath string    `json:"helper_socket_path,omitempty"`
+	Connecting       bool      `json:"connecting,omitempty"`
 }
 
 type openConnectStartupLock struct {
@@ -213,7 +214,12 @@ func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
 		return nil, err
 	}
 
-	alive, _, err := SessionAlive(current)
+	var alive bool
+	if current.Connecting {
+		alive, err = processAliveOpenConnect(current.PID)
+	} else {
+		alive, _, err = SessionAlive(current)
+	}
 	if err != nil {
 		return nil, err
 	}
