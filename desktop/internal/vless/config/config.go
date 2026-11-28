@@ -145,6 +145,17 @@ type SourceConfig struct {
 	UserAgent string                `json:"user_agent,omitempty"`
 	Headers   map[string]string     `json:"headers,omitempty"`
 	Keychain  *SourceKeychainConfig `json:"keychain,omitempty"`
+	Auth      *SourceAuthConfig     `json:"auth,omitempty"`
+}
+
+// SourceAuthConfig selects how a server's subscription URL or key is stored:
+// mode="keychain" (with record) or mode="file" (with path to a 0600 key file).
+type SourceAuthConfig struct {
+	Mode            string `json:"mode,omitempty"`
+	Record          string `json:"record,omitempty"`
+	Service         string `json:"service,omitempty"`
+	FallbackService string `json:"fallback_service,omitempty"`
+	Path            string `json:"path,omitempty"`
 }
 
 // SourceKeychainConfig names an existing credential; it never contains the key.
@@ -508,6 +519,17 @@ func SetFailClosedEnabled(path string, enabled bool) (ProjectConfig, string, err
 	return cfg, resolvedPath, nil
 }
 
+func SaveConfig(path string, cfg ProjectConfig) (string, error) {
+	resolvedPath, err := ResolveLoadPath(path)
+	if err != nil {
+		return "", err
+	}
+	if err := writeJSON(resolvedPath, cfg); err != nil {
+		return "", err
+	}
+	return resolvedPath, nil
+}
+
 func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectConfig {
 	serverName := firstNonEmpty(options.ServerName, "default")
 	profileName := firstNonEmpty(options.ConfigProfile, "default")
@@ -737,6 +759,25 @@ func (c ProjectConfig) validateFlat() error {
 	default:
 		return errors.New("source.mode must be one of: proxy, direct, amnezia")
 	}
+	if c.Source.Auth != nil {
+		for _, value := range []string{c.Source.Auth.Mode, c.Source.Auth.Record, c.Source.Auth.Service, c.Source.Auth.FallbackService, c.Source.Auth.Path} {
+			if strings.ContainsFunc(value, unicode.IsControl) {
+				return errors.New("source.auth fields must not contain control characters")
+			}
+		}
+		switch strings.ToLower(strings.TrimSpace(c.Source.Auth.Mode)) {
+		case "keychain":
+			if strings.TrimSpace(c.Source.Auth.Record) == "" {
+				return errors.New("source.auth.record is required when source.auth.mode is keychain")
+			}
+		case "file":
+			if strings.TrimSpace(c.Source.Auth.Path) == "" {
+				return errors.New("source.auth.path is required when source.auth.mode is file")
+			}
+		default:
+			return errors.New("source.auth.mode must be one of: keychain, file")
+		}
+	}
 	if c.SourceMode() == SourceModeAmnezia {
 		if c.SourceURL() != "" {
 			return errors.New("Amnezia keys must be stored in macOS Keychain, not plaintext source.url")
@@ -752,14 +793,14 @@ func (c ProjectConfig) validateFlat() error {
 		if c.Source.Keychain != nil {
 			return errors.New("source.keychain is only supported when source.mode is amnezia")
 		}
-		if c.SourceURL() == "" {
+		if c.SourceURL() == "" && c.Source.Auth == nil {
 			return errors.New("source.url is required")
 		}
 	}
 	if c.CacheDir == "" {
 		return errors.New("cache_dir is required")
 	}
-	if c.SourceMode() == SourceModeDirect && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.SourceURL())), "vless://") {
+	if c.SourceMode() == SourceModeDirect && c.Source.Auth == nil && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.SourceURL())), "vless://") {
 		return errors.New("source.url must be a vless:// URI in direct mode")
 	}
 	if c.SingboxConfigPath() == "" {
@@ -1082,9 +1123,36 @@ func mergeSourceConfig(base SourceConfig, override SourceConfig) SourceConfig {
 			result.Keychain.Account = override.Keychain.Account
 		}
 	}
+	if base.Auth != nil {
+		value := *base.Auth
+		result.Auth = &value
+	}
+	if override.Auth != nil {
+		if result.Auth == nil {
+			result.Auth = &SourceAuthConfig{}
+		}
+		if override.Auth.Mode != "" {
+			result.Auth.Mode = override.Auth.Mode
+		}
+		if override.Auth.Record != "" {
+			result.Auth.Record = override.Auth.Record
+		}
+		if override.Auth.Service != "" {
+			result.Auth.Service = override.Auth.Service
+		}
+		if override.Auth.FallbackService != "" {
+			result.Auth.FallbackService = override.Auth.FallbackService
+		}
+		if override.Auth.Path != "" {
+			result.Auth.Path = override.Auth.Path
+		}
+		if strings.TrimSpace(override.URL) == "" {
+			result.URL = ""
+		}
+	}
 	if mode := strings.TrimSpace(override.Mode); mode != "" {
 		result.Mode = mode
-		if strings.EqualFold(mode, SourceModeAmnezia) && strings.TrimSpace(override.URL) == "" {
+		if (strings.EqualFold(mode, SourceModeAmnezia) || override.Auth != nil) && strings.TrimSpace(override.URL) == "" {
 			result.URL = ""
 		}
 		if !strings.EqualFold(mode, SourceModeAmnezia) && override.Keychain == nil {
@@ -1368,11 +1436,40 @@ func (c ProjectConfig) SourceKeychain() SourceKeychainConfig {
 	value := SourceKeychainConfig{}
 	if c.Source.Keychain != nil {
 		value = *c.Source.Keychain
+	} else if c.Source.Auth != nil && strings.EqualFold(strings.TrimSpace(c.Source.Auth.Mode), "keychain") {
+		value.Service = c.Source.Auth.Service
+		value.FallbackService = c.Source.Auth.FallbackService
+		value.Account = c.Source.Auth.Record
 	}
 	value.Service = firstNonEmpty(value.Service, "tun-wave")
 	value.FallbackService = firstNonEmpty(value.FallbackService, "multi-tun")
 	value.Account = firstNonEmpty(value.Account, "amnezia/key")
 	return value
+}
+
+func (c ProjectConfig) SourceAuth() *SourceAuthConfig {
+	if effective, ok := c.effectiveFromServers(); ok {
+		return effective.SourceAuth()
+	}
+	if c.Source.Auth != nil {
+		cp := *c.Source.Auth
+		cp.Mode = strings.ToLower(strings.TrimSpace(cp.Mode))
+		if cp.Mode == "keychain" {
+			cp.Service = firstNonEmpty(strings.TrimSpace(cp.Service), "tun-wave")
+			cp.FallbackService = firstNonEmpty(strings.TrimSpace(cp.FallbackService), "multi-tun")
+		}
+		return &cp
+	}
+	if c.Source.Keychain != nil {
+		kc := c.SourceKeychain()
+		return &SourceAuthConfig{
+			Mode:            "keychain",
+			Service:         kc.Service,
+			FallbackService: kc.FallbackService,
+			Record:          kc.Account,
+		}
+	}
+	return nil
 }
 
 // SourceUserAgent returns the optional User-Agent used for subscription fetches.

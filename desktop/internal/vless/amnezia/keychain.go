@@ -68,6 +68,27 @@ func DefaultFallbackKeyFile() string {
 	return filepath.Join(home, ".config", "vless-tun", "keys", "amnezia.key")
 }
 
+func (s *KeychainStore) fallbackKeyFileForAccount(account string) string {
+	if s.FallbackKeyFile == "" {
+		return ""
+	}
+	account = strings.TrimSpace(account)
+	if account == "" || account == DefaultKeychainAccount || s.FallbackKeyFile != DefaultFallbackKeyFile() {
+		return s.FallbackKeyFile
+	}
+	name := strings.TrimSuffix(account, "/key")
+	name = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, name)
+	if name == "" {
+		return s.FallbackKeyFile
+	}
+	return filepath.Join(filepath.Dir(s.FallbackKeyFile), name+".key")
+}
+
 func DefaultKeychainStore() *KeychainStore {
 	return &KeychainStore{
 		Runner:          runCommand,
@@ -303,8 +324,8 @@ func (s *KeychainStore) lookupKey(ctx context.Context, spec KeychainSpec) (Keych
 				result.Service, result.UsedFallback = spec.FallbackService, true
 				continue
 			}
-			if s.FallbackKeyFile != "" {
-				secret, found, err := readFallbackKeyFile(s.FallbackKeyFile)
+			if fbFile := s.fallbackKeyFileForAccount(spec.Account); fbFile != "" {
+				secret, found, err := readFallbackKeyFile(fbFile)
 				if err != nil {
 					return result, err
 				}
@@ -316,15 +337,17 @@ func (s *KeychainStore) lookupKey(ctx context.Context, spec KeychainSpec) (Keych
 			}
 			return result, NewRefusal(CodeKeyMissing, "Amnezia key is missing from Keychain")
 		}
-		if interactionNotAllowed(r) && s.FallbackKeyFile != "" {
-			secret, found, err := readFallbackKeyFile(s.FallbackKeyFile)
-			if err != nil {
-				return result, err
-			}
-			if found {
-				result.Secret = secret
-				result.UsedFallback = true
-				return result, validateSecret(result.Secret, false)
+		if interactionNotAllowed(r) {
+			if fbFile := s.fallbackKeyFileForAccount(spec.Account); fbFile != "" {
+				secret, found, err := readFallbackKeyFile(fbFile)
+				if err != nil {
+					return result, err
+				}
+				if found {
+					result.Secret = secret
+					result.UsedFallback = true
+					return result, validateSecret(result.Secret, false)
+				}
 			}
 		}
 		if commandFailed(r) {
@@ -383,12 +406,13 @@ func (s *KeychainStore) StoreKey(ctx context.Context, options StoreOptions) erro
 	if len(line) > 4095 {
 		return NewRefusal(CodeKeyInvalid, "Keychain input exceeds the security interactive command limit")
 	}
+	fbFile := s.fallbackKeyFileForAccount(options.Account)
 	delRes := s.command(ctx, false, []string{"delete-generic-password", "-s", options.Service, "-a", options.Account}, nil)
 	if ctx.Err() != nil {
 		return accessDenied(delRes)
 	}
-	if interactionNotAllowed(delRes) && s.FallbackKeyFile != "" {
-		return writeFallbackKeyFile(s.FallbackKeyFile, options.Secret)
+	if interactionNotAllowed(delRes) && fbFile != "" {
+		return writeFallbackKeyFile(fbFile, options.Secret)
 	}
 	if !itemNotFound(delRes) && commandFailed(delRes) {
 		return accessDenied(delRes)
@@ -397,14 +421,14 @@ func (s *KeychainStore) StoreKey(ctx context.Context, options StoreOptions) erro
 	if ctx.Err() != nil {
 		return accessDenied(r)
 	}
-	if interactionNotAllowed(r) && s.FallbackKeyFile != "" {
-		return writeFallbackKeyFile(s.FallbackKeyFile, options.Secret)
+	if interactionNotAllowed(r) && fbFile != "" {
+		return writeFallbackKeyFile(fbFile, options.Secret)
 	}
 	if commandFailed(r) {
 		return accessDenied(r)
 	}
-	if s.FallbackKeyFile != "" {
-		_, _ = removeFallbackKeyFile(s.FallbackKeyFile)
+	if fbFile != "" {
+		_, _ = removeFallbackKeyFile(fbFile)
 	}
 	return nil
 }
@@ -420,24 +444,25 @@ func (s *KeychainStore) DeleteKey(ctx context.Context, service, account string) 
 	if account == "" {
 		account = DefaultKeychainAccount
 	}
+	fbFile := s.fallbackKeyFileForAccount(account)
 	r := s.command(ctx, false, []string{"delete-generic-password", "-s", service, "-a", account}, nil)
 	if ctx.Err() != nil {
 		return false, accessDenied(r)
 	}
-	if interactionNotAllowed(r) && s.FallbackKeyFile != "" {
-		return removeFallbackKeyFile(s.FallbackKeyFile)
+	if interactionNotAllowed(r) && fbFile != "" {
+		return removeFallbackKeyFile(fbFile)
 	}
 	if itemNotFound(r) {
-		if s.FallbackKeyFile != "" {
-			return removeFallbackKeyFile(s.FallbackKeyFile)
+		if fbFile != "" {
+			return removeFallbackKeyFile(fbFile)
 		}
 		return false, nil
 	}
 	if commandFailed(r) {
 		return false, accessDenied(r)
 	}
-	if s.FallbackKeyFile != "" {
-		_, _ = removeFallbackKeyFile(s.FallbackKeyFile)
+	if fbFile != "" {
+		_, _ = removeFallbackKeyFile(fbFile)
 	}
 	return true, nil
 }

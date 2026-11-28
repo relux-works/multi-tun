@@ -591,8 +591,29 @@ func refreshSource(cfg config.ProjectConfig) (subscription.CacheSnapshot, error)
 	if cfg.SourceMode() == config.SourceModeAmnezia {
 		return refreshAmneziaSource(cfg)
 	}
-	return subscription.RefreshWithOptions(context.Background(), cfg.SourceMode(), cfg.SourceURL(), cfg.CacheDir, subscription.FetchOptions{
+	sourceURL := cfg.SourceURL()
+	redactedRef := ""
+	if sourceURL == "" {
+		resolvedURL, ref, err := resolveConfiguredSourceSecret(context.Background(), cfg)
+		if err != nil {
+			return subscription.CacheSnapshot{}, err
+		}
+		sourceURL = resolvedURL
+		redactedRef = ref
+	}
+	snap, err := subscription.RefreshWithOptions(context.Background(), cfg.SourceMode(), sourceURL, cfg.CacheDir, subscription.FetchOptions{
 		UserAgent: cfg.SourceUserAgent(),
 		Headers:   cfg.SourceHeaders(),
 	})
+	if err != nil {
+		return subscription.CacheSnapshot{}, err
+	}
+	if redactedRef != "" {
+		snap.SourceURL = redactedRef
+		snap.Raw = ""
+		if err := subscription.SaveCache(cfg.CacheDir, snap); err != nil {
+			return subscription.CacheSnapshot{}, err
+		}
+	}
+	return snap, nil
 }

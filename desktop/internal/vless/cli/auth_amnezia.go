@@ -33,20 +33,32 @@ var (
 )
 
 func (a *App) runAuth(args []string) int {
-	if len(args) == 0 || args[0] != "amnezia" {
-		fmt.Fprintln(a.stderr, "Usage: tun-wave auth amnezia [--stdin | --clipboard | --check | --delete]")
+	if len(args) == 0 {
+		fmt.Fprintln(a.stderr, "Usage: tun-wave auth <server|amnezia|migrate> [--stdin | --clipboard | --check | --delete]")
 		return 2
 	}
-	fs := flag.NewFlagSet("auth amnezia", flag.ContinueOnError)
+	if args[0] == "migrate" {
+		return a.runAuthMigrate(args[1:])
+	}
+	targetServer := strings.TrimSpace(args[0])
+	if strings.HasPrefix(targetServer, "-") {
+		fmt.Fprintln(a.stderr, "Usage: tun-wave auth <server|amnezia|migrate> [--stdin | --clipboard | --check | --delete]")
+		return 2
+	}
+	fs := flag.NewFlagSet("auth "+targetServer, flag.ContinueOnError)
 	// flag errors can quote input (including accidental keys). Never print them.
 	fs.SetOutput(io.Discard)
 	stdin := fs.Bool("stdin", false, "Read key from stdin")
 	clipboard := fs.Bool("clipboard", false, "Read key from clipboard")
 	check := fs.Bool("check", false, "Print redacted Keychain status")
 	deleteKey := fs.Bool("delete", false, "Delete the primary Keychain item")
+	defaultAccount := targetServer + "/key"
+	if targetServer == "amnezia" {
+		defaultAccount = amnezia.DefaultKeychainAccount
+	}
 	service := fs.String("service", amnezia.DefaultKeychainService, "Keychain service")
 	fallback := fs.String("fallback-service", amnezia.FallbackKeychainService, "Fallback service for lookup")
-	account := fs.String("account", amnezia.DefaultKeychainAccount, "Keychain account")
+	account := fs.String("account", defaultAccount, "Keychain account")
 	allowPlaceholder := fs.Bool("allow-placeholder", false, "Allow the scaffolding placeholder")
 	warning := "Raw keys MUST NOT be passed in CLI arguments; use the interactive prompt, --stdin, or --clipboard."
 	if err := fs.Parse(args[1:]); err != nil {
@@ -55,7 +67,7 @@ func (a *App) runAuth(args []string) int {
 				fmt.Fprintln(a.stderr, warning)
 				return 2
 			}
-			fmt.Fprintln(a.stdout, "Usage: tun-wave auth amnezia [--stdin | --clipboard | --check | --delete] [--service name] [--fallback-service name] [--account name] [--allow-placeholder]")
+			fmt.Fprintf(a.stdout, "Usage: tun-wave auth %s [--stdin | --clipboard | --check | --delete] [--service name] [--fallback-service name] [--account name] [--allow-placeholder]\n", targetServer)
 			return 0
 		}
 		fmt.Fprintln(a.stderr, "Invalid auth flags. "+warning)
@@ -113,6 +125,131 @@ func (a *App) runAuth(args []string) int {
 func amneziaKeychainSpec(cfg config.ProjectConfig) amnezia.KeychainSpec {
 	spec := cfg.SourceKeychain()
 	return amnezia.KeychainSpec{Service: spec.Service, FallbackService: spec.FallbackService, Account: spec.Account}
+}
+
+func resolveConfiguredSourceSecret(ctx context.Context, cfg config.ProjectConfig) (string, string, error) {
+	auth := cfg.SourceAuth()
+	if auth == nil {
+		return "", "", errors.New("source.url or source.auth is required")
+	}
+	switch auth.Mode {
+	case "keychain":
+		spec := (amnezia.KeychainSpec{
+			Service:         auth.Service,
+			FallbackService: auth.FallbackService,
+			Account:         auth.Record,
+		}).Normalize()
+		res, err := amneziaStoreFunc().LookupKey(ctx, spec)
+		if err != nil {
+			return "", "", err
+		}
+		return strings.TrimSpace(res.Secret), fmt.Sprintf("keychain://%s/%s", res.Service, res.Account), nil
+	case "file":
+		path := expandAuthFilePath(auth.Path)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", "", fmt.Errorf("read source.auth.path: %w", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+			return "", "", errors.New("source.auth.path must be a regular 0600 file")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", "", fmt.Errorf("read source.auth.path: %w", err)
+		}
+		secret := strings.TrimSpace(string(raw))
+		if secret == "" {
+			return "", "", errors.New("source.auth.path secret is empty")
+		}
+		return secret, "file://" + auth.Path, nil
+	default:
+		return "", "", fmt.Errorf("unsupported source.auth.mode %q", auth.Mode)
+	}
+}
+
+func expandAuthFilePath(path string) string {
+	path = strings.TrimSpace(path)
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home + path[1:]
+		}
+	}
+	return path
+}
+
+func (a *App) runAuthMigrate(args []string) int {
+	fs := flag.NewFlagSet("auth migrate", flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+	configPath := fs.String("config", "", "Path to config file")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	resolvedPath, err := config.ResolveLoadPath(*configPath)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "auth migrate failed: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "auth migrate failed: %v\n", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	store := amneziaStoreFunc()
+	migrated := 0
+	for name, srv := range cfg.Servers {
+		record := name + "/key"
+		if srv.Source.Keychain != nil && strings.TrimSpace(srv.Source.Keychain.Account) != "" {
+			record = strings.TrimSpace(srv.Source.Keychain.Account)
+		} else if srv.Source.Auth != nil && strings.TrimSpace(srv.Source.Auth.Record) != "" {
+			record = strings.TrimSpace(srv.Source.Auth.Record)
+		}
+		if secret := strings.TrimSpace(srv.Source.URL); secret != "" {
+			if err := store.StoreKey(ctx, amnezia.StoreOptions{
+				Service: amnezia.DefaultKeychainService,
+				Account: record,
+				Secret:  secret,
+			}); err != nil {
+				fmt.Fprintf(a.stderr, "auth migrate failed for %s: %v\n", name, err)
+				return 1
+			}
+			srv.Source.URL = ""
+			srv.Source.Keychain = nil
+			srv.Source.Auth = &config.SourceAuthConfig{
+				Mode:   "keychain",
+				Record: record,
+			}
+			cfg.Servers[name] = srv
+			migrated++
+			fmt.Fprintf(a.stdout, "migrated: %s -> keychain (%s)\n", name, record)
+		} else if srv.Source.Keychain != nil {
+			srv.Source.Keychain = nil
+			srv.Source.Auth = &config.SourceAuthConfig{
+				Mode:   "keychain",
+				Record: record,
+			}
+			cfg.Servers[name] = srv
+			migrated++
+			fmt.Fprintf(a.stdout, "normalized: %s -> auth.mode=keychain (%s)\n", name, record)
+		}
+		if eff, _, eerr := cfg.Effective(config.SelectionOptions{Server: name, AllowMissingProfile: true}); eerr == nil && eff.CacheDir != "" {
+			if snap, lerr := subscription.LoadCache(eff.CacheDir); lerr == nil {
+				ref := "keychain://tun-wave/" + record
+				if snap.SourceURL != ref || snap.Raw != "" {
+					snap.SourceURL = ref
+					snap.Raw = ""
+					_ = subscription.SaveCache(eff.CacheDir, snap)
+				}
+			}
+		}
+	}
+	if _, err := config.SaveConfig(resolvedPath, cfg); err != nil {
+		fmt.Fprintf(a.stderr, "auth migrate save failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.stdout, "saved: %s (migrated=%d)\n", resolvedPath, migrated)
+	return 0
 }
 
 func refreshAmneziaSource(cfg config.ProjectConfig) (subscription.CacheSnapshot, error) {
