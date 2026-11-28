@@ -35,6 +35,30 @@ func StartSingBox(cfg ServiceConfig, configJSON []byte, logPath string, setPGID 
 	return response.PID, response.Handle, nil
 }
 
+// StartOpenConnect passes the client's already-open log descriptor over SCM_RIGHTS.
+func StartOpenConnect(cfg ServiceConfig, req OpenConnectStartRequest, logPath string) (int, string, error) {
+	logFile, err := openClientLog(logPath)
+	if err != nil {
+		return 0, "", err
+	}
+	defer logFile.Close()
+	response, err := callActiveWithLog(cfg, Request{Action: "openconnect.start", OpenConnect: &req}, logFile)
+	if err != nil {
+		// Older typed daemons reject the new JSON field before checking Action.
+		// This exact explicit refusal proves no child was launched and is safe for
+		// the automatic client's unsupported-action compatibility fallback.
+		var refused *RefusedError
+		if errors.As(err, &refused) && refused.Message == `json: unknown field "openconnect"` {
+			return 0, "", &RefusedError{Message: `unsupported vpn core action "openconnect.start"`}
+		}
+		return 0, "", err
+	}
+	if response.PID <= 0 || response.Handle == "" {
+		return 0, "", errors.New("vpn core did not return openconnect pid and handle")
+	}
+	return response.PID, response.Handle, nil
+}
+
 func Signal(cfg ServiceConfig, handle, signal string) (string, error) {
 	response, err := callActive(cfg, Request{
 		Action: "signal",

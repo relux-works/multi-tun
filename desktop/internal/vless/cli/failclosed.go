@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"multi-tun/desktop/internal/core/failclosed"
@@ -112,6 +113,9 @@ func (a *App) runFailClosed(args []string) int {
 	case "off":
 		// Rollback in one command: clears the anchor and the pf token in the
 		// helper. Never touches sing-box, its routes or DNS.
+		if *configPath != "" {
+			_, _, _ = config.SetFailClosedEnabled(*configPath, false)
+		}
 		if err := failClosedClearCLI(vpncore.DefaultServiceConfig()); err != nil {
 			fmt.Fprintf(a.stderr, "failclosed off failed: %v\nemergency: sudo pfctl -a %s -F all, then run vless-tun failclosed off again once the helper answers\n", err, failclosed.AnchorName)
 			return 1
@@ -119,9 +123,11 @@ func (a *App) runFailClosed(args []string) int {
 		fmt.Fprintln(a.stdout, "fail_closed: off (anchor cleared, pf token released; stays off after reboot until the next apply)")
 		fmt.Fprintln(a.stdout, "to keep it off when the tunnel is next applied, set \"fail_closed\": {\"enabled\": false} in the config")
 		return 0
+	case "on":
+		return a.runGuardToggle(true, *configPath)
 	case "status", "apply":
 	default:
-		fmt.Fprintf(a.stderr, "unknown failclosed command %q; use status, apply or off\n", sub)
+		fmt.Fprintf(a.stderr, "unknown failclosed command %q; use status, apply, on or off\n", sub)
 		return 2
 	}
 	cfg, err := loadConfig(*configPath)
@@ -233,18 +239,42 @@ func (a *App) refreshFailClosedTable(policy failclosed.Policy, tunnelUp bool, tu
 		}
 	}
 	now := failClosedNowCLI()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	// Union of the system resolver and, while the tunnel is up, the tunnel's
 	// DNS: the two can answer differently (geo, split DNS).
-	for _, host := range policy.ResolveNames() {
-		if addrs, err := failClosedLookupCLI(ctx, host); err == nil {
-			table.Merge(addrs, now)
-		}
-		if tunnelUp && tunnelDNS.IsValid() {
-			if addrs, err := failClosedTunnelLookupCLI(ctx, tunnelDNS, host); err == nil {
-				table.Merge(addrs, now)
+	type hostResult struct {
+		sysAddrs []netip.Addr
+		tunAddrs []netip.Addr
+	}
+	names := policy.ResolveNames()
+	results := make([]hostResult, len(names))
+	var wg sync.WaitGroup
+	for idx, host := range names {
+		wg.Add(1)
+		go func(i int, h string) {
+			defer wg.Done()
+			lctx, lcancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+			if addrs, err := failClosedLookupCLI(lctx, h); err == nil {
+				results[i].sysAddrs = addrs
 			}
+			lcancel()
+			if tunnelUp && tunnelDNS.IsValid() {
+				tctx, tcancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+				if addrs, err := failClosedTunnelLookupCLI(tctx, tunnelDNS, h); err == nil {
+					results[i].tunAddrs = addrs
+				}
+				tcancel()
+			}
+		}(idx, host)
+	}
+	wg.Wait()
+	for _, r := range results {
+		if len(r.sysAddrs) > 0 {
+			table.Merge(r.sysAddrs, now)
+		}
+		if len(r.tunAddrs) > 0 {
+			table.Merge(r.tunAddrs, now)
 		}
 	}
 	table.Prune(now, tunnelUp)
@@ -354,4 +384,73 @@ func (a *App) applyFailClosedBeforeStart(cfg config.ProjectConfig) {
 	}
 	policy, err := cfg.FailClosedPolicy()
 	a.refreshFailClosedAfterStart(policy, err, cfg.TunAddresses())
+}
+
+func (a *App) runGuard(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintf(a.stderr, "usage: %s guard on|off|status [--config path]\n", a.programName)
+		return 2
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("guard "+sub, flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+	configPath := fs.String("config", "", "Path to config file")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	switch sub {
+	case "on":
+		return a.runGuardToggle(true, *configPath)
+	case "off":
+		return a.runGuardToggle(false, *configPath)
+	case "status":
+		return a.runFailClosed(append([]string{"status"}, args[1:]...))
+	default:
+		fmt.Fprintf(a.stderr, "unknown guard command %q; use on, off or status\n", sub)
+		return 2
+	}
+}
+
+func (a *App) runGuardToggle(enabled bool, configPath string) int {
+	cfg, resolvedPath, err := config.SetFailClosedEnabled(configPath, enabled)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "guard update failed: %v\n", err)
+		return 1
+	}
+	if !enabled {
+		if cerr := failClosedClearCLI(vpncore.DefaultServiceConfig()); cerr != nil &&
+			!strings.Contains(cerr.Error(), "unknown field") &&
+			!strings.Contains(cerr.Error(), "unsupported vpn core action") {
+			fmt.Fprintf(a.stderr, "guard disabled in %s, but clearing active PF anchor failed: %v\nemergency: sudo pfctl -a %s -F all\n", resolvedPath, cerr, failclosed.AnchorName)
+			return 1
+		}
+		fmt.Fprintf(a.stdout, "guard: off (fail_closed.enabled=false saved in %s; PF anchor cleared)\n", resolvedPath)
+		return 0
+	}
+	fmt.Fprintf(a.stdout, "guard: on (fail_closed.enabled=true saved in %s)\n", resolvedPath)
+	policy, perr := cfg.FailClosedPolicy()
+	if perr != nil {
+		fmt.Fprintf(a.stderr, "guard policy warning: %v\n", perr)
+		return 1
+	}
+	if ifs, ierr := failClosedInterfacesCLI(); ierr == nil {
+		tunnelUp := false
+		var physical []string
+		for _, i := range ifs {
+			if i.Name == policy.TunnelInterface && i.Up {
+				tunnelUp = true
+			}
+			if physicalIfaceCLI.MatchString(i.Name) && i.Up {
+				physical = append(physical, i.Name)
+			}
+		}
+		sort.Strings(physical)
+		dnsServer, _ := tunnelDNSServer(cfg.TunAddresses())
+		if summary, aerr := a.applyFailClosedPolicy(policy, tunnelUp, physical, dnsServer); aerr == nil {
+			fmt.Fprintln(a.stdout, summary)
+		} else if !strings.Contains(aerr.Error(), "unknown field") && !strings.Contains(aerr.Error(), "unsupported vpn core action") {
+			fmt.Fprintf(a.stderr, "warning: fail_closed not enforced yet: %v\n", aerr)
+		}
+	}
+	return 0
 }

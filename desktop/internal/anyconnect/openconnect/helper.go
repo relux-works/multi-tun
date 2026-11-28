@@ -18,6 +18,8 @@ type CompletedRequestSnapshot = vpncore.CompletedRequestSnapshot
 
 var (
 	vpnCoreCleanupResolversOpenConnect = vpncore.CleanupResolvers
+	vpnCoreStartOpenConnect            = vpncore.StartOpenConnect
+	vpnCoreSignalHandleOpenConnect     = vpncore.Signal
 	// Compatibility seams remain for existing client unit tests only. The
 	// production functions fail closed; the daemon has no generic run action.
 	vpnCoreRunOpenConnect = func(vpncore.ServiceConfig, []string, string, string) error {
@@ -42,6 +44,9 @@ func resolvePrivilegedMode(mode string) (string, PrivilegedHelperConfig, error) 
 
 	switch mode {
 	case PrivilegedModeAuto:
+		if helperAvailable(cfg) {
+			return PrivilegedModeHelper, cfg, nil
+		}
 		if os.Geteuid() == 0 {
 			return PrivilegedModeDirect, cfg, nil
 		}
@@ -57,10 +62,7 @@ func resolvePrivilegedMode(mode string) (string, PrivilegedHelperConfig, error) 
 		if !helperAvailable(cfg) {
 			return "", cfg, fmt.Errorf("vpn core is not reachable; run `vpn-core install-digest`, then `vpn-core install --expect-sha256 HEX` once")
 		}
-		// PR B removes generic root execution before PR C introduces the fully
-		// typed openconnect.start action. Keep the CLI launch working through its
-		// existing sudo lane, and use vpn-core only for typed resolver cleanup.
-		return PrivilegedModeSudo, cfg, nil
+		return PrivilegedModeHelper, cfg, nil
 	default:
 		return "", cfg, fmt.Errorf("unsupported privileged mode %q", mode)
 	}
@@ -128,4 +130,37 @@ func helperAvailable(cfg PrivilegedHelperConfig) bool {
 
 func renderPrivilegedHelperPlist(cfg PrivilegedHelperConfig, binaryPath string, clientUID, clientGID int, binarySHA256, manifestSHA256 string) []byte {
 	return vpncore.RenderServicePlist(cfg, binaryPath, clientUID, clientGID, binarySHA256, manifestSHA256)
+}
+
+// A helper handle identifies a managed child even if a numeric PID is reused.
+func signalCurrentOpenConnectSession(current CurrentSession, signal, mode string) error {
+	if current.PrivilegedMode == PrivilegedModeHelper && current.Handle != "" {
+		if signal == "-INT" {
+			signal = "-TERM"
+		}
+		_, err := vpnCoreSignalHandleOpenConnect(defaultHelperConfigForSocket(current.HelperSocketPath), current.Handle, signal)
+		if err != nil {
+			alive, _, lookupErr := SessionAlive(current)
+			if lookupErr == nil && !alive {
+				return nil
+			}
+			return errors.Join(err, lookupErr)
+		}
+		return nil
+	}
+	return signalMatchingSession(current, signal, mode)
+}
+
+func typedOpenConnectStartRequest(auth *authResult, script, pidFilePath string, mimicry ClientMimicry) vpncore.OpenConnectStartRequest {
+	server := auth.ConnectURL
+	if server == "" {
+		server = "https://" + auth.Host
+	}
+	mimicry = cloneClientMimicry(mimicry)
+	profile := aggregateAuthClientProfileForMimicry(detectAggregateAuthClientProfile(), mimicry)
+	return vpncore.OpenConnectStartRequest{
+		ServerURL: server, Protocol: "anyconnect", ScriptPath: script, PIDFilePath: pidFilePath, Cookie: auth.Cookie,
+		UserAgent: userAgentForClientMimicry(mimicry), OS: firstNonEmpty(strings.TrimSpace(mimicry.OS), strings.TrimSpace(profile.DeviceID), "mac-intel"),
+		VersionString: strings.TrimSpace(profile.Version), LocalHostname: openConnectLocalHostname(profile, mimicry),
+	}
 }

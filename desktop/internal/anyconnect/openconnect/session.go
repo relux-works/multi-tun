@@ -3,12 +3,14 @@ package openconnect
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +46,8 @@ var newPreStopCommandOpenConnect = exec.Command
 var errOpenConnectStartupInProgress = errors.New("another openconnect startup is already in progress for this cache")
 
 type CurrentSession struct {
+	Handle           string    `json:"handle,omitempty"`
+	GatewayIPs       []string  `json:"gateway_ips,omitempty"`
 	ProcessComm      string    `json:"process_comm,omitempty"`
 	ProcessStart     time.Time `json:"process_start,omitempty"`
 	ID               string    `json:"id"`
@@ -74,6 +78,7 @@ type openConnectStartupLock struct {
 
 type OverlayDNS struct {
 	Domains       []string
+	BypassDomains []string
 	Nameservers   []string
 	RouteExcludes []string
 }
@@ -226,10 +231,16 @@ func ActiveOverlayDNS(cacheDir string) (*OverlayDNS, error) {
 		return nil, nil
 	}
 
+	bypassDomains := spec.BypassDomains
+	if len(bypassDomains) == 0 {
+		bypassDomains = normalizeDomainSuffixesOpenConnect(current.BypassSuffixes)
+	}
+
 	return &OverlayDNS{
+		BypassDomains: append([]string(nil), bypassDomains...),
 		Domains:       append([]string(nil), spec.Domains...),
 		Nameservers:   append([]string(nil), spec.Nameservers...),
-		RouteExcludes: append([]string(nil), spec.RouteOverrides...),
+		RouteExcludes: uniqueStrings(append(append([]string(nil), spec.RouteOverrides...), overlayGatewayRouteExcludes(current)...)),
 	}, nil
 }
 
@@ -560,6 +571,14 @@ func loadOpenConnectStopSession(cacheDir string) (CurrentSession, error) {
 }
 
 func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error) {
+	current, status, err := stopOpenConnect(cacheDir, timeout)
+	if err == nil {
+		_ = reconcileTunWaveOpenConnect(context.Background(), "openconnect-stop")
+	}
+	return current, status, err
+}
+
+func stopOpenConnect(cacheDir string, timeout time.Duration) (CurrentSession, string, error) {
 	current, err := loadOpenConnectStopSession(cacheDir)
 	if err != nil {
 		return CurrentSession{}, "", err
@@ -631,7 +650,7 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 	if privilegedMode == "" {
 		privilegedMode = PrivilegedModeAuto
 	}
-	if err := signalMatchingSession(current, "-INT", privilegedMode); err != nil {
+	if err := signalCurrentOpenConnectSession(current, "-INT", privilegedMode); err != nil {
 		return CurrentSession{}, "", fmt.Errorf("failed to stop openconnect pid %d: %w", current.PID, err)
 	}
 
@@ -665,13 +684,13 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 		}
 		now := time.Now()
 		if !termSent && now.After(termDeadline) {
-			if err := signalMatchingSession(current, "-TERM", privilegedMode); err != nil {
+			if err := signalCurrentOpenConnectSession(current, "-TERM", privilegedMode); err != nil {
 				return CurrentSession{}, "", err
 			}
 			termSent = true
 		}
 		if !killSent && now.After(killDeadline) {
-			if err := signalMatchingSession(current, "-KILL", privilegedMode); err != nil {
+			if err := signalCurrentOpenConnectSession(current, "-KILL", privilegedMode); err != nil {
 				return CurrentSession{}, "", err
 			}
 			killSent = true
@@ -680,7 +699,7 @@ func Stop(cacheDir string, timeout time.Duration) (CurrentSession, string, error
 	}
 
 	if !killSent {
-		if err := signalMatchingSession(current, "-KILL", privilegedMode); err != nil {
+		if err := signalCurrentOpenConnectSession(current, "-KILL", privilegedMode); err != nil {
 			return CurrentSession{}, "", err
 		}
 	}
@@ -1166,4 +1185,38 @@ for f in "$resolver_dir"/*; do
   esac
 done
 `
+}
+
+// Use observed gateway addresses without introducing DNS or route changes in a read API.
+func overlayGatewayRouteExcludes(current CurrentSession) []string {
+	ips := append([]string(nil), current.GatewayIPs...)
+	if parsed, err := parseHTTPSURL(current.Server); err == nil {
+		ips = append(ips, parsed.Hostname())
+	}
+	if file, err := os.Open(current.LogPath); err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			for _, prefix := range []string{"vpnc_wrapper_vpngateway_route: ", "vpnc_wrapper_vpngateway_route_failed: "} {
+				if strings.HasPrefix(line, prefix) {
+					fields := strings.Fields(strings.TrimPrefix(line, prefix))
+					if len(fields) > 0 {
+						ips = append(ips, fields[0])
+					}
+				}
+			}
+		}
+	}
+	var routes []string
+	for _, value := range ips {
+		if ip := net.ParseIP(value); ip != nil {
+			bits := "/128"
+			if ip.To4() != nil {
+				bits = "/32"
+			}
+			routes = append(routes, ip.String()+bits)
+		}
+	}
+	return uniqueStrings(routes)
 }

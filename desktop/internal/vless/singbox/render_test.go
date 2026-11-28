@@ -2,16 +2,199 @@ package singbox
 
 import (
 	"encoding/json"
-	"multi-tun/desktop/internal/core/vpncore"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	"multi-tun/desktop/internal/core/vpncore"
 	"multi-tun/desktop/internal/vless/config"
 	"multi-tun/desktop/internal/vless/model"
 	"multi-tun/desktop/internal/vless/subscription"
 )
+
+// The matcher reads only domain predicates from the rendered config. It checks
+// first-match precedence offline; it does not prove live DNS or OS routing.
+func renderedDomainTarget(root map[string]any, section, domain string) string {
+	sets := map[string][]any{}
+	for _, raw := range root["route"].(map[string]any)["rule_set"].([]any) {
+		set := raw.(map[string]any)
+		sets[set["tag"].(string)] = set["rules"].([]any)
+	}
+	matches := func(rule map[string]any) bool {
+		for _, raw := range rule["domain_suffix"].([]any) {
+			suffix := strings.TrimPrefix(raw.(string), ".")
+			if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, raw := range root[section].(map[string]any)["rules"].([]any) {
+		rule := raw.(map[string]any)
+		matched := false
+		if _, ok := rule["domain_suffix"]; ok {
+			matched = matches(rule)
+		} else if names, ok := rule["rule_set"].([]any); ok {
+			for _, name := range names {
+				for _, raw := range sets[name.(string)] {
+					predicate := raw.(map[string]any)
+					if _, ok := predicate["domain_suffix"]; ok && matches(predicate) {
+						matched = true
+					}
+				}
+			}
+		} else if section == "dns" {
+			matched = true // DNS's unconditional final rule.
+		}
+		if matched {
+			if section == "dns" {
+				return rule["server"].(string)
+			}
+			return rule["outbound"].(string)
+		}
+	}
+	return root[section].(map[string]any)["final"].(string)
+}
+
+func TestRenderComposedDNSAndRoutePrecedenceAcrossBackends(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []struct {
+		name      string
+		render    func(config.ProjectConfig, model.Profile, RenderOptions) ([]byte, error)
+		processes []any
+	}{
+		{"VLESS", RenderWithOptions, []any{"openconnect"}},
+		{"Xray", RenderXrayFrontendWithOptions, []any{"xray", "openconnect"}},
+		{"AWG", RenderAWGFrontendWithOptions, []any{"tun-wave", "vless-tun", "openconnect"}},
+	} {
+		for _, overlay := range []bool{false, true} {
+			for _, bypass := range []bool{false, true} {
+				name := fmt.Sprintf("%s/overlay=%t/bypass=%t", backend.name, overlay, bypass)
+				t.Run(name, func(t *testing.T) {
+					cfg := config.Default()
+					cfg.Routing.BypassSuffixes = nil
+					cfg.Routing.BypassExcludes = nil
+					if bypass {
+						cfg.Routing.BypassSuffixes = []string{"ru", "рф", "gosuslugi.ru"}
+						cfg.Routing.BypassExcludes = []string{"proxy.example.ru", "proxy.mts.ru"}
+					}
+					options := RenderOptions{}
+					if overlay {
+						options.OverlayDNS = &OverlayDNS{
+							Domains:       []string{"mts.ru", "mtsit.local"},
+							BypassDomains: []string{"vpn-ra2.mts.ru", "login.mts.ru", "outside.example"},
+							Nameservers:   []string{"10.73.16.4"},
+						}
+					}
+					data, err := backend.render(cfg, model.Profile{UUID: "00000000-0000-0000-0000-000000000000", Host: "203.0.113.10", Port: 443}, options)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+						t.Fatalf("config refused: %v", err)
+					}
+					var root map[string]any
+					if err := json.Unmarshal(data, &root); err != nil {
+						t.Fatal(err)
+					}
+					route := root["route"].(map[string]any)
+					wantResolver := "dns-direct"
+					if overlay {
+						wantResolver = "dns-proxy"
+					}
+					if got := root["outbounds"].([]any)[1].(map[string]any)["domain_resolver"]; got != wantResolver {
+						t.Fatalf("direct.domain_resolver = %v, want %s", got, wantResolver)
+					}
+					first := route["rules"].([]any)[0].(map[string]any)
+					if !slices.Equal(first["process_name"].([]any), backend.processes) || first["action"] != "route" || first["outbound"] != "direct" {
+						t.Fatalf("process bypass = %v", first)
+					}
+					if hasRuleSet(route["rule_set"].([]any), "overlay-direct") != overlay {
+						t.Fatal("overlay route set presence does not match overlay state")
+					}
+					for _, domain := range []string{"gitlab.services.mts.ru", "mybonus.mts.ru", "host.mtsit.local", "vpn-ra2.mts.ru", "login.mts.ru", "outside.example", "gosuslugi.ru", "host.xn--p1ai", "nodedata.io", "notmts.ru", "mts.ru.example"} {
+						wantDNS, wantRoute := "dns-proxy", "proxy"
+						if bypass && (strings.HasSuffix(domain, ".ru") || strings.HasSuffix(domain, ".xn--p1ai")) {
+							wantDNS, wantRoute = "dns-direct", "direct"
+						}
+						if overlay {
+							switch domain {
+							case "gitlab.services.mts.ru", "mybonus.mts.ru", "host.mtsit.local":
+								wantDNS, wantRoute = "dns-overlay", "direct"
+							case "vpn-ra2.mts.ru", "login.mts.ru", "outside.example":
+								wantDNS, wantRoute = "dns-direct", "direct"
+							}
+						}
+						if got := renderedDomainTarget(root, "dns", domain); got != wantDNS {
+							t.Fatalf("DNS %s = %s, want %s", domain, got, wantDNS)
+						}
+						if got := renderedDomainTarget(root, "route", domain); got != wantRoute {
+							t.Fatalf("route %s = %s, want %s", domain, got, wantRoute)
+						}
+					}
+					if bypass {
+						for _, domain := range []string{"proxy.example.ru", "proxy.mts.ru"} {
+							if renderedDomainTarget(root, "dns", domain) != "dns-proxy" || renderedDomainTarget(root, "route", domain) != "proxy" {
+								t.Fatalf("proxy exception lost for %s", domain)
+							}
+						}
+					}
+					if overlay && bypass {
+						rules := root["dns"].(map[string]any)["rules"].([]any)
+						if len(rules) != 5 {
+							t.Fatalf("DNS rules = %v", rules)
+						}
+						for i, want := range []string{"dns-proxy", "dns-direct", "dns-overlay", "dns-direct", "dns-proxy"} {
+							if rules[i].(map[string]any)["server"] != want {
+								t.Fatalf("DNS rule %d = %v, want %s", i, rules[i], want)
+							}
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestNormalizeOverlayDNSBypassDomains(t *testing.T) {
+	t.Parallel()
+	input := &OverlayDNS{Domains: []string{" MTS.RU ", "mts.ru", ""}, BypassDomains: []string{" VPN-RA2.MTS.RU ", "vpn-ra2.mts.ru", "", ".Login.Mts.Ru."}, Nameservers: []string{" 10.73.16.4 ", "10.73.16.4"}}
+	got := normalizeOverlayDNS(input)
+	if !slices.Equal(got.Domains, []string{"mts.ru"}) || !slices.Equal(got.BypassDomains, []string{"vpn-ra2.mts.ru", "login.mts.ru"}) || !slices.Equal(got.Nameservers, []string{"10.73.16.4"}) {
+		t.Fatalf("normalized = %+v", got)
+	}
+	if input.BypassDomains[0] != " VPN-RA2.MTS.RU " {
+		t.Fatal("normalization mutated input")
+	}
+	for _, invalid := range []*OverlayDNS{nil, {}, {Domains: []string{"mts.ru"}}, {Nameservers: []string{"10.73.16.4"}}, {Domains: []string{" "}, Nameservers: []string{"10.73.16.4"}, BypassDomains: []string{"login.mts.ru"}}} {
+		if normalizeOverlayDNS(invalid) != nil {
+			t.Fatalf("incomplete overlay accepted: %+v", invalid)
+		}
+	}
+}
+
+func TestRenderTUNProcessBypassDeduplicatesOpenconnect(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	data, err := renderWithProxyOutbound(cfg, model.Profile{}, RenderOptions{}, proxyRenderBackend{Outbound: map[string]any{"type": "socks", "tag": "proxy", "server": "127.0.0.1", "server_port": 20808, "version": "5"}, DirectProcessNames: []string{"xray", "openconnect", " xray "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	rule := root["route"].(map[string]any)["rules"].([]any)[0].(map[string]any)
+	if !slices.Equal(rule["process_name"].([]any), []any{"xray", "openconnect"}) {
+		t.Fatalf("process rule = %v", rule)
+	}
+}
 
 // This proves the Xray client-only UDP/443 spelling becomes the equivalent
 // flow accepted by sing-box without mutating the parsed profile.
@@ -75,6 +258,9 @@ func TestRender(t *testing.T) {
 		t.Fatalf("Render returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -168,6 +354,9 @@ func TestRenderXrayFrontendUsesLocalSocksAndDirectProcessRule(t *testing.T) {
 		t.Fatalf("RenderXrayFrontendWithOptions returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -199,8 +388,8 @@ func TestRenderXrayFrontendUsesLocalSocksAndDirectProcessRule(t *testing.T) {
 		t.Fatalf("first route outbound = %#v, want %#v", got, want)
 	}
 	processNames := firstRule["process_name"].([]any)
-	if len(processNames) != 1 || processNames[0] != "xray" {
-		t.Fatalf("first route process_name = %#v, want [xray]", processNames)
+	if len(processNames) != 2 || processNames[0] != "xray" || processNames[1] != "openconnect" {
+		t.Fatalf("first route process_name = %#v, want [xray openconnect]", processNames)
 	}
 
 	inbounds := root["inbounds"].([]any)
@@ -210,7 +399,7 @@ func TestRenderXrayFrontendUsesLocalSocksAndDirectProcessRule(t *testing.T) {
 	}
 }
 
-func TestRenderWithOverlayDNSMakesBypassesWinBeforeOverlayDNS(t *testing.T) {
+func TestRenderWithOverlayDNSPrecedesPublicSuffixBypasses(t *testing.T) {
 	t.Parallel()
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "fixtures", "dancevpn.subscription.plain.txt"))
@@ -236,6 +425,9 @@ func TestRenderWithOverlayDNSMakesBypassesWinBeforeOverlayDNS(t *testing.T) {
 		t.Fatalf("RenderWithOptions returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -277,15 +469,15 @@ func TestRenderWithOverlayDNSMakesBypassesWinBeforeOverlayDNS(t *testing.T) {
 		t.Fatalf("first dns rule_set = %#v, want proxy-exceptions", got)
 	}
 
-	secondRule := dnsRules[1].(map[string]any)
+	secondRule := dnsRules[2].(map[string]any)
 	if got, want := secondRule["server"], "dns-direct"; got != want {
-		t.Fatalf("second dns rule server = %#v, want %q", got, want)
+		t.Fatalf("public suffix dns rule server = %#v, want %q", got, want)
 	}
 	if got := secondRule["rule_set"]; !containsAnyString(got.([]any), "ru-direct") {
-		t.Fatalf("second dns rule_set = %#v, want ru-direct", got)
+		t.Fatalf("public suffix dns rule_set = %#v, want ru-direct", got)
 	}
 
-	overlayRule := dnsRules[2].(map[string]any)
+	overlayRule := dnsRules[1].(map[string]any)
 	if got, want := overlayRule["server"], "dns-overlay"; got != want {
 		t.Fatalf("overlay dns rule server = %#v, want %q", got, want)
 	}
@@ -337,6 +529,9 @@ func TestRenderNormalizesIPv4MappedUpstreamHost(t *testing.T) {
 		t.Fatalf("Render returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -371,6 +566,9 @@ func TestRenderSkipsUpstreamExcludeForDomainHost(t *testing.T) {
 		t.Fatalf("Render returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -424,6 +622,9 @@ func TestRenderKeepsDirectDNSForDomainUpstreamWithOverlayDNS(t *testing.T) {
 		t.Fatalf("RenderWithOptions returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -463,6 +664,9 @@ func TestRenderWithoutBypasses(t *testing.T) {
 		t.Fatalf("Render returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -503,6 +707,9 @@ func TestRenderAddsDirectRouteCIDRs(t *testing.T) {
 		t.Fatalf("Render returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -550,6 +757,9 @@ func TestRenderOrdersProxyExclusionsThenBypassesThenDirectCIDRs(t *testing.T) {
 	data, err := Render(cfg, profiles[0])
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
+	}
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
 	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
@@ -613,6 +823,9 @@ func TestRenderAppliesConfiguredSniffAndTLSClientOptions(t *testing.T) {
 		t.Fatalf("Render returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -639,7 +852,7 @@ func TestRenderAppliesConfiguredSniffAndTLSClientOptions(t *testing.T) {
 
 	route := root["route"].(map[string]any)
 	routeRules := route["rules"].([]any)
-	sniff := routeRules[1].(map[string]any)
+	sniff := routeRules[2].(map[string]any)
 	if got, want := sniff["action"], "sniff"; got != want {
 		t.Fatalf("sniff.action = %#v, want %#v", got, want)
 	}
@@ -679,6 +892,9 @@ func TestRenderCanDisableSniffRule(t *testing.T) {
 		t.Fatalf("Render returned error: %v", err)
 	}
 
+	if err := vpncore.ValidateSingBoxConfig(data); err != nil {
+		t.Fatalf("rendered config refused: %v", err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -819,7 +1035,7 @@ func TestRenderAWGFrontendLoopProtection(t *testing.T) {
 			rules := route["rules"].([]any)
 			first := rules[0].(map[string]any)
 			names := first["process_name"].([]any)
-			if first["outbound"] != "direct" || !slices.Contains(names, any("tun-wave")) || !slices.Contains(names, any("vless-tun")) {
+			if first["outbound"] != "direct" || !slices.Contains(names, any("tun-wave")) || !slices.Contains(names, any("vless-tun")) || !slices.Contains(names, any("openconnect")) {
 				t.Fatal("sidecar process bypass missing")
 			}
 			tun := root["inbounds"].([]any)[0].(map[string]any)

@@ -450,8 +450,72 @@ func gatewayURL(base, path string) (string, error) {
 	return strings.TrimRight(base, "/") + "/" + path, nil
 }
 
+func (c *GatewayClient) isDefaultTransport() bool {
+	return c.Endpoint == "" && c.HTTPClient == nil && c.S3PrimaryEndpoints == nil && c.S3FallbackEndpoints == nil
+}
+
+func workingProxyCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "tun-wave", "amnezia-working-proxy")
+}
+
+func (c *GatewayClient) loadCachedProxy() string {
+	c.mu.Lock()
+	p := c.workingProxy
+	c.mu.Unlock()
+	if p != "" || !c.isDefaultTransport() {
+		return p
+	}
+	path := workingProxyCachePath()
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	candidate := strings.TrimSpace(string(b))
+	if _, err := gatewayURL(candidate, "v1/config"); err != nil {
+		return ""
+	}
+	c.mu.Lock()
+	c.workingProxy = candidate
+	c.mu.Unlock()
+	return candidate
+}
+
+func (c *GatewayClient) saveCachedProxy(p string) {
+	c.mu.Lock()
+	c.workingProxy = p
+	c.mu.Unlock()
+	if !c.isDefaultTransport() {
+		return
+	}
+	path := workingProxyCachePath()
+	if path == "" {
+		return
+	}
+	if p == "" {
+		_ = os.Remove(path)
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0700)
+	_ = os.WriteFile(path, []byte(p), 0600)
+}
+
 func (c *GatewayClient) exchange(ctx context.Context, method, endpoint string, body []byte) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeout := 15 * time.Second
+	if c.HTTPClient == nil {
+		if method == http.MethodGet || strings.HasPrefix(endpoint, DefaultGatewayEndpoint) {
+			timeout = 3 * time.Second
+		} else {
+			timeout = 8 * time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -532,9 +596,7 @@ func (c *GatewayClient) call(ctx context.Context, creds GatewayCredentials, endp
 	if err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	proxy := c.workingProxy
-	c.mu.Unlock()
+	proxy := c.loadCachedProxy()
 	base := firstText(c.Endpoint, DefaultGatewayEndpoint)
 	if proxy != "" {
 		base = proxy
@@ -547,11 +609,7 @@ func (c *GatewayClient) call(ctx context.Context, creds GatewayCredentials, endp
 		return nil, WrapRefusal(CodeGatewayError, "gateway request cancelled", ctx.Err())
 	}
 	if proxy != "" {
-		c.mu.Lock()
-		if c.workingProxy == proxy {
-			c.workingProxy = ""
-		}
-		c.mu.Unlock()
+		c.saveCachedProxy("")
 		body, retry, err = c.attempt(ctx, firstText(c.Endpoint, DefaultGatewayEndpoint), endpoint, envelope, key, iv)
 		if !retry {
 			return body, err
@@ -597,9 +655,7 @@ func (c *GatewayClient) call(ctx context.Context, creds GatewayCredentials, endp
 				for _, p := range append(ordered, remaining...) {
 					body, retry, err = c.attempt(ctx, p, endpoint, envelope, key, iv)
 					if !retry {
-						c.mu.Lock()
-						c.workingProxy = p
-						c.mu.Unlock()
+						c.saveCachedProxy(p)
 						return body, err
 					}
 				}

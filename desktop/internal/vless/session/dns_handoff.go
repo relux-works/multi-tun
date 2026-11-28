@@ -72,15 +72,17 @@ func applySystemDNSHandoff(current *CurrentSession, options StartOptions) error 
 		return fmt.Errorf("no system DNS servers configured for DNS handoff")
 	}
 
-	if options.OverlayDNSActive {
-		if err := applyScutilDNSHandoff(current, options, dnsServers); err == nil {
-			return nil
-		} else {
-			appendSessionLog(*current, logLevelWarn, "dns_handoff_scutil_failed interface=%s err=%v\n", strings.TrimSpace(options.InterfaceName), err)
+	// A scoped TUN resolver alone leaves macOS's primary resolver on the LAN.
+	// Update the primary network service without changing overlay search domains.
+	if err := applyNetworkServiceDNSHandoff(current, dnsServers); err == nil {
+		return nil
+	} else {
+		appendSessionLog(*current, logLevelWarn, "dns_handoff_networksetup_failed interface=%s err=%v\n", strings.TrimSpace(options.InterfaceName), err)
+		if fallbackErr := applyScutilDNSHandoff(current, options, dnsServers); fallbackErr != nil {
+			return fmt.Errorf("network service DNS handoff failed: %v; scutil fallback failed: %w", err, fallbackErr)
 		}
 	}
-
-	return applyNetworkServiceDNSHandoff(current, dnsServers)
+	return nil
 }
 
 func applyScutilDNSHandoff(current *CurrentSession, options StartOptions, dnsServers []string) error {
@@ -186,7 +188,7 @@ func shouldApplySystemDNSHandoff(mode string, options StartOptions) bool {
 	if os.Getenv("VLESS_TUN_ENABLE_DNS_HANDOFF") == "0" {
 		return false
 	}
-	// Apply scutil DNS handoff on macOS TUN starts whenever system DNS servers
+	// Apply system DNS handoff on macOS TUN starts whenever system DNS servers
 	// are configured (both standalone and with corporate overlay DNS) so
 	// mDNSResponder routes lookups into the TUN instead of leaking to a LAN
 	// DHCP resolver on en0 (which can also return geo-poisoned IPs).

@@ -23,6 +23,7 @@ func resolveRenderOptions(mode string) singbox.RenderOptions {
 	return singbox.RenderOptions{
 		OverlayDNS: &singbox.OverlayDNS{
 			Domains:       append([]string(nil), overlay.Domains...),
+			BypassDomains: append([]string(nil), overlay.BypassDomains...),
 			Nameservers:   append([]string(nil), overlay.Nameservers...),
 			RouteExcludes: append([]string(nil), overlay.RouteExcludes...),
 		},

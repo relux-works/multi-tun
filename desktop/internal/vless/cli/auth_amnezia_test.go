@@ -969,7 +969,7 @@ func assertAWGFrontend(t *testing.T, cfg config.ProjectConfig) {
 		}
 	}
 	for _, rule := range doc.Route.Rules {
-		if reflect.DeepEqual(rule.ProcessNames, []string{"tun-wave", "vless-tun"}) {
+		if reflect.DeepEqual(rule.ProcessNames, []string{"tun-wave", "vless-tun", "openconnect"}) {
 			processes = true
 		}
 	}

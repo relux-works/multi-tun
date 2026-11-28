@@ -58,7 +58,7 @@ var (
 	failedStartProcessAliveOpenConnect   = ProcessAlive
 	failedStartCleanupTimeoutOpenConnect = 5 * time.Second
 	failedStartCleanupPollOpenConnect    = 50 * time.Millisecond
-	connectWithCookieOpenConnect         = connectWithCookie
+	connectWithCookieOpenConnect         = connectWithCookieTyped
 	authenticateOpenConnect              = authenticate
 	lookupHostOpenConnect                = net.LookupHost
 	systemLookupHostOpenConnect          = lookupHostViaSystemSourcesOpenConnect
@@ -164,6 +164,7 @@ type supplementalResolverSpec struct {
 }
 
 type authResult struct {
+	handle      string // Managed child capability; never part of authentication JSON.
 	Cookie      string `json:"cookie"`
 	Host        string `json:"host"`
 	ConnectURL  string `json:"connect_url"`
@@ -405,6 +406,24 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 
 	writeProgressf(options.ProgressWriter, "phase: connecting to %s", server)
 	pid, iface, err := connectWithCookieOpenConnect(auth, ocPath, scriptExec, pidFilePath, logFile, privilegedMode, helperCfg, options.ClientMimicry)
+	if err != nil && privilegedMode == PrivilegedModeHelper && (strings.TrimSpace(options.PrivilegedMode) == "" || strings.TrimSpace(options.PrivilegedMode) == PrivilegedModeAuto) && strings.Contains(err.Error(), "unsupported vpn core action") {
+		// Only an explicit old-daemon refusal permits a second launch through sudo.
+		// Transport failures can mean a child started, so they must never retry.
+		privilegedMode = PrivilegedModeSudo
+		if sudoErr := ensureSudoCredentials(); sudoErr != nil {
+			return ConnectResult{}, formatConnectError(sudoErr, logPath)
+		}
+		current.PrivilegedMode, current.HelperSocketPath = privilegedMode, ""
+		command = buildOpenConnectCommandPreview(ocPath, server, scriptExec, pidFilePath, privilegedMode, options.ClientMimicry)
+		current.Command = command
+		pid, iface, err = connectWithCookieOpenConnect(auth, ocPath, scriptExec, pidFilePath, logFile, privilegedMode, helperCfg, options.ClientMimicry)
+	}
+	current.Handle = auth.handle
+	if _, resolved, ok := strings.Cut(auth.Resolve, ":"); ok {
+		if ip := net.ParseIP(strings.Trim(resolved, "[]")); ip != nil {
+			current.GatewayIPs = []string{ip.String()}
+		}
+	}
 	if err != nil {
 		current.PID = pid
 		current.Interface = iface
@@ -456,6 +475,7 @@ func Connect(options ConnectOptions) (ConnectResult, error) {
 		return ConnectResult{}, withFailedStartCleanupError(err, cleanupErr)
 	}
 	writeProgressf(options.ProgressWriter, "phase: connected pid=%d interface=%s", current.PID, firstNonEmpty(current.Interface, "unknown"))
+	_ = reconcileTunWaveOpenConnect(context.Background(), "openconnect-start")
 
 	return ConnectResult{
 		SessionID:      current.ID,
@@ -3572,6 +3592,21 @@ func parseShellVariables(output string) map[string]string {
 	return result
 }
 
+func connectWithCookieTyped(auth *authResult, ocPath, script, pidFilePath string, logWriter io.Writer, privilegedMode string, helperCfg PrivilegedHelperConfig, clientMimicry ClientMimicry) (int, string, error) {
+	if privilegedMode == PrivilegedModeHelper {
+		pid, handle, err := vpnCoreStartOpenConnect(helperCfg, typedOpenConnectStartRequest(auth, script, pidFilePath, clientMimicry), currentLogPath(logWriter))
+		if err != nil {
+			return 0, "", err
+		}
+		auth.handle = handle
+		return pid, "", nil
+	}
+
+	return connectWithCookie(auth, ocPath, script, pidFilePath, logWriter, privilegedMode, helperCfg, clientMimicry)
+}
+
+// connectWithCookie retains the legacy launch seam for compatibility tests.
+// Production helper launches go through connectWithCookieTyped.
 func connectWithCookie(auth *authResult, ocPath, script, pidFilePath string, logWriter io.Writer, privilegedMode string, helperCfg PrivilegedHelperConfig, clientMimicry ClientMimicry) (int, string, error) {
 	connectURL := auth.ConnectURL
 	if connectURL == "" {
@@ -3707,6 +3742,15 @@ func buildOpenConnectCommandPreview(ocPath, server, script, pidFilePath string, 
 		"--protocol=anyconnect",
 		"--background",
 	}, clientProfile, localHostname, clientMimicry)
+	if privilegedMode == PrivilegedModeHelper {
+		filtered := command[:0]
+		for _, arg := range command {
+			if arg != "--background" {
+				filtered = append(filtered, arg)
+			}
+		}
+		command = filtered
+	}
 	if strings.TrimSpace(pidFilePath) != "" {
 		command = append(command, "--pid-file="+pidFilePath)
 	}
@@ -4148,7 +4192,13 @@ func cleanupFailedOpenConnectStart(current CurrentSession) error {
 		if !alive {
 			return nil
 		}
-		if err := failedStartSignalOpenConnect(current.PID, signal, current.PrivilegedMode, current.HelperSocketPath); err != nil {
+		var signalErr error
+		if current.PrivilegedMode == PrivilegedModeHelper && current.Handle != "" {
+			signalErr = signalCurrentOpenConnectSession(current, signal, current.PrivilegedMode)
+		} else {
+			signalErr = failedStartSignalOpenConnect(current.PID, signal, current.PrivilegedMode, current.HelperSocketPath)
+		}
+		if err := signalErr; err != nil {
 			signalErrors = append(signalErrors, fmt.Sprintf("%s: %v", signal, err))
 		}
 

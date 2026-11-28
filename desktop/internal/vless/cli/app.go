@@ -68,6 +68,8 @@ func (a *App) Run(args []string) int {
 		return a.runRun(args[1:])
 	case "reconnect":
 		return a.runReconnect(args[1:])
+	case "reconcile":
+		return a.runReconcile(args[1:])
 	case "status":
 		return a.runStatus(args[1:])
 	case "diagnose":
@@ -80,6 +82,8 @@ func (a *App) Run(args []string) int {
 		return a.runRender(args[1:])
 	case "failclosed":
 		return a.runFailClosed(args[1:])
+	case "guard":
+		return a.runGuard(args[1:])
 	default:
 		fmt.Fprintf(a.stderr, "unknown command %q\n\n", args[0])
 		a.printUsage()
@@ -559,12 +563,14 @@ func (a *App) printUsage() {
 	fmt.Fprintf(a.stdout, "  %s set-current [--config path] [--server name | server [profile]] [--profile name]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s start [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s reconnect [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh] [--timeout duration] [--force]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s reconcile [--config path] [--force] [--reason label]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s status [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--refresh]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s diagnose [tunnel] [--config path]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s diagnose config [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s stop [--config path] [server] [--timeout duration] [--force]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s render [--config path] [--server name | server [profile]] [--profile name] [--selector selector] [--transport tcp|grpc] [--output path] [--refresh]\n", a.programName)
-	fmt.Fprintf(a.stdout, "  %s failclosed status|apply|off [--config path]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s failclosed status|apply|on|off [--config path]\n", a.programName)
+	fmt.Fprintf(a.stdout, "  %s guard on|off|status [--config path]\n", a.programName)
 	fmt.Fprintf(a.stdout, "  %s auth amnezia [--stdin | --clipboard | --check | --delete] [--service name] [--fallback-service name] [--account name] [--allow-placeholder]\n", a.programName)
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Aliases:")

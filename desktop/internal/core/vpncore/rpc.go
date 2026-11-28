@@ -27,20 +27,21 @@ var (
 )
 
 type Request struct {
-	Token       string   `json:"token,omitempty"`
-	Action      string   `json:"action"`
-	ConfigJSON  []byte   `json:"config_json,omitempty"`
-	Stdin       string   `json:"stdin,omitempty"`
-	LogMaxLines int      `json:"log_max_lines,omitempty"`
-	Handle      string   `json:"handle,omitempty"`
-	Signal      string   `json:"signal,omitempty"`
-	SetPGID     bool     `json:"setpgid,omitempty"`
-	Service     string   `json:"service,omitempty"`
-	Servers     []string `json:"servers,omitempty"`
-	Interface   string   `json:"interface,omitempty"`
-	Filter      []string `json:"filter,omitempty"`
-	ApplePCAPNG bool     `json:"apple_pcapng,omitempty"`
-	RunAsUser   bool     `json:"run_as_user,omitempty"`
+	OpenConnect *OpenConnectStartRequest `json:"openconnect,omitempty"`
+	Token       string                   `json:"token,omitempty"`
+	Action      string                   `json:"action"`
+	ConfigJSON  []byte                   `json:"config_json,omitempty"`
+	Stdin       string                   `json:"stdin,omitempty"`
+	LogMaxLines int                      `json:"log_max_lines,omitempty"`
+	Handle      string                   `json:"handle,omitempty"`
+	Signal      string                   `json:"signal,omitempty"`
+	SetPGID     bool                     `json:"setpgid,omitempty"`
+	Service     string                   `json:"service,omitempty"`
+	Servers     []string                 `json:"servers,omitempty"`
+	Interface   string                   `json:"interface,omitempty"`
+	Filter      []string                 `json:"filter,omitempty"`
+	ApplePCAPNG bool                     `json:"apple_pcapng,omitempty"`
+	RunAsUser   bool                     `json:"run_as_user,omitempty"`
 	// FailClosed is accepted only by failclosed.apply.
 	FailClosed *FailClosedRequest `json:"fail_closed,omitempty"`
 }

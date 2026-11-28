@@ -59,16 +59,32 @@ func TestLegacyHelperEntrypointsFailClosed(t *testing.T) {
 	}
 }
 
-func TestExplicitHelperLaunchUsesDocumentedSudoTransition(t *testing.T) {
-	// This proves PR B does not call a generic daemon launch: an available helper selection resolves to the unchanged sudo lane until PR C.
-	if os.Geteuid() == 0 {
-		t.Skip("root resolves privileged launch directly")
-	}
+func TestExplicitAndAutoHelperLaunchUseTypedHelper(t *testing.T) {
+	// An available typed helper serves both explicit and automatic selections.
 	previous := vpnCoreAvailableOpenConnect
 	vpnCoreAvailableOpenConnect = func(vpncore.ServiceConfig) bool { return true }
 	t.Cleanup(func() { vpnCoreAvailableOpenConnect = previous })
-	mode, _, err := resolvePrivilegedMode(PrivilegedModeHelper)
-	if err != nil || mode != PrivilegedModeSudo {
-		t.Fatalf("mode=%q err=%v, want sudo transition", mode, err)
+	for _, selected := range []string{PrivilegedModeHelper, PrivilegedModeAuto, ""} {
+		mode, _, err := resolvePrivilegedMode(selected)
+		if err != nil || mode != PrivilegedModeHelper {
+			t.Fatalf("selected=%q mode=%q err=%v, want helper", selected, mode, err)
+		}
+	}
+}
+
+func TestUnavailableTypedHelperPreservesExplicitRefusal(t *testing.T) {
+	previous := vpnCoreAvailableOpenConnect
+	vpnCoreAvailableOpenConnect = func(vpncore.ServiceConfig) bool { return false }
+	t.Cleanup(func() { vpnCoreAvailableOpenConnect = previous })
+	if _, _, err := resolvePrivilegedMode(PrivilegedModeHelper); err == nil {
+		t.Fatal("explicit unavailable helper silently downgraded")
+	}
+	mode, _, err := resolvePrivilegedMode(PrivilegedModeAuto)
+	expected := PrivilegedModeSudo
+	if os.Geteuid() == 0 {
+		expected = PrivilegedModeDirect
+	}
+	if err != nil || mode != expected {
+		t.Fatalf("automatic unavailable helper mode=%q err=%v", mode, err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 type OverlayDNS struct {
 	Domains       []string
+	BypassDomains []string
 	Nameservers   []string
 	RouteExcludes []string
 }
@@ -59,6 +60,7 @@ func RenderAWGFrontendWithOptions(cfg config.ProjectConfig, profile model.Profil
 		UseUpstreamDirectDNS:  upstreamHostNeedsDirectDNS(profile),
 		UpstreamRouteExcludes: upstreamRouteExcludeCIDRs(profile),
 		DirectProcessNames:    cfg.AWGProcessNames(),
+		AWG:                   true,
 	})
 }
 
@@ -67,6 +69,7 @@ type proxyRenderBackend struct {
 	UseUpstreamDirectDNS  bool
 	UpstreamRouteExcludes []string
 	DirectProcessNames    []string
+	AWG                   bool
 }
 
 func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, options RenderOptions, backend proxyRenderBackend) ([]byte, error) {
@@ -77,6 +80,11 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 	overlayDNS := normalizeOverlayDNS(options.OverlayDNS)
 	useOverlayDNS := mode == config.RenderModeTun && overlayDNS != nil
 	proxyResolver := cfg.ProxyResolver()
+	if backend.AWG && (proxyResolver.Address == "1.1.1.1" || proxyResolver.Address == "8.8.8.8") {
+		proxyResolver.Address = "8.8.4.4"
+		proxyResolver.Port = 853
+		proxyResolver.TLSServerName = "dns.google"
+	}
 
 	if backend.Outbound == nil {
 		return nil, fmt.Errorf("proxy outbound is required")
@@ -89,6 +97,7 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 	useDirectRoutes := len(directRoutes) > 0
 	useBypassDNSRules := mode == config.RenderModeTun && useBypassRules
 	useBypassExcludeDNSRules := mode == config.RenderModeTun && useBypassExcludes
+	useOverlayBypassDNSRules := useOverlayDNS && len(overlayDNS.BypassDomains) > 0
 	directDomainResolver := "dns-direct"
 	if useOverlayDNS {
 		directDomainResolver = "dns-proxy"
@@ -108,7 +117,7 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 			},
 		},
 	}
-	if !useOverlayDNS || useBypassDNSRules || useUpstreamDirectDNS {
+	if !useOverlayDNS || useBypassDNSRules || useUpstreamDirectDNS || useOverlayBypassDNSRules {
 		dnsServers = append([]any{
 			map[string]any{
 				"type":   "local",
@@ -126,23 +135,42 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 			"detour":      "direct",
 		})
 	}
-	dnsRules := []any{
-		map[string]any{
-			"action": "route",
-			"server": "dns-proxy",
-		},
+	dnsRules := []any{}
+	if useBypassExcludeDNSRules {
+		dnsRules = append(dnsRules, map[string]any{
+			"rule_set": []string{"proxy-exceptions"},
+			"action":   "route",
+			"server":   "dns-proxy",
+		})
 	}
 	if useOverlayDNS {
-		dnsRules = append([]any{
-			map[string]any{
-				"domain_suffix": overlayDNS.Domains,
+		if useOverlayBypassDNSRules {
+			dnsRules = append(dnsRules, map[string]any{
+				"domain_suffix": overlayDNS.BypassDomains,
 				"action":        "route",
-				"server":        "dns-overlay",
-			},
-		}, dnsRules...)
+				"server":        "dns-direct",
+			})
+		}
+		dnsRules = append(dnsRules, map[string]any{
+			"domain_suffix": overlayDNS.Domains,
+			"action":        "route",
+			"server":        "dns-overlay",
+		})
 	}
+	if useBypassDNSRules {
+		dnsRules = append(dnsRules, map[string]any{
+			"rule_set": []string{"ru-direct"},
+			"action":   "route",
+			"server":   "dns-direct",
+		})
+	}
+	dnsRules = append(dnsRules, map[string]any{"action": "route", "server": "dns-proxy"})
 	routeRuleSet := []any{}
-	routeRules := append(processNameDirectRules(backend.DirectProcessNames), baseRouteRules(cfg, mode)...)
+	directProcessNames := append([]string(nil), backend.DirectProcessNames...)
+	if mode == config.RenderModeTun {
+		directProcessNames = append(directProcessNames, "openconnect")
+	}
+	routeRules := append(processNameDirectRules(directProcessNames), baseRouteRules(cfg, mode)...)
 
 	if len(upstreamRouteExcludes) > 0 {
 		routeRuleSet = append(routeRuleSet, map[string]any{
@@ -161,25 +189,6 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 		})
 	}
 
-	if useBypassDNSRules {
-		dnsRules = append([]any{
-			map[string]any{
-				"rule_set": []string{"ru-direct"},
-				"action":   "route",
-				"server":   "dns-direct",
-			},
-		}, dnsRules...)
-	}
-	if useBypassExcludeDNSRules {
-		dnsRules = append([]any{
-			map[string]any{
-				"rule_set": []string{"proxy-exceptions"},
-				"action":   "route",
-				"server":   "dns-proxy",
-			},
-		}, dnsRules...)
-	}
-
 	if useBypassExcludes {
 		routeRuleSet = append([]any{
 			map[string]any{
@@ -196,6 +205,22 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 			"rule_set": []string{"proxy-exceptions"},
 			"action":   "route",
 			"outbound": "proxy",
+		})
+	}
+
+	if useOverlayDNS {
+		domains := append(append([]string(nil), overlayDNS.Domains...), overlayDNS.BypassDomains...)
+		routeRuleSet = append(routeRuleSet, map[string]any{
+			"type": "inline",
+			"tag":  "overlay-direct",
+			"rules": []any{
+				map[string]any{"domain_suffix": normalizeOverlayDomains(domains)},
+			},
+		})
+		routeRules = append(routeRules, map[string]any{
+			"rule_set": []string{"overlay-direct"},
+			"action":   "route",
+			"outbound": "direct",
 		})
 	}
 
@@ -237,6 +262,23 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 	if err != nil {
 		return nil, err
 	}
+	dnsStrategy := "prefer_ipv4"
+	if backend.AWG {
+		dnsStrategy = "ipv4_only"
+		if len(inbounds) > 0 {
+			if inb, ok := inbounds[0].(map[string]any); ok {
+				var v4 []string
+				for _, a := range cfg.TunAddresses() {
+					if p, err := netip.ParsePrefix(strings.TrimSpace(a)); err == nil && p.Addr().Is4() {
+						v4 = append(v4, a)
+					}
+				}
+				if len(v4) > 0 {
+					inb["address"] = v4
+				}
+			}
+		}
+	}
 
 	root := map[string]any{
 		"log": map[string]any{
@@ -246,7 +288,7 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 			"servers":         dnsServers,
 			"rules":           dnsRules,
 			"final":           "dns-proxy",
-			"strategy":        "prefer_ipv4",
+			"strategy":        dnsStrategy,
 			"reverse_mapping": true,
 		},
 		"inbounds": inbounds,
@@ -266,7 +308,7 @@ func renderWithProxyOutbound(cfg config.ProjectConfig, profile model.Profile, op
 			"auto_detect_interface": true,
 			"default_domain_resolver": map[string]any{
 				"server":   "dns-proxy",
-				"strategy": "prefer_ipv4",
+				"strategy": dnsStrategy,
 			},
 			"rule_set": routeRuleSet,
 			"rules":    routeRules,
@@ -286,19 +328,7 @@ func normalizeOverlayDNS(overlay *OverlayDNS) *OverlayDNS {
 		return nil
 	}
 
-	domains := make([]string, 0, len(overlay.Domains))
-	seenDomains := map[string]struct{}{}
-	for _, domain := range overlay.Domains {
-		domain = strings.ToLower(strings.TrimSpace(domain))
-		if domain == "" {
-			continue
-		}
-		if _, ok := seenDomains[domain]; ok {
-			continue
-		}
-		seenDomains[domain] = struct{}{}
-		domains = append(domains, domain)
-	}
+	domains := normalizeOverlayDomains(overlay.Domains)
 
 	nameservers := make([]string, 0, len(overlay.Nameservers))
 	seenNameservers := map[string]struct{}{}
@@ -334,9 +364,27 @@ func normalizeOverlayDNS(overlay *OverlayDNS) *OverlayDNS {
 
 	return &OverlayDNS{
 		Domains:       domains,
+		BypassDomains: normalizeOverlayDomains(overlay.BypassDomains),
 		Nameservers:   nameservers,
 		RouteExcludes: routeExcludes,
 	}
+}
+
+func normalizeOverlayDomains(values []string) []string {
+	var domains []string
+	seen := map[string]struct{}{}
+	for _, domain := range values {
+		domain = strings.ToLower(strings.Trim(strings.TrimSpace(domain), "."))
+		if domain == "" {
+			continue
+		}
+		if _, ok := seen[domain]; ok {
+			continue
+		}
+		seen[domain] = struct{}{}
+		domains = append(domains, domain)
+	}
+	return domains
 }
 
 func upstreamRouteExcludeCIDRs(profile model.Profile) []string {

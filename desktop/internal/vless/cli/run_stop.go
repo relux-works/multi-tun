@@ -921,6 +921,11 @@ func effectiveStartRefresh(cfg config.ProjectConfig, options startOptions) bool 
 	if options.refreshSet {
 		return options.refresh
 	}
+	if cfg.SourceMode() == config.SourceModeAmnezia && strings.TrimSpace(cfg.CacheDir) != "" {
+		if snap, err := subscription.LoadCache(cfg.CacheDir); err == nil && len(snap.Profiles) > 0 {
+			return false
+		}
+	}
 	return true
 }
 

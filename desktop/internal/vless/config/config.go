@@ -485,6 +485,29 @@ func SetCurrent(path string, options SelectionOptions) (ProjectConfig, Effective
 	return effective, selection, resolvedPath, nil
 }
 
+func SetFailClosedEnabled(path string, enabled bool) (ProjectConfig, string, error) {
+	resolvedPath, err := ResolveLoadPath(path)
+	if err != nil {
+		return ProjectConfig{}, "", err
+	}
+	cfg, err := Load(resolvedPath)
+	if err != nil {
+		return ProjectConfig{}, "", err
+	}
+	if cfg.FailClosed == nil {
+		cfg.FailClosed = &FailClosedConfig{}
+	}
+	if len(cfg.FailClosed.Services) == 0 {
+		cfg.FailClosed.Services = []FailClosedServiceRef{{Name: "codex"}, {Name: "claude"}}
+	}
+	val := enabled
+	cfg.FailClosed.Enabled = &val
+	if err := writeJSON(resolvedPath, cfg); err != nil {
+		return ProjectConfig{}, "", err
+	}
+	return cfg, resolvedPath, nil
+}
+
 func (c ProjectConfig) withDefaultServerProfile(options SetupOptions) ProjectConfig {
 	serverName := firstNonEmpty(options.ServerName, "default")
 	profileName := firstNonEmpty(options.ConfigProfile, "default")

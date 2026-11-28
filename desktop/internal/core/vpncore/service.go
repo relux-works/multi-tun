@@ -608,7 +608,7 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 		_ = writeResponse(conn, Response{Error: err.Error()})
 		return
 	}
-	if logFile != nil && request.Action != "singbox.start" {
+	if logFile != nil && request.Action != "singbox.start" && request.Action != "openconnect.start" {
 		defer logFile.Close()
 	}
 
@@ -652,6 +652,16 @@ func (d *serviceDaemon) handleConn(conn *net.UnixConn, requestID uint64) {
 		} else {
 			response.PID = pid
 			response.Handle = handle
+		}
+	case "openconnect.start":
+		pid, handle, err := d.handleOpenConnectStart(request, logFile)
+		if err != nil {
+			if logFile != nil {
+				_ = logFile.Close()
+			}
+			responseError(&response, err)
+		} else {
+			response.PID, response.Handle = pid, handle
 		}
 	case "dns.scutil":
 		responseError(&response, d.handleSCUtil(request))
@@ -828,10 +838,10 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 		return Request{}, nil, err
 	}
 
-	wantsLog := request.Action == "singbox.start"
+	wantsLog := request.Action == "singbox.start" || request.Action == "openconnect.start"
 	if wantsLog && len(receivedFDs) != 1 {
 		closeFDs()
-		return Request{}, nil, errors.New("singbox.start requires exactly one log file descriptor")
+		return Request{}, nil, fmt.Errorf("%s requires exactly one log file descriptor", request.Action)
 	}
 	if !wantsLog && len(receivedFDs) != 0 {
 		closeFDs()
@@ -860,11 +870,19 @@ func readRequest(conn *net.UnixConn) (Request, *os.File, error) {
 
 func validateRequestShape(request Request) error {
 	unexpected := false
+	if request.OpenConnect != nil && request.Action != "openconnect.start" {
+		return errors.New("openconnect fields are only accepted by openconnect.start")
+	}
 	if request.FailClosed != nil && request.Action != "failclosed.apply" {
 		return fmt.Errorf("vpn core action %q contains fields outside its typed schema", request.Action)
 	}
 	onlyAction := len(request.ConfigJSON) != 0 || request.Stdin != "" || request.LogMaxLines != 0 || request.Handle != "" || request.Signal != "" || request.SetPGID || request.Service != "" || len(request.Servers) != 0 || request.Interface != "" || len(request.Filter) != 0 || request.ApplePCAPNG || request.RunAsUser
 	switch request.Action {
+	case "openconnect.start":
+		if request.OpenConnect == nil {
+			return errors.New("openconnect.start requires openconnect options")
+		}
+		unexpected = onlyAction
 	case "failclosed.apply":
 		if request.FailClosed == nil || len(request.FailClosed.Table) == 0 || len(request.FailClosed.Interfaces) == 0 {
 			return errors.New("failclosed.apply needs fail_closed interfaces and a non-empty table")
@@ -910,7 +928,7 @@ func validateRequestShape(request Request) error {
 
 func knownAction(action string) bool {
 	switch action {
-	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal",
+	case "ping", "maintenance.drain", "maintenance.undrain", "maintenance.renew", "singbox.start", "openconnect.start", "dns.scutil", "dns.networksetup", "resolver.cleanup", "tcpdump.start", "signal",
 		"failclosed.apply", "failclosed.clear", "failclosed.status":
 		return true
 	default:

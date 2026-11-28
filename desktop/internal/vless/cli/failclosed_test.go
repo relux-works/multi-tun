@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,9 +50,12 @@ func withFailClosedFakes(t *testing.T, f *fcFakes, ifs []ifaceInfo, lookup map[s
 		}
 		return out, nil
 	}
+	var tunnelMu sync.Mutex
 	failClosedInterfacesCLI = func() ([]ifaceInfo, error) { return ifs, nil }
 	failClosedTunnelLookupCLI = func(_ context.Context, server netip.AddrPort, host string) ([]netip.Addr, error) {
+		tunnelMu.Lock()
 		f.tunnelServer = server
+		tunnelMu.Unlock()
 		raw, ok := lookup["tunnel:"+host]
 		if !ok {
 			return nil, errors.New("no such host")
